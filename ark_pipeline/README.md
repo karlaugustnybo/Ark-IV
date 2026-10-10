@@ -15,6 +15,9 @@ registration; `sources_acquire` manages manifests, validation and snapshots.
 `sources_download_adm2`, `sources_download_iucn`, and
 `sources_download_goat.mjs` are provider-specific download helpers.
 
+`sources_fetch_iucn_details` retrieves queued exact-ID evidence into private
+outputs; retrieval never merges taxonomic identities.
+
 Commands: `just download`, `just update`, `just data-status`.
 
 ## 02 — Resolve taxonomy

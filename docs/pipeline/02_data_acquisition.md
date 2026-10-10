@@ -100,7 +100,7 @@ The coordinator:
 6. Automatically validates and registers a newly staged authorized IUCN
    release.
 
-If `IUCN_REDLIST_KEY` is configured, `just update` also refreshes the optional
+If `IUCN_REDLIST_API_KEY` (or the legacy `IUCN_REDLIST_KEY`) is configured, `just update` also refreshes the optional
 IUCN API assessment catalogue used to monitor Red List versions. Without that
 token, the checked-in IUCN release remains the update boundary and the operator
 must compare it with the release shown on IUCN's website before changing the
@@ -128,3 +128,29 @@ registered, both commands report it as `current` without network transfer.
 Interrupted or invalid downloads never replace a working manifest. Rerunning
 the same command resumes the workflow from its recorded state and reports one
 consolidated status for all required sources.
+
+## Offline-verifiable acquisition safeguards
+
+The GoaT exporter requests native Red List and sequencing/sample attributes,
+retains field provenance separately from values, and checks unique IDs and a
+stable total before publishing. Page checkpoints include request identity;
+incompatible requests require an explicit restart. Interrupted runs retain
+committed pages and the previously selected output.
+
+The optional IUCN catalogue requires exact unique-row reconciliation against a
+stable advertised total for each kingdom. Early empty pages, overshoot, repeated
+pages, changing totals, or release drift abort before replacing the selected
+catalogue. Without an advertised total, an empty page terminates pagination.
+Advertised totals remain in metadata; complete current-release catalogues remain
+reusable under metadata schema 2; legacy completion metadata is refreshed because
+it does not prove total reconciliation. Versioned public inventories also check required filenames and expected
+sizes, reusing checksum-verified files when the inventory grows at one release.
+
+`sources_fetch_iucn_details` (invoked with `uv run python -m
+ark_pipeline.cli.sources_fetch_iucn_details`) takes `--queue /path/to/queue.json`
+and `--output-dir /path/to/private/evidence` and fetches explicitly queued `sis_ids` and
+`assessment_ids`. Add `--include-latest-global` to fetch latest global assessments
+only when the returned SIS identity agrees. Cached responses must match both
+endpoint and release. Missing IDs remain explicit; authentication errors and
+release drift abort. Retrieval does not reconcile taxonomic identities, and all
+responses and reports remain private under the data policy.
