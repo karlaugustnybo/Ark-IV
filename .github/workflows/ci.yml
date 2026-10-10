@@ -37,6 +37,9 @@ jobs:
         working-directory: frontend
         run: bun install --frozen-lockfile
 
+      - name: Configure data-free frontend checks
+        run: cp frontend/.env.example frontend/.env
+
       - name: Check frontend types and Svelte
         working-directory: frontend
         run: bun run check
