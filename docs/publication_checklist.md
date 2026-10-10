@@ -5,11 +5,11 @@ public data snapshot.
 
 ## Required before the next public push
 
-- [x] Select `AGPL-3.0-only`, add the official root `LICENSE`, and declare it in
+- [x] Select `CC0-1.0`, add the official root `LICENSE`, and declare it in
   both package manifests.
-- [x] Record agreement from every existing copyright holder—at minimum, confirm
-  Daniel Jensen's initial contribution—before representing all existing code as
-  AGPL-licensed.
+- [x] Record agreement from every existing copyright holder to dedicate their
+  contribution to the public domain under CC0-1.0 before representing all
+  existing code as CC0-licensed.
 - [ ] For a binary, container, or hosted frontend release, generate and retain
   the third-party software notices for the exact resolved dependency set.
 - [x] Confirm that every tutorial MP4 and image was created by the contributors
@@ -19,8 +19,8 @@ public data snapshot.
 - [ ] Run `just release-history-check` and investigate any affected ref before
   every public push.
 - [ ] Compare current provider terms with `DATA_POLICY.md` and `NOTICE.md`.
-- [ ] Confirm that every public deployment offers the corresponding source for
-  its running version through the persistent Source link required by AGPL §13.
+- [ ] Confirm that every public deployment links to the corresponding source
+  for its running version through the persistent Source link in the footer.
 
 ## Resolved public-history incident
 

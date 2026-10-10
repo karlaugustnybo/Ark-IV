@@ -50,3 +50,18 @@ data/**
 app/static/data/boundary-geometry/
 # Installed global ADM2 catalogues point to an ignored, versioned local build.
 app/static/data/adm2-catalogs
+
+# Private execution, scraped content, secrets and research outputs.
+/.firecrawl/
+/.kilo/
+/sandbox/**/results/
+/sandbox/**/receipts/
+/sandbox/**/_cloud_storage/
+/sandbox/**/wandb/
+/sandbox/**/archive/
+/artifacts/
+/results/
+/receipts/
+/.codex/
+/notebooks/__marimo__/
+/config/iucn_reviewed_ecosystem_evidence.json
