@@ -67,6 +67,25 @@ class IndexedReleaseTests(unittest.TestCase):
         self.git("rm", "--cached", "--", "LICENSE")
         self.assertTrue(any("missing required indexed" in error for error in self.errors()))
 
+    def test_intent_to_add_cannot_satisfy_required_document(self):
+        self.git("rm", "--cached", "--", "LICENSE")
+        self.git("add", "--intent-to-add", "--", "LICENSE")
+        tree = self.git("write-tree").decode().strip()
+        self.assertNotIn(b"LICENSE", self.git("ls-tree", "-r", "--name-only", tree).splitlines())
+        errors, count, _ = guard.index_errors()
+        self.assertTrue(any("intent-to-add" in error and "LICENSE" in error for error in errors))
+        self.assertTrue(any("missing required indexed" in error and "LICENSE" in error for error in errors))
+        self.assertEqual(count, len(guard.REQUIRED_FILES) - 1)
+
+    def test_ordinary_empty_staged_document_is_in_prospective_tree(self):
+        self.write("LICENSE", b"")
+        self.git("add", "--", "LICENSE")
+        tree = self.git("write-tree").decode().strip()
+        self.assertIn(b"LICENSE", self.git("ls-tree", "-r", "--name-only", tree).splitlines())
+        errors, count, _ = guard.index_errors()
+        self.assertEqual(errors, [])
+        self.assertEqual(count, len(guard.REQUIRED_FILES))
+
     def test_indexed_symlinks_rejected_for_existing_and_missing_targets(self):
         for target in ("LICENSE", "absent"):
             with self.subTest(target=target):

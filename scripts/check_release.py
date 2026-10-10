@@ -158,7 +158,16 @@ def index_errors() -> tuple[list[str], int, int]:
     errors: list[str] = []
     relative_paths: set[str] = set()
     count = total_bytes = 0
-    for raw in git_output("ls-files", "--stage", "-z").split(b"\0"):
+    entries = [raw for raw in git_output("ls-files", "--stage", "-z").split(b"\0") if raw]
+    # Intent-to-add has a stage-0 empty blob like a real empty file, but Git
+    # excludes it from write-tree. Ask Git for the prospective tree rather
+    # than infer inclusion from blob contents or implementation-specific flags.
+    # Unmerged entries prevent tree construction and are rejected below.
+    prospective_paths: set[bytes] | None = None
+    if all(raw.split(b"\t", 1)[0].endswith(b" 0") for raw in entries):
+        tree = git_output("write-tree").decode("ascii").strip()
+        prospective_paths = set(git_output("ls-tree", "-r", "--name-only", "-z", tree).split(b"\0"))
+    for raw in entries:
         if not raw:
             continue
         metadata, raw_path = raw.split(b"\t", 1)
@@ -167,6 +176,9 @@ def index_errors() -> tuple[list[str], int, int]:
         errors.extend(path_errors(relative))
         if stage != "0":
             errors.append(f"unresolved index entry requires release review: {relative}")
+            continue
+        if prospective_paths is not None and raw_path not in prospective_paths:
+            errors.append(f"intent-to-add entry is absent from prospective commit: {relative}")
             continue
         count += 1
         if mode not in {"100644", "100755"}:

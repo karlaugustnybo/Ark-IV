@@ -62,7 +62,7 @@
     </div><div class="section-divider"><span>#</span></div></section>
 
     <section class="tutorial-section"><div class="tutorial-subsection layout-single-column is-visible">
-      <div class="about-content"><h2>Licences and credits</h2><p>Ark-IV application code is available under <a href="https://github.com/karlaugustnybo/DIKUs-Ark/blob/main/LICENSE" target="_blank" rel="noreferrer">AGPL-3.0-only</a>. That code licence does not grant permission to redistribute a dataset. The public code release excludes IUCN and EDGE rows, global distributions, and generated serving databases.</p></div>
+      <div class="about-content"><h2>Licences and credits</h2><p>Ark-IV application code is dedicated to the public domain under <a href="https://github.com/karlaugustnybo/DIKUs-Ark/blob/main/LICENSE" target="_blank" rel="noreferrer">CC0-1.0</a>. That code dedication does not grant permission to redistribute a dataset. The public code release excludes IUCN and EDGE rows, global distributions, and generated serving databases.</p></div>
       <ul class="source-ledger">
         <li><span class="source-index">IUCN</span><div><strong>IUCN 2026, Red List version 2026-1</strong><p>Used under the <a href="https://www.iucnredlist.org/terms/terms-of-use" target="_blank" rel="noreferrer">IUCN Red List Terms of Use</a>; raw, tabular, and spatial data are not bundled. Browser-delivered derivatives and APIs require a separate publication review.</p></div></li>
         <li><span class="source-index">HYDRO</span><div><strong><a href="https://www.hydrosheds.org/products/hydrobasins" target="_blank" rel="noreferrer">HydroBASINS v1c</a></strong><p>Standard level 1–12 basin geometry from HydroSHEDS. Provider terms and attribution apply to basin-derived products.</p></div></li>

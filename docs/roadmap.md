@@ -145,7 +145,7 @@ downloads. Derived-data rebuilding and publication remain separate operations.
 **Priority:** P0 · **Status:** Proposed
 
 Keep the complete global map, species highlighting, cell details, and table
-features in the public AGPL codebase without bundling restricted inputs or
+features in the public CC0-1.0 codebase without bundling restricted inputs or
 generated serving data. A normal clone should run immediately with a small,
 clearly labelled synthetic data pack, while authorized users can construct the
 real global profile from files they obtained directly from the providers.
