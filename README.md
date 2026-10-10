@@ -1,6 +1,6 @@
 # Ark-IV
 
-[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
+[![License: CC0 1.0](https://img.shields.io/badge/License-CC0_1.0-lightgrey.svg)](LICENSE)
 
 Ark-IV is an interactive conservation-priority map that combines extinction
 risk, DNA-sequencing evidence, evolutionary distinctiveness, and global species
@@ -266,12 +266,12 @@ retrospective.
 
 ## Licensing
 
-Ark-IV's application code is licensed under the GNU Affero General Public
-License v3.0 only (`AGPL-3.0-only`); see [LICENSE](LICENSE). Operators that
-modify the application and make it available over a network must offer users
-the corresponding source for that running version under the AGPL.
+Ark-IV's application code is dedicated to the public domain under the CC0 1.0
+Universal Public Domain Dedication (`CC0-1.0`); see [LICENSE](LICENSE). You may
+copy, modify, distribute, and use the code for any purpose, without asking
+permission.
 
 The code licence does **not** apply to source datasets or generated data
 artifacts. Those retain their own terms and required credits; see `NOTICE.md`
-and `DATA_POLICY.md`. In particular, AGPL does not grant permission to publish
+and `DATA_POLICY.md`. In particular, CC0 does not grant permission to publish
 IUCN, EDGE, or other restricted data alongside the application.

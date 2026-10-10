@@ -3,7 +3,7 @@ name = "ark-iv"
 version = "0.1.0"
 description = "Priority map for the EBP."
 readme = "README.md"
-license = "AGPL-3.0-only"
+license = "CC0-1.0"
 requires-python = ">=3.13"
 dependencies = [
     "duckdb>=1.5.2",
