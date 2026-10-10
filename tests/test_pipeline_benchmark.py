@@ -252,7 +252,11 @@ class BenchmarkRunnerTests(unittest.TestCase):
             options = ["--root", str(root), "--sample", str(sample), "--output-root", str(output)]
             for key in ("admin0", "admin1", "municipality", "eez", "conservation-framework"):
                 options += ["--" + key, str(boundary)]
-            with patch("ark_pipeline.cli.benchmark_pipeline.run_stage", return_value={"name": "source_scan", "status": "failed", "wall_seconds": 1, "log": "failure.log"}) as measured:
+            # Mocked stages never invoke the exporter, so tool discovery is isolated too.
+            with (
+                patch("ark_pipeline.cli.benchmark_pipeline.shutil.which", return_value="tippecanoe"),
+                patch("ark_pipeline.cli.benchmark_pipeline.run_stage", return_value={"name": "source_scan", "status": "failed", "wall_seconds": 1, "log": "failure.log"}) as measured,
+            ):
                 report = run(parser().parse_args(options))
             self.assertEqual(measured.call_count, 1)
             self.assertEqual(report["status"], "failed")
@@ -270,7 +274,10 @@ class BenchmarkRunnerTests(unittest.TestCase):
             def interrupt(*args, **kwargs):
                 raise KeyboardInterrupt
 
-            with patch("ark_pipeline.cli.benchmark_pipeline.run_stage", side_effect=interrupt):
+            with (
+                patch("ark_pipeline.cli.benchmark_pipeline.shutil.which", return_value="tippecanoe"),
+                patch("ark_pipeline.cli.benchmark_pipeline.run_stage", side_effect=interrupt),
+            ):
                 first = run(parser().parse_args(options))
                 resumed = run(parser().parse_args(options))
                 fresh = run(parser().parse_args([*options, "--fresh"]))
