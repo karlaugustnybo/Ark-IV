@@ -5,11 +5,13 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import tempfile
 from pathlib import Path
 
 from ark_pipeline.builders.species_metadata import build_global_species
 from ark_pipeline.cli.sources_acquire import load_manifest
 from ark_pipeline.cli.spatial_pairs import resolve_input
+from ark_pipeline.runtime.metadata_publication import source_registration_guard
 from ark_pipeline.runtime.progress import tracked_stage
 from ark_pipeline.runtime.provenance import sha256
 
@@ -84,10 +86,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--h3-root", type=Path, required=True)
     parser.add_argument("--crosswalk", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--iucn-details-dir", type=Path, default=os.environ.get("GLOBAL_IUCN_DETAILS_DIR"))
+    parser.add_argument("--iucn-metadata-mode", choices=("auto", "cache-only", "off"),
+                        default=os.environ.get("GLOBAL_IUCN_METADATA_MODE", "auto"))
+    parser.add_argument("--reviewed-evidence-path", type=Path,
+                        default=os.environ.get("GLOBAL_IUCN_REVIEWED_EVIDENCE_PATH"))
     args = parser.parse_args(argv)
     try:
         root = args.root.expanduser().resolve()
+        validate_registration = source_registration_guard(root)
         manifest = load_manifest(root)
+        validate_registration()
         assessments = source_file(
             root,
             manifest,
@@ -137,17 +146,40 @@ def main(argv: list[str] | None = None) -> int:
         ]
         if missing:
             print("Optional inputs unavailable: " + ", ".join(missing), flush=True)
-        build_global_species(
-            crosswalk_path=args.crosswalk,
-            assessments_path=assessments,
-            goat_species_path=goat,
-            ncbi_names_path=ncbi_names,
-            ncbi_nodes_path=ncbi_nodes,
-            gbif_backbone_path=gbif,
-            edge_species_path=edge,
-            h3_paths=[h3],
-            output_dir=args.output_dir,
-        )
+        from ark_pipeline.builders.iucn_metadata import validate_evidence
+        from ark_pipeline.runtime.metadata_publication import publish_metadata
+
+        args.output_dir.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix=".metadata-serving-", dir=args.output_dir.parent) as temporary:
+            staged = Path(temporary)
+            build_global_species(
+                crosswalk_path=args.crosswalk,
+                assessments_path=assessments,
+                goat_species_path=goat,
+                ncbi_names_path=ncbi_names,
+                ncbi_nodes_path=ncbi_nodes,
+                gbif_backbone_path=gbif,
+                edge_species_path=edge,
+                h3_paths=[h3],
+                output_dir=staged,
+                spatial_source_root=root,
+            )
+            from ark_pipeline.cli.iucn_reconcile_stage import reconcile_stage
+            from ark_pipeline.runtime.provenance import atomic_json
+
+            enrichment = reconcile_stage(root, staged, manifest, details_dir=args.iucn_details_dir,
+                                         mode=args.iucn_metadata_mode,
+                                         reviewed_evidence_path=args.reviewed_evidence_path)
+            metadata_report = staged / "build-report.json"
+            report = json.loads(metadata_report.read_text())
+            report["iucn_reconciliation"] = {"mode": args.iucn_metadata_mode, "status": enrichment["status"]}
+            def validate():
+                validate_registration()
+                if "evidence_inputs" in enrichment:
+                    validate_evidence(enrichment)
+            validate()
+            atomic_json(metadata_report, report)
+            publish_metadata(staged, args.output_dir, validate=validate)
         return 0
     except (OSError, ValueError) as error:
         print(json.dumps({"status": "failed", "error": str(error)}, indent=2))

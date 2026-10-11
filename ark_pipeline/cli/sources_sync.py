@@ -167,7 +167,8 @@ def synchronize(
         if source.get("access") in {"manual", "browser-assisted"}:
             statuses.append(sync_restricted_source(root, source, authorized=authorized))
 
-    if mode == "update" and os.environ.get("IUCN_REDLIST_KEY"):
+    from ark_pipeline.cli.sources_download_iucn import read_iucn_token
+    if mode == "update" and read_iucn_token():
         monitor = catalogue.sources.get("iucn-assessment-catalog")
         if monitor is not None:
             statuses.extend(run_public_updates(root, catalogue, [monitor.id]))
