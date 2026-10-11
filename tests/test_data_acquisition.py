@@ -117,21 +117,40 @@ class DataAcquisitionTests(unittest.TestCase):
         assert inventory is not None
         files = inventory["files"]
         self.assertEqual(inventory["release"], "v1c")
-        self.assertEqual(len(files), 9)
-        self.assertEqual(
-            {item["region"] for item in files},
-            {
-                "Africa",
-                "Arctic",
-                "Asia",
-                "Australia",
-                "Europe",
-                "Greenland",
-                "North America",
-                "South America",
-                "Siberia",
-            },
-        )
+        self.assertEqual(inventory["format"], "standard-and-customized-with-lakes")
+        self.assertEqual(inventory["levels"], "01-12")
+        regions = {
+            "af": "Africa",
+            "ar": "Arctic",
+            "as": "Asia",
+            "au": "Australia",
+            "eu": "Europe",
+            "gr": "Greenland",
+            "na": "North America",
+            "sa": "South America",
+            "si": "Siberia",
+        }
+        expected_files = {
+            f"hybas_{prefix}{code}_lev01-12_v1c.zip": (region, kind)
+            for prefix, kind in (("", "standard"), ("lake_", "customized_with_lakes"))
+            for code, region in regions.items()
+        }
+        self.assertEqual(len(files), 18)
+        self.assertEqual({item["logical_name"] for item in files}, set(expected_files))
+        self.assertEqual(len({item["provider_filename"] for item in files}), 18)
+        for item in files:
+            with self.subTest(archive=item["logical_name"]):
+                region, kind = expected_files[item["logical_name"]]
+                self.assertEqual(item["region"], region)
+                self.assertEqual(item["provider_filename"], item["logical_name"])
+                self.assertEqual(
+                    item["download_url"],
+                    f"https://data.hydrosheds.org/file/hydrobasins/{kind}/{item['logical_name']}",
+                )
+                self.assertGreater(item["expected_bytes"], 0)
+        self.assertEqual(required_file_names(source), set(expected_files))
+        self.assertTrue(source.get("required"))
+        self.assertIn("hydrobasins", catalogue.profiles["authorized"]["required_sources"])
         self.assertFalse(is_due(source, {"release": "v1c"}, False))
         self.assertTrue(is_due(source, {"release": "v1b"}, False))
         self.assertTrue(is_due(source, {"release": "v1c"}, True))
