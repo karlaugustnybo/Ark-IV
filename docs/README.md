@@ -32,6 +32,7 @@ stage-based CLI names and artifact-based builders.
 
 - [Map rendering retrospective](performance/map-performance-retrospective.md)
 - [Species search](performance/species_search_benchmark.md)
+- [Exact H3 cover/tree pilot and research limits](performance/h3_tree.md)
 - [Pair aggregation](performance/pair_aggregation_performance.md)
 - [Serving metrics](performance/serving_metrics_performance.md)
 - [Tile export](performance/tile_export_performance.md)
