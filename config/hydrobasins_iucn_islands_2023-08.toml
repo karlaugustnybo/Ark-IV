@@ -1,0 +1,10 @@
+schema_version = 1
+release = "2023-08"
+verified_at = "2026-10-01"
+official_url = "https://www.iucnredlist.org/resources/spatialtoolsanddata"
+
+[[files]]
+logical_name = "HydroBASINS_level08_w_attributes_2023_08.zip"
+provider_filename = "HydroBASINS_level08_w_attributes_2023_08.zip"
+expected_bytes = 407696015
+download_url = "https://nc.iucnredlist.org/redlist/content/attachment_files/HydroBASINS_level08_w_attributes_2023_08.zip"

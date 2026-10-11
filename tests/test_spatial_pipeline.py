@@ -452,6 +452,109 @@ class SpatialBuildTests(unittest.TestCase):
             )
             self.assertTrue({201, 204}.issubset(species))
 
+    def test_hydrobasins_resolves_lakes_islands_and_standard_fallback(self) -> None:
+        import pyarrow as pa
+
+        from ark_pipeline.cli.spatial_pairs import BASIN_RELATION_SCHEMA, build_hydrobasin_index
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            records = []
+            # Shared ID has different geometry: the IUCN lake format must win.
+            fixtures = [
+                ("hybas_af_lev01-12_v1c.zip", "hybas_af_lev08_v1c", "HYBAS_ID",
+                 [1080000010, 1080000020], [box(0, 0, .01, .01), box(12.56, 55.67, 12.57, 55.68)], "hydrobasins"),
+                ("hybas_lake_af_lev01-12_v1c.zip", "hybas_lake_af_lev08_v1c", "HYBAS_ID",
+                 [1080000010, 1089000011], [box(12.56, 55.67, 12.57, 55.68)] * 2, "hydrobasins"),
+                ("HydroBASINS_level08_w_attributes_2023_08.zip", "HydroBASINS_level08_w_attributes_2023_08", "hybas_id",
+                 [100000000], [box(12.56, 55.67, 12.57, 55.68)], "hydrobasins-iucn-islands"),
+            ]
+            for name, layer, column, ids, geometries, source in fixtures:
+                folder = root / layer
+                folder.mkdir()
+                pyogrio.write_dataframe(gpd.GeoDataFrame({column: ids, "geometry": geometries}, crs="EPSG:4326"), folder / f"{layer}.shp")
+                archive_path = root / name
+                with zipfile.ZipFile(archive_path, "w") as archive:
+                    for member in folder.iterdir():
+                        archive.write(member, member.name)
+                records.append({"logical_name": name, "resolved_path": archive_path,
+                                "release": "v1c", "source_id": source, "bytes": archive_path.stat().st_size,
+                                "sha256": sha256(archive_path)})
+            ids = [1080000010, 1080000020, 1089000011, 100000000]
+            relations = root / "archives/fixture/basin_species.parquet"
+            relations.parent.mkdir(parents=True)
+            pq.write_table(pa.Table.from_pydict({"hybas_id": ids, "iucn_sis_id": [1] * 4}, schema=BASIN_RELATION_SCHEMA), relations)
+            report = build_hydrobasin_index([relations], records, root / "out",
+                load_spatial_profile(RICHNESS_PROFILE_PATH), "fixture", None,
+                scratch_dir=root / "scratch", memory_limit="256MB", threads=1, force=False)
+            self.assertEqual(report["referenced_basins"], 4)
+            cells = pq.read_table(report["path"]).to_pydict()
+            by_id = {i: set() for i in ids}
+            for i, cell in zip(cells["hybas_id"], cells["h3_index"]):
+                by_id[i].add(cell)
+            self.assertTrue(by_id[100000000])
+            self.assertEqual(by_id[1080000010], by_id[1089000011])
+            self.assertEqual(by_id[1080000020], by_id[100000000])
+            from ark_pipeline.cli.sources_check_hydrobasins import audit
+            with patch("ark_pipeline.cli.sources_check_hydrobasins.hydrobasin_files", return_value=records):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    audited = audit(root, root)
+            self.assertEqual(audited["unique_missing_ids"], 0)
+            self.assertEqual(audited["unique_recovered_ids"], 2)
+
+            # Missing provider IDs must fail before any expensive geometry filling.
+            previous_digest = sha256(report["path"])
+            pq.write_table(pa.Table.from_pydict({"hybas_id": [*ids, 100000099],
+                "iucn_sis_id": [1] * 4 + [99]}, schema=BASIN_RELATION_SCHEMA), relations)
+            with patch("ark_pipeline.cli.spatial_pairs._polyfill_wkb", side_effect=AssertionError("must reconcile IDs first")):
+                with self.assertRaisesRegex(ValueError, "100000099.*Reconcile inputs"):
+                    build_hydrobasin_index([relations], records, root / "out",
+                        load_spatial_profile(RICHNESS_PROFILE_PATH), "fixture", None,
+                        scratch_dir=root / "scratch", memory_limit="256MB", threads=1, force=False)
+            self.assertEqual(sha256(report["path"]), previous_digest)
+
+            partial_path = root / "partial.toml"
+            partial_path.write_text(RICHNESS_PROFILE_PATH.read_text().replace('[hydrobasin_coverage]', '[hydrobasin_coverage]\nmissing_geometry_policy = "exclude-with-audit"'))
+            partial_profile = load_spatial_profile(partial_path)
+            partial_report = build_hydrobasin_index([relations], records, root / "partial-out",
+                partial_profile, "fixture", None, scratch_dir=root / "scratch", memory_limit="256MB", threads=1, force=False)
+            self.assertEqual(partial_report["coverage_status"], "partial-missing-basin-geometries")
+            self.assertEqual(partial_report["covered_basins"], 4)
+            self.assertEqual(partial_report["missing_geometry_basins"], 1)
+            self.assertEqual(partial_report["omitted_distinct_relationships"], 1)
+            missing = pq.read_table(root / "partial-out/hydrobasins/missing_relationships.parquet").to_pylist()
+            self.assertEqual(missing, [{"source_archive": "fixture", "hybas_id": 100000099,
+                                       "iucn_sis_id": 99, "reason": "missing_geometry"}])
+            included = pq.read_table(partial_report["path"])["hybas_id"].to_pylist()
+            self.assertNotIn(100000099, included)
+            self.assertEqual(set(included), set(ids))
+            from ark_pipeline.cli.spatial_pairs import build_hydrobasin_pairs
+            pair_dir = root / "partial-out/archives/fixture"
+            pair_dir.mkdir(parents=True)
+            joined = build_hydrobasin_pairs({"logical_name": "fixture.zip"}, root / "partial-out",
+                {"profile_sha256": partial_profile.digest}, {"path": relations}, partial_report["path"],
+                scratch_dir=root / "scratch", memory_limit="256MB", threads=1, force=False)
+            pairs = pq.read_table(pair_dir / "res7_pairs.parquet")
+            self.assertGreater(joined["output_relationships"], 0)
+            self.assertEqual(set(pairs["iucn_sis_id"].to_pylist()), {1})
+            cached = build_hydrobasin_index([relations], records, root / "partial-out",
+                partial_profile, "fixture", None, scratch_dir=root / "scratch", memory_limit="256MB", threads=1, force=False)
+            self.assertEqual(cached["status"], "reused")
+            # Omitted relationships are receipt inputs even when basin IDs stay fixed.
+            pq.write_table(pa.Table.from_pydict({"hybas_id": [*ids, 100000099],
+                "iucn_sis_id": [1] * 4 + [100]}, schema=BASIN_RELATION_SCHEMA), relations)
+            rebuilt = build_hydrobasin_index([relations], records, root / "partial-out",
+                partial_profile, "fixture", None, scratch_dir=root / "scratch",
+                memory_limit="256MB", threads=1, force=False)
+            self.assertEqual(rebuilt["status"], "built")
+            self.assertEqual(pq.read_table(root / "partial-out/hydrobasins/missing_relationships.parquet")
+                             ["iucn_sis_id"].to_pylist(), [100])
+            # A partial receipt cannot satisfy the strict profile.
+            with self.assertRaisesRegex(ValueError, "Reconcile inputs"):
+                build_hydrobasin_index([relations], records, root / "partial-out",
+                    load_spatial_profile(RICHNESS_PROFILE_PATH), "fixture", None,
+                    scratch_dir=root / "scratch", memory_limit="256MB", threads=1, force=False)
+
     def test_worker_failure_reports_geometry_error_without_publishing_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)

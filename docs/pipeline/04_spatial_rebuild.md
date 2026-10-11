@@ -25,7 +25,23 @@ not buffered or counted as repeated observations. Eligible HydroBASINS table
 rows are deduplicated to `(hybas_id, species)` out of core. The numeric basin ID
 selects its region and level; only referenced geometry FIDs are decoded, each
 basin is covered once with the polygon any-touch kernel, and all 14 relationship
-tables reuse that basin-cell index. A referenced ID missing from v1c is fatal.
+tables reuse that basin-cell index. Customized-with-lakes polygons take precedence
+for shared IDs, with standard v1c fallback. Separately inventoried IUCN island
+IDs use exact-ID lookup in their base layer. Requested IDs are reconciled before
+H3 coverage starts. Missing geometry is fatal by default; an explicitly selected
+`exclude-with-audit` missingness policy emits partial coverage counts and a local
+`hydrobasins/missing_relationships.parquet` with every omitted source relationship.
+A partial receipt cannot satisfy the strict profile. See the
+[methodology](../../methodology.md#hydrobasins-relationships) for denominators and limits.
+
+For an authorized local exact-ID audit without H3 filling:
+
+```bash
+uv run python -m ark_pipeline.cli.sources_check_hydrobasins --root /path/to/authorized-data --relations-root /path/to/normalized-pairs --output /path/to/local-audit.json
+```
+
+The checker returns exit code 2 when IDs remain missing. Inputs and reports stay
+local under the publication policy; inventory URLs do not grant redistribution rights.
 
 The row policy follows IUCN's published 2021+ richness selection: Presence
 codes 1 and 4, Origin codes 1, 2 and 6, and Seasonality codes 1, 2, 3 and 5.

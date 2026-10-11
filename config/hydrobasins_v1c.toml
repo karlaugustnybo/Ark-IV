@@ -1,9 +1,9 @@
 schema_version = 1
 release = "v1c"
 product_version = "1"
-format = "standard"
+format = "standard-and-customized-with-lakes"
 levels = "01-12"
-verified_at = "2026-08-30"
+verified_at = "2026-10-01"
 official_url = "https://www.hydrosheds.org/products/hydrobasins"
 
 [[files]]
@@ -68,3 +68,66 @@ provider_filename = "hybas_si_lev01-12_v1c.zip"
 region = "Siberia"
 expected_bytes = 291137752
 download_url = "https://data.hydrosheds.org/file/hydrobasins/standard/hybas_si_lev01-12_v1c.zip"
+
+[[files]]
+logical_name = "hybas_lake_af_lev01-12_v1c.zip"
+provider_filename = "hybas_lake_af_lev01-12_v1c.zip"
+region = "Africa"
+expected_bytes = 569665597
+download_url = "https://data.hydrosheds.org/file/hydrobasins/customized_with_lakes/hybas_lake_af_lev01-12_v1c.zip"
+
+[[files]]
+logical_name = "hybas_lake_ar_lev01-12_v1c.zip"
+provider_filename = "hybas_lake_ar_lev01-12_v1c.zip"
+region = "Arctic"
+expected_bytes = 198013509
+download_url = "https://data.hydrosheds.org/file/hydrobasins/customized_with_lakes/hybas_lake_ar_lev01-12_v1c.zip"
+
+[[files]]
+logical_name = "hybas_lake_as_lev01-12_v1c.zip"
+provider_filename = "hybas_lake_as_lev01-12_v1c.zip"
+region = "Asia"
+expected_bytes = 413409028
+download_url = "https://data.hydrosheds.org/file/hydrobasins/customized_with_lakes/hybas_lake_as_lev01-12_v1c.zip"
+
+[[files]]
+logical_name = "hybas_lake_au_lev01-12_v1c.zip"
+provider_filename = "hybas_lake_au_lev01-12_v1c.zip"
+region = "Australia"
+expected_bytes = 201562172
+download_url = "https://data.hydrosheds.org/file/hydrobasins/customized_with_lakes/hybas_lake_au_lev01-12_v1c.zip"
+
+[[files]]
+logical_name = "hybas_lake_eu_lev01-12_v1c.zip"
+provider_filename = "hybas_lake_eu_lev01-12_v1c.zip"
+region = "Europe"
+expected_bytes = 408142429
+download_url = "https://data.hydrosheds.org/file/hydrobasins/customized_with_lakes/hybas_lake_eu_lev01-12_v1c.zip"
+
+[[files]]
+logical_name = "hybas_lake_gr_lev01-12_v1c.zip"
+provider_filename = "hybas_lake_gr_lev01-12_v1c.zip"
+region = "Greenland"
+expected_bytes = 49493126
+download_url = "https://data.hydrosheds.org/file/hydrobasins/customized_with_lakes/hybas_lake_gr_lev01-12_v1c.zip"
+
+[[files]]
+logical_name = "hybas_lake_na_lev01-12_v1c.zip"
+provider_filename = "hybas_lake_na_lev01-12_v1c.zip"
+region = "North America"
+expected_bytes = 429134656
+download_url = "https://data.hydrosheds.org/file/hydrobasins/customized_with_lakes/hybas_lake_na_lev01-12_v1c.zip"
+
+[[files]]
+logical_name = "hybas_lake_sa_lev01-12_v1c.zip"
+provider_filename = "hybas_lake_sa_lev01-12_v1c.zip"
+region = "South America"
+expected_bytes = 365467297
+download_url = "https://data.hydrosheds.org/file/hydrobasins/customized_with_lakes/hybas_lake_sa_lev01-12_v1c.zip"
+
+[[files]]
+logical_name = "hybas_lake_si_lev01-12_v1c.zip"
+provider_filename = "hybas_lake_si_lev01-12_v1c.zip"
+region = "Siberia"
+expected_bytes = 321387135
+download_url = "https://data.hydrosheds.org/file/hydrobasins/customized_with_lakes/hybas_lake_si_lev01-12_v1c.zip"
