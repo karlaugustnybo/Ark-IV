@@ -387,11 +387,25 @@ include cell c exactly when G intersects H(c), including edge or vertex contact
 ```
 
 The pipeline uses h3ronpy's native `geometry_to_cells` with
-`ContainmentMode.IntersectsBoundary` on clipped pieces, followed by a union of
-cell IDs. It does not use cell-centre containment as the final rule, require a
-whole cell inside the range, or apply a production border-expansion buffer.
+`ContainmentMode.IntersectsBoundary` to seed candidates on clipped pieces.
+Native overlap can omit exact shared-edge contacts, so it is not the final
+membership decision. Cells wholly contained in each clipped piece are accepted;
+the remaining native frontier is expanded by one H3 neighbour ring and checked
+with the closed GEOS `intersects` predicate against the decision geometry and
+adjacent longitude copies. The halo is only a candidate set: non-intersecting
+neighbours are rejected, without a buffer or positive-area threshold.
+
+Partition pieces are split at every longitude world boundary before native
+filling, including grids that do not divide 180°. Partition size is intended to
+change execution only. Pole-containing H3 rings close through the corresponding
+pole before canonical splitting; scalar boundary membership, tile batches and
+GeoJSON export share that closure. The native coverage path uses the same
+closure on h3ronpy's vectorized coordinates. Native and scalar bindings can
+differ by floating-point roundoff; this is not a displacement allowance or a
+biological boundary uncertainty estimate.
+
 The profile's `candidate_mode = "bbox_overlap"` is a retained configuration
-label; the current production call actually uses `IntersectsBoundary`.
+label; the current production seed call uses `IntersectsBoundary`.
 Historical hierarchy/candidate-buffer settings are not proof that those
 experimental routes execute in the active direct kernel.
 

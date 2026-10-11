@@ -25,6 +25,8 @@ from shapely import affinity, make_valid
 from shapely.geometry import MultiPolygon, Polygon, box
 from shapely.geometry.base import BaseGeometry
 
+from ark_pipeline.spatial.boundaries import h3_ring_polygon
+
 
 class GeometryCoverageError(ValueError):
     """Raised when a source geometry cannot safely produce coverage."""
@@ -287,6 +289,43 @@ def _ring_crosses_dateline(ring) -> bool:
     return bool(np.any(np.abs(np.diff(coordinates[:, 0])) > 180))
 
 
+def _provider_latitude_closure(polygon: Polygon) -> bool:
+    """Keep a valid provider range closed on a latitude boundary.
+
+    Some global ranges are clipped at a constant latitude, including polar
+    caps. Their single long horizontal closing edge is intentional. Replacing
+    it with the shortest seam crossing gives the ring a full longitude winding
+    and a false self-intersection. This exception preserves source coordinates
+    only when the attempted unwrapping failed, with no crossing holes.
+    """
+    coordinates = np.asarray(polygon.exterior.coords)
+    jumps = np.flatnonzero(np.abs(np.diff(coordinates[:, 0])) > 180)
+    if len(jumps) != 1 or not polygon.is_valid:
+        return False
+    start, end = coordinates[jumps[0]], coordinates[jumps[0] + 1]
+    min_x, min_y, max_x, max_y = polygon.bounds
+    latitude = float(start[1])
+    # Pole-aware H3 rings may live in an adjacent longitude copy. Their
+    # horizontal pole closure represents the full cap, not a shortest edge.
+    if (abs(latitude) == 90 and float(end[1]) == latitude
+            and min_y >= -90 and max_y <= 90
+            and not any(_ring_crosses_dateline(ring) for ring in polygon.interiors)):
+        return True
+    # Provider cut boundaries can have sub-millidegree vertex overshoot.
+    # This tolerance classifies the edge; it never moves any coordinates.
+    unwrapped = _unwrap_ring(coordinates)
+    winding = unwrapped[-1][0] - unwrapped[0][0]
+    return bool(
+        min_x >= -180 and max_x <= 180
+        and min_y >= -90 and max_y <= 90
+        and math.isclose(abs(winding), 360, abs_tol=1e-8)
+        and math.isclose(latitude, float(end[1]), abs_tol=1e-8)
+        and (math.isclose(latitude, min_y, abs_tol=1e-3)
+             or math.isclose(latitude, max_y, abs_tol=1e-3))
+        and not any(_ring_crosses_dateline(ring) for ring in polygon.interiors)
+    )
+
+
 def _unwrap_polygon(polygon: Polygon) -> Polygon:
     # Already split/provider-normalized polygons need no transformation. In a
     # wide global shell, a hole can legitimately be >180 degrees away from the
@@ -299,6 +338,8 @@ def _unwrap_polygon(polygon: Polygon) -> Polygon:
     shell = _unwrap_ring(polygon.exterior.coords)
     shell_polygon = Polygon(shell)
     if not shell_polygon.is_valid:
+        if _provider_latitude_closure(polygon):
+            return polygon
         raise GeometryCoverageError(
             "Longitude unwrapping produced an invalid shell: "
             + shapely.is_valid_reason(shell_polygon)
@@ -457,14 +498,17 @@ def _fill_candidate_tile(job, resolution, include_guaranteed):
     empty = np.empty(0, dtype=np.uint64)
     if polygonal is None or polygonal.is_empty:
         return empty, empty
-    canonical = _canonical_piece(polygonal)
-    candidates = np.asarray(geometry_to_cells(
-        canonical, resolution, ContainmentMode.IntersectsBoundary,
-    ), dtype=np.uint64)
-    guaranteed = np.asarray(geometry_to_cells(
-        canonical, resolution, ContainmentMode.ContainsBoundary,
-    ), dtype=np.uint64) if include_guaranteed else empty
-    return candidates, guaranteed
+    candidate_chunks = []
+    guaranteed_chunks = []
+    for canonical in _iter_longitude_normalized_pieces(polygonal):
+        candidate_chunks.append(np.asarray(geometry_to_cells(
+            canonical, resolution, ContainmentMode.IntersectsBoundary,
+        ), dtype=np.uint64))
+        if include_guaranteed:
+            guaranteed_chunks.append(np.asarray(geometry_to_cells(
+                canonical, resolution, ContainmentMode.ContainsBoundary,
+            ), dtype=np.uint64))
+    return _sorted_unique_chunks(candidate_chunks), _sorted_unique_chunks(guaranteed_chunks)
 
 
 def _iter_candidate_cell_batches(
@@ -533,29 +577,16 @@ def _candidate_cells_untiled(
     profile: SpatialProfile,
     resolution: int,
 ) -> tuple[np.ndarray, np.ndarray]:
-    canonical = _canonical_piece(geometry)
-    return (
-        np.unique(
-            np.asarray(
-                geometry_to_cells(
-                    canonical,
-                    resolution,
-                    ContainmentMode.IntersectsBoundary,
-                ),
-                dtype=np.uint64,
-            )
-        ),
-        np.unique(
-            np.asarray(
-                geometry_to_cells(
-                    canonical,
-                    resolution,
-                    ContainmentMode.ContainsBoundary,
-                ),
-                dtype=np.uint64,
-            )
-        ),
-    )
+    candidates = []
+    guaranteed = []
+    for canonical in _iter_longitude_normalized_pieces(geometry):
+        candidates.append(np.asarray(geometry_to_cells(
+            canonical, resolution, ContainmentMode.IntersectsBoundary,
+        ), dtype=np.uint64))
+        guaranteed.append(np.asarray(geometry_to_cells(
+            canonical, resolution, ContainmentMode.ContainsBoundary,
+        ), dtype=np.uint64))
+    return _sorted_unique_chunks(candidates), _sorted_unique_chunks(guaranteed)
 
 
 def cell_polygon(cell: str) -> Polygon:
@@ -578,7 +609,9 @@ def _native_cell_polygons(cells: np.ndarray) -> np.ndarray:
     bounds = np.asarray(shapely.bounds(polygons), dtype=np.float64)
     antimeridian = np.flatnonzero(bounds[:, 2] - bounds[:, 0] > 180)
     for index in antimeridian:
-        polygons[index] = _unwrap_polygon(polygons[index])
+        polygons[index] = h3_ring_polygon([
+            list(point) for point in polygons[index].exterior.coords[:-1]
+        ])
     return polygons
 
 
@@ -645,10 +678,9 @@ def direct_any_touch_intersecting_cells_native(
 ) -> NativeCoverageResult:
     """Return the exact resolution-7 H3 overlap set, including point touches.
 
-    ``ContainmentMode.IntersectsBoundary`` is H3's overlap-at-any-point mode.
-    It already includes cells wholly contained by the source, so unlike the
-    legacy positive-area kernel it needs neither GEOS cell construction nor a
-    second topological predicate pass.
+    Native overlap supplies candidates, not a complete closed-contact decision.
+    Fully contained cells are accepted directly; a one-ring frontier is checked
+    against the decision geometry with GEOS, including longitude copies.
     """
     from ark_pipeline.runtime.progress import emit
 
@@ -695,16 +727,26 @@ def _direct_any_touch_prepared(
     """Direct any-touch kernel for an already prepared, unwrapped geometry."""
     chunks: list[np.ndarray] = []
     candidate_count = 0
-    for overlap, _ in _iter_candidate_cell_batches(
+    for overlap, guaranteed in _iter_candidate_cell_batches(
         unwrapped,
         profile,
         profile.resolution,
-        include_guaranteed=False,
+        include_guaranteed=True,
         tile_budget=tile_budget,
     ):
-        candidate_count += int(overlap.size)
-        if overlap.size:
-            chunks.append(overlap)
+        frontier = _one_ring(np.setdiff1d(overlap, guaranteed))
+        candidate_count += int(guaranteed.size + frontier.size)
+        if guaranteed.size:
+            chunks.append(guaranteed)
+        for start in range(0, frontier.size, 65536):
+            batch = frontier[start:start + 65536]
+            polygons = _native_cell_polygons(batch)
+            hits = np.zeros(batch.size, dtype=bool)
+            for turn in (-1, 0, 1):
+                decision = affinity.translate(unwrapped, xoff=turn * 360) if turn else unwrapped
+                hits |= shapely.intersects(decision, polygons)
+            if hits.any():
+                chunks.append(batch[hits])
     from ark_pipeline.runtime.progress import emit
 
     emit(phase="Deduplicating polygon cells", fraction=None, force=True)
