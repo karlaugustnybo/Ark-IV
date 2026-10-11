@@ -128,7 +128,7 @@ def register(root: Path) -> None:
 
 
 class RefreshCrosswalkTests(unittest.TestCase):
-    def run_matcher(self, root, bridge=None):
+    def run_matcher(self, root, bridge=None, validation=None):
         output = root / "matched"
         command = [sys.executable, "-m", "ark_pipeline.cli.crosswalk_match",
                    "--iucn-taxonomy", str(root / "sources/taxonomy.csv"),
@@ -140,8 +140,79 @@ class RefreshCrosswalkTests(unittest.TestCase):
             path = root / "bridge.json"
             path.write_text(json.dumps({"rows": bridge}))
             command += ["--gbif-bridge-json", str(path)]
+        if validation is not None:
+            path = root / "validation.json"
+            path.write_text(json.dumps({"rows": validation}))
+            command += ["--gbif-validation-json", str(path)]
         subprocess.run(command, check=True, capture_output=True, text=True)
         return output / "iucn_goat_crosswalk.parquet"
+
+    def test_independent_gbif_near_name_keeps_its_relation(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            fixture(root)
+            crosswalk = self.run_matcher(root, validation=[{"iucn_sis_id": 105, "ncbi_taxid": "14", "gbif_confirmed": True, "gbif_iucn_source_id_confirmed": True}])
+            with duckdb.connect() as con:
+                self.assertEqual(con.execute("SELECT taxonomic_concept_relation,gbif_confirmed FROM read_parquet(?) WHERE iucn_sis_id=105", [str(crosswalk)]).fetchone(), ("GBIF_CORROBORATED_NEAR_NAME", True))
+
+    def test_all_native_sis_values_preserve_ambiguity_and_trait_boundaries(self):
+        from ark_pipeline.builders.species_metadata import build_global_species
+
+        for supplied, reverse, repeated, taxid in (
+            (True, False, False, "15"), (False, False, False, "15"),
+            (True, True, False, "15"), (False, True, False, "15"),
+            (True, False, True, "15"), (False, True, True, "15"),
+            (True, False, False, "14"), (False, True, False, "14"),
+            (True, True, True, "14"),
+        ):
+            with self.subTest(supplied=supplied, reverse=reverse, repeated=repeated, taxid=taxid), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                fixture(root)
+                if supplied:
+                    with (root / "sources/taxonomy.csv").open("a") as handle:
+                        csv.writer(handle).writerow([107,"Panthera elsewhereus","Animalia","Chordata","Mammalia","Carnivora","Felidae","Panthera","elsewhereus","Fixture"])
+                    with (root / "sources/assessments.csv").open("a") as handle:
+                        csv.writer(handle).writerow([107,1107,"VU",2026,"2026-01-01","Global","Terrestrial"])
+                goat = root / "sources/tol_species_all_ranks.tsv"
+                with goat.open() as handle:
+                    reader = csv.DictReader(handle, delimiter="\t")
+                    fields, rows = reader.fieldnames, list(reader)
+                original_sid = 106 if taxid == "15" else 105
+                for row in rows:
+                    if row["taxon_id"] == taxid:
+                        provenance = json.loads(row["field_provenance_json"])
+                        attribute = provenance["redlist_category"]
+                        second = json.loads(json.dumps(attribute["rawValues"][0]))
+                        second["metadata"]["source"]["slug"] = f"{original_sid}/9999" if repeated else "107/1107"
+                        attribute["rawValues"].append(second)
+                        if reverse:
+                            attribute["rawValues"].reverse()
+                        attribute.update(count=2, length=2)
+                        row.update(field_provenance_json=json.dumps(provenance), sample_acquired="fixture-voucher", ebp_standard_criteria="6.C", resampling_required="yes")
+                with goat.open("w") as handle:
+                    writer = csv.DictWriter(handle, fields, delimiter="\t")
+                    writer.writeheader()
+                    writer.writerows(rows)
+                register(root)
+                result = refresh(root, root / "crosswalk", memory_limit="256MB", threads=1)
+                with duckdb.connect() as con:
+                    status, confirmed, safe, identities, raw = con.execute("SELECT match_status,goat_iucn_sis_confirmed,safe_for_automatic_species_trait_transfer,goat_iucn_sis_ids,goat_iucn_raw_values FROM read_parquet(?) WHERE iucn_sis_id=?", [result["crosswalk"], original_sid]).fetchone()
+                self.assertEqual(safe, repeated)
+                self.assertEqual(confirmed, repeated)
+                self.assertEqual(status, "MATCHED" if repeated else "REVIEW_UNRESOLVED")
+                self.assertEqual(identities, [original_sid] if repeated else [original_sid, 107])
+                self.assertEqual(len(json.loads(raw)), 2)
+                output = root / "species"
+                build_global_species(crosswalk_path=Path(result["crosswalk"]), assessments_path=root / "sources/assessments.csv", goat_species_path=goat, h3_paths=[], output_dir=output)
+                with duckdb.connect() as con:
+                    traits = con.execute("SELECT has_dna_species_level,has_ebp_criteria_evidence,goat_resampling_required FROM read_parquet(?) WHERE gbif_accepted_id=?", [str(output / "species.parquet"), str(original_sid)]).fetchone()
+                self.assertEqual(traits, (True, True, "yes") if repeated else (False, False, None))
+                if supplied and not repeated:
+                    with duckdb.connect() as con:
+                        other = con.execute("SELECT has_dna_species_level,has_ebp_criteria_evidence,goat_resampling_required FROM read_parquet(?) WHERE gbif_accepted_id='107'", [str(output / "species.parquet")]).fetchone()
+                        other_link = con.execute("SELECT match_status,safe_for_automatic_species_trait_transfer,goat_iucn_sis_ids FROM read_parquet(?) WHERE iucn_sis_id=107", [result["crosswalk"]]).fetchone()
+                    self.assertEqual(other, (False, False, None))
+                    self.assertEqual(other_link, ("REVIEW_UNRESOLVED", False, [original_sid, 107]))
 
     def test_partial_names_stay_unresolved_and_cannot_transfer_traits(self):
         from ark_pipeline.builders.species_metadata import build_global_species
@@ -298,7 +369,7 @@ class RefreshCrosswalkTests(unittest.TestCase):
                     f"""
                     SELECT match_method, reviewer, goat_iucn_sis_confirmed,
                            evidence_sources, goat_redlist_category,
-                           goat_redlist_category_agrees, iucn_systems
+                           goat_redlist_category_agrees, iucn_systems, taxonomic_concept_relation, gbif_confirmed
                     FROM read_parquet('{first["crosswalk"]}')
                     WHERE iucn_sis_id = 105
                     """
@@ -326,6 +397,8 @@ class RefreshCrosswalkTests(unittest.TestCase):
             self.assertEqual(confirmed[4], "VU")
             self.assertTrue(confirmed[5])
             self.assertEqual(confirmed[6], "Terrestrial|Freshwater")
+            self.assertEqual(confirmed[7], "GOAT_SIS_CORROBORATED_NEAR_NAME")
+            self.assertFalse(confirmed[8])
             self.assertEqual(unresolved[0], "Terrestrial")
             summary = json.loads(Path(first["crosswalk"]).with_name("match_summary.json").read_text())
             self.assertEqual(summary["counts"]["goat_redlist_sis_bridge_rows"], 1)

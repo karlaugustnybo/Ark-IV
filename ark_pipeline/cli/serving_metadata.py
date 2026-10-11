@@ -84,6 +84,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--h3-root", type=Path, required=True)
     parser.add_argument("--crosswalk", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--iucn-details-dir", type=Path, default=os.environ.get("GLOBAL_IUCN_DETAILS_DIR"))
+    parser.add_argument("--iucn-metadata-mode", choices=("auto", "cache-only", "off"),
+                        default=os.environ.get("GLOBAL_IUCN_METADATA_MODE", "auto"))
+    parser.add_argument("--reviewed-evidence-path", type=Path,
+                        default=os.environ.get("GLOBAL_IUCN_REVIEWED_EVIDENCE_PATH"))
     args = parser.parse_args(argv)
     try:
         root = args.root.expanduser().resolve()
@@ -147,7 +152,18 @@ def main(argv: list[str] | None = None) -> int:
             edge_species_path=edge,
             h3_paths=[h3],
             output_dir=args.output_dir,
+            spatial_source_root=root,
         )
+        from ark_pipeline.cli.iucn_reconcile_stage import reconcile_stage
+        from ark_pipeline.runtime.provenance import atomic_json
+
+        enrichment = reconcile_stage(root, args.output_dir, manifest, details_dir=args.iucn_details_dir,
+                                     mode=args.iucn_metadata_mode,
+                                     reviewed_evidence_path=args.reviewed_evidence_path)
+        metadata_report = args.output_dir / "build-report.json"
+        report = json.loads(metadata_report.read_text())
+        report["iucn_reconciliation"] = {"mode": args.iucn_metadata_mode, "status": enrichment["status"]}
+        atomic_json(metadata_report, report)
         return 0
     except (OSError, ValueError) as error:
         print(json.dumps({"status": "failed", "error": str(error)}, indent=2))

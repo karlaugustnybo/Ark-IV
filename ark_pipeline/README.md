@@ -50,6 +50,8 @@ catalogues. The builders are named after their outputs:
 | Builder | Output |
 | --- | --- |
 | `species_metadata.py` | Normalized species and ecosystem metadata |
+| `spatial_metadata.py` | Exact-ID labels and affirmative systems from registered spatial rows |
+| `iucn_metadata.py` | Release-pinned assessment enrichment and private reviewed ecosystem evidence |
 | `source_database.py` | Normalized DuckDB source database |
 | `coarse_cache.py` | Coarse-map snapshot, exports and score domains |
 | `fine_metrics.py` | Resolution-7 aggregate partitions and compatibility exports |
@@ -58,6 +60,10 @@ catalogues. The builders are named after their outputs:
 
 `aggregation/metrics.py` provides native metric reduction. `spatial/boundaries.py`
 provides jurisdiction membership; `spatial/paths.py` resolves boundary assets.
+
+`cli/iucn_reconcile_stage.py` shares automatic/cache-only/off intake and
+reconciliation; `cli/reconcile_species_metadata.py` repairs a separate species
+dimension without rebuilding spatial membership or serving outputs.
 
 Commands: `just data-prepare`, `just data-boundaries`, `just global-prepare`.
 

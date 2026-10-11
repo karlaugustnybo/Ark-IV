@@ -521,7 +521,9 @@ def main() -> None:
                 goat_redlist_source_date VARCHAR,
                 goat_iucn_source_slug VARCHAR,
                 goat_iucn_sis_id BIGINT,
-                goat_iucn_assessment_id BIGINT
+                goat_iucn_assessment_id BIGINT,
+                goat_iucn_sis_ids BIGINT[],
+                goat_iucn_raw_values JSON
             );
             CREATE TABLE sis_candidates (
                 iucn_sis_id BIGINT,
@@ -546,34 +548,43 @@ def main() -> None:
                 json_extract_string(g.field_provenance_json,
                     '$.redlist_category.aggregation_source')
                     AS goat_redlist_status_source,
-                json_extract_string(g.field_provenance_json,
-                    '$.redlist_category.rawValues[0].metadata.source.slug')
-                    AS goat_iucn_source_slug,
-                json_extract_string(g.field_provenance_json,
-                    '$.redlist_category.rawValues[0].metadata.source.date')
-                    AS goat_redlist_source_date
+                json_extract(g.field_provenance_json,
+                    '$.redlist_category.rawValues') AS goat_iucn_raw_values
             FROM goat g
             WHERE g.ncbi_taxid_numeric IS NOT NULL
               AND nullif(trim(g.redlist_category), '') IS NOT NULL
               AND coalesce(json_valid(trim(g.field_provenance_json)), false)
         )
-        SELECT
-            ncbi_taxid,
-            goat_redlist_category,
-            goat_redlist_population_trend,
-            goat_redlist_scopes,
-            goat_redlist_status_source,
-            goat_redlist_source_date,
-            goat_iucn_source_slug,
-            CASE
-                WHEN regexp_matches(coalesce(goat_iucn_source_slug, ''), '^[0-9]+/[0-9]+$')
-                    THEN try_cast(split_part(goat_iucn_source_slug, '/', 1) AS BIGINT)
-            END AS goat_iucn_sis_id,
-            CASE
-                WHEN regexp_matches(coalesce(goat_iucn_source_slug, ''), '^[0-9]+/[0-9]+$')
-                    THEN try_cast(split_part(goat_iucn_source_slug, '/', 2) AS BIGINT)
-            END AS goat_iucn_assessment_id
-        FROM provenance;
+        , raw_identities AS (
+            SELECT p.ncbi_taxid,
+                json_extract_string(r.value, '$.metadata.source.slug') AS slug,
+                json_extract_string(r.value, '$.metadata.source.date') AS source_date
+            FROM provenance p, json_each(p.goat_iucn_raw_values) r
+        ), parsed AS (
+            SELECT *,
+                CASE WHEN regexp_matches(coalesce(slug, ''), '^[0-9]+/[0-9]+$')
+                    AND try_cast(split_part(slug, '/', 1) AS BIGINT) > 0
+                    AND try_cast(split_part(slug, '/', 2) AS BIGINT) > 0
+                    THEN try_cast(split_part(slug, '/', 1) AS BIGINT) END AS sis_id,
+                CASE WHEN regexp_matches(coalesce(slug, ''), '^[0-9]+/[0-9]+$')
+                    AND try_cast(split_part(slug, '/', 1) AS BIGINT) > 0
+                    AND try_cast(split_part(slug, '/', 2) AS BIGINT) > 0
+                    THEN try_cast(split_part(slug, '/', 2) AS BIGINT) END AS assessment_id
+            FROM raw_identities
+        ), identities AS (
+            SELECT ncbi_taxid,
+                list_sort(list(DISTINCT sis_id) FILTER (WHERE sis_id IS NOT NULL))
+                    AS goat_iucn_sis_ids,
+                CASE WHEN count(DISTINCT sis_id) = 1 THEN min(sis_id) END AS goat_iucn_sis_id,
+                CASE WHEN count(DISTINCT sis_id) = 1 AND count(DISTINCT assessment_id) = 1
+                    THEN min(assessment_id) END AS goat_iucn_assessment_id,
+                CASE WHEN count(DISTINCT slug) = 1 THEN min(slug) END AS goat_iucn_source_slug,
+                CASE WHEN count(DISTINCT source_date) = 1 THEN min(source_date) END
+                    AS goat_redlist_source_date
+            FROM parsed GROUP BY ncbi_taxid
+        )
+        SELECT p.*, ids.* EXCLUDE(ncbi_taxid)
+        FROM provenance p LEFT JOIN identities ids USING(ncbi_taxid);
 
         -- Identifier-based bridge: GoaT's IUCN Red List provenance records the
         -- IUCN species-concept SIS ID that GoaT itself matched to the TaxID.
@@ -586,7 +597,7 @@ def main() -> None:
             'GOAT_REDLIST_SIS_PROVENANCE' AS evidence_method,
             6 AS method_priority
         FROM iucn i
-        JOIN goat_redlist r ON r.goat_iucn_sis_id = i.iucn_sis_id
+        JOIN goat_redlist r ON list_contains(r.goat_iucn_sis_ids, i.iucn_sis_id)
         JOIN goat g ON g.ncbi_taxid = r.ncbi_taxid
         WHERE r.goat_redlist_status_source = 'direct'
           AND g.ncbi_taxid_numeric IS NOT NULL
@@ -1157,8 +1168,10 @@ def main() -> None:
                     THEN 'NCBI_SYNONYM'
                 WHEN b.match_method = 'GBIF_ACCEPTED_NAME_BRIDGE'
                     THEN 'GBIF_CORROBORATED_ACCEPTED_NAME'
-                WHEN b.match_method = 'AI_NEAR_NAME_REVIEW'
+                WHEN b.match_method = 'AI_NEAR_NAME_REVIEW' AND b.gbif_confirmed
                     THEN 'GBIF_CORROBORATED_NEAR_NAME'
+                WHEN b.match_method = 'AI_NEAR_NAME_REVIEW' AND b.goat_iucn_sis_confirmed
+                    THEN 'GOAT_SIS_CORROBORATED_NEAR_NAME'
                 WHEN b.match_method = 'GOAT_REDLIST_SIS_PROVENANCE'
                     THEN 'GOAT_REDLIST_SIS_PROVENANCE'
                 ELSE 'OTHER_REVIEWED_LINK'
@@ -1166,6 +1179,7 @@ def main() -> None:
             (
                 b.match_status = 'MATCHED'
                 AND cardinality.iucn_taxon_count = 1
+                AND coalesce(len(gr.goat_iucn_sis_ids), 0) <= 1
             ) AS safe_for_automatic_species_trait_transfer,
             gr.goat_redlist_category,
             gr.goat_redlist_population_trend,
@@ -1175,6 +1189,8 @@ def main() -> None:
             gr.goat_iucn_source_slug,
             gr.goat_iucn_sis_id,
             gr.goat_iucn_assessment_id,
+            gr.goat_iucn_sis_ids,
+            gr.goat_iucn_raw_values,
             CASE
                 WHEN gr.goat_iucn_sis_id IS NULL THEN false
                 ELSE gr.goat_iucn_sis_id = b.iucn_sis_id
@@ -1206,7 +1222,7 @@ def main() -> None:
         FROM crosswalk_base b
         LEFT JOIN cardinality USING (matched_ncbi_species_taxid)
         LEFT JOIN goat_redlist gr
-          ON gr.ncbi_taxid = b.matched_ncbi_species_taxid;
+          ON gr.ncbi_taxid = coalesce(b.matched_ncbi_species_taxid, b.review_candidate_ncbi_taxid);
 
         COPY crosswalk TO '{sql_path(output_dir / "iucn_goat_crosswalk.parquet")}'
             (FORMAT PARQUET, COMPRESSION ZSTD);
@@ -1319,7 +1335,7 @@ def main() -> None:
         "policy": (
             "Deterministic exact current/synonym links first; AI review only "
             "accepts a uniquely best near-name candidate with compatible lineage; "
-            "GoaT redlist SIS provenance corroborates unique candidates and "
+            "Unambiguous GoaT redlist SIS provenance corroborates unique candidates and "
             "bridges otherwise unlinked IUCN species."
         ),
         "counts": {
@@ -1428,8 +1444,12 @@ Generated: {manifest["generated_at_utc"]}
 Deterministic exact current-name and authoritative NCBI synonym links were
 considered first, but still required compatible lineage. Ambiguous and
 near-name candidates were reviewed under the `{REVIEWER}` policy and accepted
-only when independently corroborated by an exact GBIF/Catalogue of Life species
-concept and compatible GoaT/NCBI lineage. GoaT's own redlist attribute keeps
+only with compatible GoaT/NCBI lineage and corroboration by an exact
+GBIF/Catalogue of Life species concept or a unique direct native SIS identity.
+Every native raw identity is inspected;
+multiple SIS concepts stay unresolved and disable automatic trait transfer.
+Near-name relations distinguish SIS-only from independent GBIF corroboration.
+GoaT's own redlist attribute keeps
 the IUCN SIS ID of the species concept it ingested; that recorded identifier
 is used as deterministic corroboration for a uniquely best candidate and as a
 bridge only for IUCN rows with no other candidate, always under the same

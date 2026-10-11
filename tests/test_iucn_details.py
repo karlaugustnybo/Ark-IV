@@ -106,6 +106,32 @@ class IucnDetailTests(unittest.TestCase):
         self.assertNotIn("assessment/11", api.calls)
         self.assertNotIn("assessment/12", api.calls)
 
+    def test_returned_ids_are_strict_before_derived_requests(self):
+        for field in ("outer", "nested", "assessment"):
+            for value in (True, False, 1.9, None, "bad", 0, -1, 2, 1, "1"):
+                with self.subTest(field=field, value=value), tempfile.TemporaryDirectory() as folder:
+                    api = FakeApi()
+                    original = api.get
+
+                    def get(endpoint):
+                        if endpoint == "taxa/sis/1":
+                            api.calls.append(endpoint)
+                            return {"taxon": {"sis_id": value if field == "outer" else 1},
+                                    "assessments": [{"sis_taxon_id": value if field == "nested" else 1,
+                                                     "assessment_id": value if field == "assessment" else 991,
+                                                     "latest": True, "scopes": [{"code": "1"}]}]}, {}
+                        return original(endpoint)
+
+                    api.get = get
+                    valid = isinstance(value, (int, str)) and not isinstance(value, bool) and str(value).isdecimal() and int(value) > 0
+                    exact = valid and (field == "assessment" or int(value) == 1)
+                    if valid:
+                        fetch_details(api, {"sis_ids": [1]}, Path(folder), include_latest_global=True)
+                    else:
+                        with self.assertRaises(ValueError):
+                            fetch_details(api, {"sis_ids": [1]}, Path(folder), include_latest_global=True)
+                    self.assertEqual(any(call.startswith("assessment/") for call in api.calls), exact)
+
     def test_preserves_requested_and_returned_identity_without_name_based_merge(self):
         with tempfile.TemporaryDirectory() as folder:
             api = FakeApi()

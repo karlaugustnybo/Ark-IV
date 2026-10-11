@@ -336,3 +336,30 @@ Module paths changed during repository cleanup; the `just` command names remain
 stable. Code fingerprints deliberately invalidate old checkpoints and receipts
 when affected code changes. Preserve the old outputs, and let normal validation
 decide what can be reused; do not modify receipts to bypass these checks.
+
+### Exact-ID metadata reconciliation
+
+`serving_metadata` recovers source-scoped spatial labels and affirmative realm
+attributes, then runs the shared exact-ID reconciliation stage before downstream
+serving builds. `serving_prepare` forwards `--iucn-metadata-mode` (`auto` by
+default), `--iucn-details-dir`, and `--reviewed-evidence-path` through their
+`GLOBAL_IUCN_METADATA_MODE`, `GLOBAL_IUCN_DETAILS_DIR`, and
+`GLOBAL_IUCN_REVIEWED_EVIDENCE_PATH` environment equivalents.
+
+`auto` reuses a complete matching-release cache or acquires missing queued IDs
+with the configured IUCN token. `cache-only` requires coverage and makes no API
+requests. `off` explicitly leaves metadata unresolved. Conflicting registered
+spatial releases or stale cache endpoint/release identities fail. Raw retrieval
+and reviewed ecosystem evidence remain private. Reviewed evidence defaults to
+`config/iucn_reviewed_ecosystem_evidence.json` when available; an absent file
+leaves ecosystem gaps unresolved. Selected evidence identity participates in
+preparation checkpoint compatibility and is pinned during reconciliation.
+
+For offline repair, run `uv run python -m
+ark_pipeline.cli.reconcile_species_metadata --input-dir <dimension>
+--details-dir <completed-intake> --output-dir <separate-dimension>`; optional
+`--expected-release` and `--reviewed-evidence-path` constrain the evidence.
+This does not rebuild spatial membership, scores, tiles or databases. Publication
+replaces species, systems and report with backups and rollback on replacement
+failure. Species IDs, pinned categories, sequencing traits and existing realms
+are checked before publication.

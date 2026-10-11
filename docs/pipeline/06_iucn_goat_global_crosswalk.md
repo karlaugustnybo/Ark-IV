@@ -35,8 +35,10 @@ Ambiguous and near-name decisions are documented as:
 
 The reviewer label identifies the policy author and expert-review stage. It
 does not imply that a model-generated guess was accepted without source
-evidence. Every accepted AI-review row also requires authoritative lineage and
-independent GBIF/Catalogue of Life concept evidence.
+evidence. Accepted AI-review rows require compatible authoritative lineage.
+Near-name rows additionally require independent GBIF/Catalogue of Life evidence
+or a unique direct GoaT-native SIS concept identity; the output distinguishes
+`GBIF_CORROBORATED_NEAR_NAME` from `GOAT_SIS_CORROBORATED_NEAR_NAME`.
 
 ## Sources
 
@@ -158,7 +160,7 @@ Coverage differs substantially by kingdom:
   `NO_GOAT_NCBI_CANDIDATE`.
 - `confidence_tier`: A, B, or C for accepted matches.
 - `match_method` and `reviewer`: how the accepted decision was made.
-- `lineage_source`: `NCBI_TAXDUMP` or `GOAT_API`.
+- `lineage_source`: `NCBI_TAXDUMP`, `GOAT_API`, or `GOAT_EXPORT`.
 - `taxonomic_concept_relation`: distinguishes current-name, synonym,
   GBIF-corroborated, and IUCN-split/NCBI-lump relationships.
 - `ncbi_taxid_iucn_taxon_count`: number of supplied IUCN species mapped to the
@@ -240,3 +242,14 @@ synonyms. Alone they yield a null accepted TaxID and an unsafe trait-transfer
 flag, even when only one IUCN split member occurs in the supplied input.
 Independent direct SIS provenance can corroborate a concept; partial names
 alone cannot. Genuine synonym/current-name rules retain their lineage guards.
+
+### Native SIS ambiguity
+
+All native `rawValues` identities are inspected before accepting SIS evidence.
+`goat_iucn_sis_ids` retains distinct positive SIS concepts and
+`goat_iucn_raw_values` retains the complete raw provenance, including multiple
+assessment identities. More than one native SIS concept cannot corroborate an
+accepted equivalence or authorize automatic species traits, even when only one
+concept is present in the supplied IUCN taxonomy. Such SIS bridges stay in the
+review queue. Repeated assessments of one SIS concept remain eligible with the
+same lineage guard. Ambiguous scalar SIS/assessment/slug fields are null.

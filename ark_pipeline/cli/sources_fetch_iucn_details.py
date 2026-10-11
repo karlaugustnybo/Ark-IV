@@ -106,11 +106,11 @@ def fetch_details(
                         and saved["status"] == "retrieved"
                     ):
                         body = saved["body"]
-                        if int(body.get("taxon", {}).get("sis_id", -1)) == identity:
+                        if positive_id(body.get("taxon", {}).get("sis_id")) == identity:
                             for assessment in body.get("assessments", []):
                                 if (
                                     assessment.get("latest") is True
-                                    and int(assessment.get("sis_taxon_id", -1)) == identity
+                                    and positive_id(assessment.get("sis_taxon_id")) == identity
                                     and any(
                                         str(scope.get("code")) == "1"
                                         for scope in assessment.get("scopes", [])

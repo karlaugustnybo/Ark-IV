@@ -253,6 +253,26 @@ class GlobalSpeciesDimensionTests(unittest.TestCase):
                 systems, [("Freshwater",), ("Marine",), ("Terrestrial",)]
             )
             self.assertEqual(legacy_category, "Least Concern")
+            import zipfile
+
+            from ark_pipeline.runtime.provenance import sha256
+            source = root / 'points.zip'
+            with zipfile.ZipFile(source, 'w') as archive:
+                archive.writestr('points.csv', 'id_no,sci_name,family,category,marine,terrestria,freshwater\n999,Recovered species,FAMILY,EN,0,1,0\n')
+            (root / 'acquisition').mkdir()
+            (root / 'acquisition/current.json').write_text(json.dumps({'sources': {
+                'iucn-spatial-tables': {'files': [dict(path=source.name, logical_name=source.name,
+                    bytes=source.stat().st_size, sha256=sha256(source))]}
+            }}))
+            recovered = build_global_species(crosswalk_path=crosswalk, assessments_path=assessments,
+                goat_species_path=goat, h3_paths=[h3_path], output_dir=output,
+                spatial_source_root=root)
+            with duckdb.connect() as con:
+                row = con.execute("SELECT species_name, metadata_status, spatial_redlist_category, redlist_category, has_dna_species_level FROM read_parquet(?) WHERE gbif_accepted_id='999'", [str(output/'species.parquet')]).fetchone()
+                self.assertEqual(row, ('Recovered species', 'spatial_only', 'EN', 'Not Assessed', False))
+                self.assertEqual(con.execute("SELECT system FROM read_parquet(?) WHERE gbif_accepted_id='999'", [str(output/'species_systems.parquet')]).fetchall(), [('Terrestrial',)])
+            self.assertEqual(recovered['spatial_metadata_recovered'], 1)
+
 
     def test_dna_status_rules_are_shared_by_species_and_lineages(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

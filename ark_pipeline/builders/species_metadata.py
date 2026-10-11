@@ -26,6 +26,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 from ark_pipeline.runtime.progress import monitor_query
+from ark_pipeline.runtime.provenance import sha256
 from ark_pipeline.runtime.resources import configure_duckdb
 
 
@@ -51,6 +52,9 @@ def build_global_species(
     edge_species_path: Path | None = None,
     h3_paths: list[Path],
     output_dir: Path,
+    spatial_source_root: Path | None = None,
+    iucn_details_dir: Path | None = None,
+    reviewed_evidence_path: Path | None = None,
 ) -> dict[str, Any]:
     """Create ``species.parquet`` and ``species_systems.parquet``.
 
@@ -88,6 +92,25 @@ def build_global_species(
         if "gbif_accepted_concept_key" not in crosswalk_columns:
             connection.execute(
                 "ALTER TABLE crosswalk ADD COLUMN gbif_accepted_concept_key VARCHAR"
+            )
+        # Older published generations predate the GoaT-native redlist columns
+        # (added with the 2026-09 crosswalk upgrade). Keep the builder usable
+        # against them by supplying typed empty columns. Rebuilding the
+        # crosswalk from a post-upgrade GoaT export fills them with values.
+        for column in (
+            "goat_redlist_category", "goat_redlist_population_trend",
+            "goat_redlist_scopes", "goat_redlist_status_source",
+            "goat_redlist_source_date", "goat_iucn_source_slug",
+            "goat_iucn_sis_id", "goat_iucn_assessment_id",
+            "goat_redlist_sis_id_agrees", "goat_redlist_category_agrees",
+        ):
+            if column not in crosswalk_columns:
+                connection.execute(
+                    f"ALTER TABLE crosswalk ADD COLUMN \"{column}\" VARCHAR"
+                )
+        if "goat_iucn_sis_confirmed" not in crosswalk_columns:
+            connection.execute(
+                "ALTER TABLE crosswalk ADD COLUMN goat_iucn_sis_confirmed BOOLEAN"
             )
         connection.execute(
             """
@@ -368,7 +391,23 @@ def build_global_species(
                     AND (
                         coalesce(g.ebp_standard_criteria, '') LIKE '%6.7%'
                         OR coalesce(g.ebp_standard_criteria, '') LIKE '%6.C%'
-                    ) AS has_ebp_criteria_evidence
+                    ) AS has_ebp_criteria_evidence,
+                nullif(cast(c.goat_redlist_category AS VARCHAR), '')
+                    AS goat_redlist_category,
+                nullif(cast(c.goat_redlist_population_trend AS VARCHAR), '')
+                    AS goat_redlist_population_trend,
+                nullif(cast(c.goat_redlist_scopes AS VARCHAR), '')
+                    AS goat_redlist_scopes,
+                nullif(cast(c.goat_redlist_status_source AS VARCHAR), '')
+                    AS goat_redlist_status_source,
+                nullif(cast(c.goat_redlist_source_date AS VARCHAR), '')
+                    AS goat_redlist_source_date,
+                coalesce(cast(c.goat_iucn_sis_confirmed AS BOOLEAN), false)
+                    AS goat_iucn_sis_confirmed,
+                cast(c.goat_redlist_sis_id_agrees AS BOOLEAN)
+                    AS goat_redlist_sis_id_agrees,
+                cast(c.goat_redlist_category_agrees AS BOOLEAN)
+                    AS goat_redlist_category_agrees
             FROM crosswalk c
             LEFT JOIN goat_traits g
               ON g.taxon_id = c.matched_ncbi_species_taxid
@@ -421,19 +460,42 @@ def build_global_species(
             WHERE species.gbif_accepted_id IS NULL
             """
         )
+        # Source-only IDs remain separate concepts until an authoritative ID
+        # crosswalk exists. Recover labels and affirmative realms with provenance.
+        from ark_pipeline.builders.spatial_metadata import collect_spatial_metadata
+        targets = {row[0] for row in connection.execute(
+            "SELECT gbif_accepted_id FROM missing_h3_species"
+        ).fetchall()}
+        connection.execute("""CREATE TEMP TABLE spatial_metadata (
+            gbif_accepted_id VARCHAR, species_name VARCHAR, family VARCHAR,
+            source_category VARCHAR, systems VARCHAR[], provenance VARCHAR, conflicts VARCHAR
+        )""")
+        spatial_manifest_hash = sha256(spatial_source_root / 'acquisition/current.json') if spatial_source_root else None
+        recovered = collect_spatial_metadata(spatial_source_root, targets) if spatial_source_root else []
+        if spatial_source_root and sha256(spatial_source_root / 'acquisition/current.json') != spatial_manifest_hash:
+            raise ValueError("Spatial source registration changed during metadata recovery")
+        if recovered:
+            connection.executemany("INSERT INTO spatial_metadata VALUES (?,?,?,?,?,?,?)", [
+                (row['gbif_accepted_id'], row['species_name'], row['family'], row['source_category'],
+                 row['systems'], row['provenance'], row['conflicts']) for row in recovered
+            ])
         connection.execute(
             """
             CREATE TEMP TABLE species AS
-            SELECT * FROM species_base
+            SELECT *, 'assessed'::VARCHAR AS metadata_status,
+                NULL::VARCHAR AS spatial_redlist_category,
+                NULL::VARCHAR AS spatial_metadata_provenance,
+                NULL::VARCHAR AS spatial_metadata_conflicts
+            FROM species_base
             UNION ALL
             SELECT
-                gbif_accepted_id,
-                gbif_accepted_id AS iucn_sis_id,
+                m.gbif_accepted_id,
+                m.gbif_accepted_id AS iucn_sis_id,
                 NULL::VARCHAR AS iucn_assessment_id,
                 NULL::VARCHAR AS gbif_taxon_id,
                 NULL::VARCHAR AS goat_taxon_id,
-                'IUCN taxon ' || gbif_accepted_id AS species_name,
-                '' AS family,
+                coalesce(r.species_name, 'IUCN taxon ' || m.gbif_accepted_id) AS species_name,
+                coalesce(r.family, '') AS family,
                 'Not Assessed' AS redlist_category,
                 false AS has_dna_species_level,
                 false AS genus_has_dna,
@@ -441,8 +503,21 @@ def build_global_species(
                 true AS goat_data_deficient,
                 NULL::VARCHAR AS goat_resampling_required,
                 NULL::VARCHAR AS edge_group_name,
-                false AS has_ebp_criteria_evidence
-            FROM missing_h3_species
+                false AS has_ebp_criteria_evidence,
+                NULL::VARCHAR AS goat_redlist_category,
+                NULL::VARCHAR AS goat_redlist_population_trend,
+                NULL::VARCHAR AS goat_redlist_scopes,
+                NULL::VARCHAR AS goat_redlist_status_source,
+                NULL::VARCHAR AS goat_redlist_source_date,
+                false AS goat_iucn_sis_confirmed,
+                NULL::BOOLEAN AS goat_redlist_sis_id_agrees,
+                NULL::BOOLEAN AS goat_redlist_category_agrees,
+                CASE WHEN r.species_name IS NOT NULL THEN 'spatial_only' ELSE 'unresolved' END AS metadata_status,
+                r.source_category AS spatial_redlist_category,
+                r.provenance AS spatial_metadata_provenance,
+                r.conflicts AS spatial_metadata_conflicts
+            FROM missing_h3_species m
+            LEFT JOIN spatial_metadata r USING (gbif_accepted_id)
             """
         )
         connection.execute(
@@ -464,6 +539,23 @@ def build_global_species(
             """
         )
 
+        connection.execute("""
+            INSERT INTO species_systems
+            SELECT r.gbif_accepted_id, unnest(r.systems) AS system
+            FROM spatial_metadata r
+        """)
+        iucn_enrichment = None
+        if iucn_details_dir is not None:
+            from ark_pipeline.builders.iucn_metadata import apply_iucn_metadata
+            releases = set()
+            if spatial_source_root is not None:
+                manifest = json.loads((spatial_source_root / 'acquisition/current.json').read_text())
+                releases = {manifest['sources'][key]['release'] for key in ('iucn-spatial','iucn-spatial-tables')
+                            if key in manifest['sources'] and manifest['sources'][key].get('release')}
+            if len(releases) > 1:
+                raise ValueError('IUCN spatial source releases differ')
+            iucn_enrichment = apply_iucn_metadata(connection, iucn_details_dir,
+                expected_release=next(iter(releases), None), reviewed_evidence_path=reviewed_evidence_path)
         species_path = output_dir / "species.parquet"
         systems_path = output_dir / "species_systems.parquet"
         connection.execute(
@@ -481,6 +573,13 @@ def build_global_species(
             """
         )
 
+        ecosystem_gaps = [dict(zip(("gbif_accepted_id", "species_name", "metadata_status"), row, strict=True))
+            for row in connection.execute("""
+                SELECT s.gbif_accepted_id, s.species_name, s.metadata_status
+                FROM species s ANTI JOIN species_systems e USING (gbif_accepted_id)
+                ORDER BY s.gbif_accepted_id
+            """).fetchall()]
+        unresolved_labels = connection.execute("SELECT count(*) FROM species WHERE metadata_status='unresolved'").fetchone()[0]
         counts = connection.execute(
             """
             SELECT
@@ -497,7 +596,14 @@ def build_global_species(
                 (SELECT count(*) FROM species
                     WHERE goat_resampling_required IS NOT NULL),
                 (SELECT count(*) FROM species
-                    WHERE redlist_category = 'Lower Risk/conservation dependent')
+                    WHERE redlist_category = 'Lower Risk/conservation dependent'),
+                (SELECT count(*) FROM species
+                    WHERE goat_redlist_category IS NOT NULL),
+                (SELECT count(*) FROM species
+                    WHERE goat_redlist_category_agrees IS NOT NULL),
+                (SELECT count(*) FROM species
+                    WHERE goat_redlist_category_agrees IS NOT NULL
+                      AND NOT goat_redlist_category_agrees)
             """
         ).fetchone()
         missing_ids = [
@@ -511,7 +617,13 @@ def build_global_species(
         connection.close()
 
     report = {
-        "version": 2,
+        "version": 4,
+        "iucn_api_enrichment": iucn_enrichment,
+        "spatial_metadata_recovered": len(recovered),
+        "species_without_ecosystem_metadata": len(ecosystem_gaps),
+        "ecosystem_metadata_gaps": ecosystem_gaps,
+        "unresolved_species_labels": unresolved_labels,
+        "spatial_metadata_conflicting_ids": [r["gbif_accepted_id"] for r in recovered if r["conflicts"] != "[]"],
         "species": int(counts[0]),
         "species_systems": int(counts[1]),
         "h3_species_missing_iucn_metadata": int(counts[2]),
@@ -525,6 +637,9 @@ def build_global_species(
         "goat_data_deficient_species": int(counts[9]),
         "species_with_goat_resampling_required": int(counts[10]),
         "legacy_conservation_dependent_unscored_species": int(counts[11]),
+        "species_with_goat_redlist_status": int(counts[12]),
+        "species_with_goat_redlist_agreement_checked": int(counts[13]),
+        "species_with_goat_redlist_disagreement": int(counts[14]),
         "inputs": {
             "crosswalk": str(crosswalk_path),
             "assessments": str(assessments_path),
@@ -534,6 +649,9 @@ def build_global_species(
             "gbif_backbone": str(gbif_backbone_path) if gbif_backbone_path else None,
             "edge_species": str(edge_species_path) if edge_species_path else None,
             "h3": [str(path) for path in h3_paths],
+            "spatial_source_root": str(spatial_source_root) if spatial_source_root else None,
+            "spatial_manifest_sha256": spatial_manifest_hash,
+            "iucn_details_dir": str(iucn_details_dir) if iucn_details_dir else None,
         },
     }
     report_path = output_dir / "build-report.json"
@@ -560,6 +678,9 @@ def main() -> None:
         default=[],
         help="H3 list file whose species IDs must exist in the dimension; repeatable.",
     )
+    parser.add_argument("--spatial-source-root", type=Path)
+    parser.add_argument('--iucn-details-dir', type=Path)
+    parser.add_argument("--reviewed-evidence-path", type=Path)
     parser.add_argument("--output-dir", type=Path, required=True)
     args = parser.parse_args()
     build_global_species(
@@ -572,6 +693,9 @@ def main() -> None:
         edge_species_path=args.edge_species,
         h3_paths=args.h3,
         output_dir=args.output_dir,
+        spatial_source_root=args.spatial_source_root,
+        iucn_details_dir=args.iucn_details_dir,
+        reviewed_evidence_path=args.reviewed_evidence_path,
     )
 
 

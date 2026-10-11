@@ -532,6 +532,23 @@ GoaT-data-deficient status. This preserves relationships, but does not recover
 missing biology. All-system richness can contain placeholders with no
 terrestrial, freshwater or marine classification.
 
+Registered spatial rows can recover labels, family and affirmative system flags
+for those exact source IDs. Conflicting names/families/categories remain empty
+and are reported. Spatial threat labels are retained separately; they do not
+replace an assessment or `Not Assessed`. No realm is inferred from archive names.
+Missing affirmative ecosystem evidence is distinct from missing taxonomy.
+
+Optional completed IUCN API intake can enrich the same SIS ID with one exact
+global assessment. Existing assessment identities/categories remain pinned,
+including historical assessments; latest-global lookup applies only to IDs
+without an assessment. Returned taxon, assessment and scope identities must
+agree. Names and synonyms select investigations, never merge identities or
+transfer DNA, EBP or resampling evidence. Original system memberships remain.
+Reviewed habitat/ecology evidence is a private input, pinned to exact IDs and
+text or taxon name/authority plus assessment-source provenance. Its selected
+path/checksum is recorded and checked for changes; a missing file supplies no
+affirmative evidence. The optional file is not part of this code release.
+
 Systems are species-level labels. Assessment text beginning with `Freshwater`
 is normalized to `Freshwater`; `Terrestrial` and `Marine` are retained.
 Unrecognized/absent labels do not get an invented system. A species may belong
