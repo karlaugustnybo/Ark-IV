@@ -61,7 +61,8 @@ class RepositoryLayoutTests(unittest.TestCase):
     def test_checkpoints_cover_nested_builders_and_commands(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            (root / "justfile").write_text("# fixture\n")
+            for name in ("justfile", "pyproject.toml", "uv.lock"):
+                (root / name).write_text("# fixture\n")
             for directory in ("builders", "cli", "runtime", "spatial", "aggregation"):
                 path = root / "ark_pipeline" / directory / "fixture.py"
                 path.parent.mkdir(parents=True)
@@ -69,6 +70,14 @@ class RepositoryLayoutTests(unittest.TestCase):
                 before = pipeline_code(root)
                 path.write_text("# after\n")
                 self.assertNotEqual(before, pipeline_code(root))
+            for name in ("justfile", "pyproject.toml", "uv.lock", "config/sources.json", "config/profile.toml"):
+                with self.subTest(path=name):
+                    path = root / name
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text("# before\n")
+                    before = pipeline_code(root)
+                    path.write_text("# after\n")
+                    self.assertNotEqual(before, pipeline_code(root))
 
 
 class ReleaseGuardTests(unittest.TestCase):

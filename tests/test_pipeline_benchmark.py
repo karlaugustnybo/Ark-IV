@@ -130,7 +130,10 @@ class BenchmarkReplayInputTests(unittest.TestCase):
                 if stage["name"] == "coarse_db":
                     raise KeyboardInterrupt
                 return run_stage(stage, *args, **kwargs)
-            with patch("ark_pipeline.cli.benchmark_pipeline.run_stage", side_effect=stop_before_database):
+            # This fixture stops before database/tile compilation; only bypass
+            # the full-run compiler presence gate, keeping preceding stages real.
+            with patch("ark_pipeline.cli.benchmark_pipeline.shutil.which", return_value="fixture-compiler"), \
+                 patch("ark_pipeline.cli.benchmark_pipeline.run_stage", side_effect=stop_before_database):
                 report = run(parser().parse_args(options))
             self.assertEqual(report["status"], "interrupted")
             self.assertEqual([s["name"] for s in report["stages"]],
