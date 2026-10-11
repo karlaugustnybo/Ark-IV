@@ -261,37 +261,40 @@ def compile_queries(connection, jobs: list, target: Path, indexes: dict,
     emit("work", task="tile-stream", phase="Stream map features", overall=True, scope="phase",
          completed=overall_offset, total=overall_total, unit="features streamed", force=True)
     profiles = None
-    resolutions = None
-    if parallel:
-        resolutions = {job[1] for job in jobs}
-        if len(resolutions) != 1:
-            raise ValueError("Binary compiler inputs must belong to one resolution group")
-        emit("phase", phase="Encode binary map features", force=True)
-        profiles = parallel_stream(jobs, target, subprocess.DEVNULL, args, environment, progress,
-                                   overall_total, overall_offset)
-    buckets = split_balanced_jobs(jobs, effective) if effective > 1 else [jobs]
     commands = []
-    for index, bucket in enumerate(buckets):
-        bucket_target = target if index == len(buckets) - 1 and effective == 1 \
-            else target.with_name(f"{target.stem}-{index}.pmtiles")
-        scratch = Path(args.scratch_dir)
-        scratch = scratch if effective == 1 else scratch / f"compiler-{index}"
-        scratch.mkdir(parents=True, exist_ok=True)
-        command = [args.tippecanoe, "--force", "--output", str(bucket_target), *shared_flags,
-                   "--temporary-directory", str(scratch), "--quiet"]
-        if parallel:
-            command += ["--layer", f"res{next(iter(resolutions))}"]
-            # Tippecanoe reads FlatGeobuf Int64 properties as strings unless their
-            # output type is declared. Keep the existing integer MVT contract.
-            for key in ("resolution", *PROPERTY_KEYS):
-                command += ["--attribute-type", f"{key}:int"]
-            command += [profiles[job[0]]["input_path"] for job in bucket]
-        if progress_enabled():
-            command.remove("--quiet")
-        commands.append(command)
-    stdin_stream = subprocess.PIPE if not parallel else subprocess.DEVNULL
     processes, relays = [], []
+    # The producer can leave a partial file before it returns any profile.
+    # These per-job paths belong to this compilation, including setup failures.
+    input_paths = {target.parent / f"input-{job[0]}.fgb" for job in jobs} if parallel else set()
     try:
+        resolutions = None
+        if parallel:
+            resolutions = {job[1] for job in jobs}
+            if len(resolutions) != 1:
+                raise ValueError("Binary compiler inputs must belong to one resolution group")
+            emit("phase", phase="Encode binary map features", force=True)
+            profiles = parallel_stream(jobs, target, subprocess.DEVNULL, args, environment, progress,
+                                       overall_total, overall_offset)
+        buckets = split_balanced_jobs(jobs, effective) if effective > 1 else [jobs]
+        for index, bucket in enumerate(buckets):
+            bucket_target = target if index == len(buckets) - 1 and effective == 1 \
+                else target.with_name(f"{target.stem}-{index}.pmtiles")
+            scratch = Path(args.scratch_dir)
+            scratch = scratch if effective == 1 else scratch / f"compiler-{index}"
+            scratch.mkdir(parents=True, exist_ok=True)
+            command = [args.tippecanoe, "--force", "--output", str(bucket_target), *shared_flags,
+                       "--temporary-directory", str(scratch), "--quiet"]
+            if parallel:
+                command += ["--layer", f"res{next(iter(resolutions))}"]
+                # Tippecanoe reads FlatGeobuf Int64 properties as strings unless their
+                # output type is declared. Keep the existing integer MVT contract.
+                for key in ("resolution", *PROPERTY_KEYS):
+                    command += ["--attribute-type", f"{key}:int"]
+                command += [profiles[job[0]]["input_path"] for job in bucket]
+            if progress_enabled():
+                command.remove("--quiet")
+            commands.append(command)
+        stdin_stream = subprocess.PIPE if not parallel else subprocess.DEVNULL
         # Track each compiler immediately: a later launch or relay failure must
         # also stop compilers already started by this call.
         for command in commands:
@@ -368,8 +371,9 @@ def compile_queries(connection, jobs: list, target: Path, indexes: dict,
         raise
     finally:
         if profiles:
-            for detail in profiles.values():
-                Path(detail["input_path"]).unlink(missing_ok=True)
+            input_paths.update(Path(detail["input_path"]) for detail in profiles.values())
+        for path in input_paths:
+            path.unlink(missing_ok=True)
         for process, relay in zip(processes, relays):
             if relay:
                 relay.join(timeout=2)
@@ -481,6 +485,17 @@ def build_locked(args: argparse.Namespace) -> dict:
     watched += [Path(record["path"]) for records in prepared["parts"].values() for record in records.values()]
     watched += list(boundary_paths.values())
     before = {str(path): (path.stat().st_ino, path.stat().st_size, path.stat().st_mtime_ns) for path in watched}
+    accepted_groups = []
+    def validate_snapshot():
+        after = {str(path): (path.stat().st_ino, path.stat().st_size, path.stat().st_mtime_ns)
+                 if path.exists() else None for path in watched}
+        if before != after:
+            # Only receipts accepted by this attempt are revoked. Ordinary
+            # compiler/join failures retain already validated group checkpoints.
+            for directory in accepted_groups:
+                (directory / "receipt.json").unlink(missing_ok=True)
+            raise ValueError("An input changed during tile compilation; rerun just data-prepare")
+
     connection = duckdb.connect(str(prepared["files"]["build_duckdb"]["path"]), read_only=True)
     try:
         connection.execute("SET threads=?", [args.threads])
@@ -559,12 +574,14 @@ def build_locked(args: argparse.Namespace) -> dict:
                         overall_offset=coarse_count if fine else 0,
                         groups=estimate if fine else None,
                     )
+                    validate_snapshot()
                     for index, name in enumerate(output_names):
                         tmp = directory / (f"part.tmp-{index}.pmtiles" if effective > 1
                                            else "part.tmp.pmtiles")
                         os.replace(tmp, directory / name)
                     write_receipt(directory, group_identity, output_names, profile=detail,
                                   partitions={job[0]: report["shards"][job[0]] for job in selected})
+                    accepted_groups.append(directory)
                 report["compilations"][label] = detail
                 compiled_paths.extend(str(directory / name) for name in output_names)
                 atomic_json(generation / "build-report.json", report)
@@ -594,9 +611,7 @@ def build_locked(args: argparse.Namespace) -> dict:
         atomic_json(metadata_path, metadata)
         report.update(status="passed", reused=False, seconds=time.perf_counter() - started,
                       features=sum(item["features"] for item in report["shards"].values()))
-        after = {str(path): (path.stat().st_ino, path.stat().st_size, path.stat().st_mtime_ns) for path in watched}
-        if before != after:
-            raise ValueError("An input changed during tile compilation; rerun just data-prepare")
+        validate_snapshot()
         write_receipt(generation, identity, outputs)
         atomic_json(generation / "build-report.json", report)
         publish(args.output_dir, generation)

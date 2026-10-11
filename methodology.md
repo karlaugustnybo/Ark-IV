@@ -750,9 +750,10 @@ the authoritative pair relation. Current build zoom ranges are 0–6 for coarse
 features and 8–12 for fine features; frontend transition behavior is a separate
 rendering concern.
 
-The default export is one streamed compilation; optional base-cell shards trade
-extra storage and a merge pass for checkpoint reuse. Feature streaming can be
-limited by Python boundary/feature work, database reads, or compiler
+The default export caches separately compiled resolution groups and joins them
+into the final archive. Optional base-cell shards provide finer checkpoint reuse
+at the cost of extra storage; both modes require the final join. Feature streaming
+can be limited by Python boundary/feature work, database reads, or compiler
 backpressure. Aggregate counts alone cannot identify the bottleneck.
 
 A rendered aggregate is not a complete species list. Exact selected-cell

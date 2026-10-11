@@ -278,6 +278,42 @@ class TileCompilerUnitTests(unittest.TestCase):
             process.wait.assert_called_once()
             self.assertFalse(any(root.glob("*.fgb")))
 
+    def test_binary_inputs_removed_when_compiler_scratch_setup_fails(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            jobs = [("a", 7, "query", 1), ("b", 7, "query", 1)]
+            inputs = [root / f"input-{name}.fgb" for name, _, _, _ in jobs]
+            def producer(*args, **kwargs):
+                for path in inputs:
+                    path.write_bytes(b"completed synthetic input")
+                return {name: {"input_path": str(path), "features": 1}
+                        for (name, _, _, _), path in zip(jobs, inputs, strict=True)}
+            (root / "compiler-0").write_bytes(b"scratch obstruction")
+            args = SimpleNamespace(_parallel_tiles=True, scratch_dir=root, tippecanoe="fixture-compiler")
+            with patch("ark_pipeline.cli.serving_tiles.parallel_stream", side_effect=producer), \
+                 patch("ark_pipeline.cli.serving_tiles.subprocess.Popen") as compiler:
+                with self.assertRaises(FileExistsError):
+                    compile_queries(None, jobs, root / "out.pmtiles", {}, args, {}, groups=2)
+            compiler.assert_not_called()
+            self.assertFalse(any(path.exists() for path in inputs))
+
+    def test_binary_inputs_removed_when_producer_is_interrupted_before_report(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            inputs = [root / f"input-{name}.fgb" for name in ("a", "b")]
+            def interrupted(*args, **kwargs):
+                inputs[0].write_bytes(b"completed synthetic input")
+                inputs[1].write_bytes(b"partial synthetic input")
+                raise KeyboardInterrupt
+            args = SimpleNamespace(_parallel_tiles=True, scratch_dir=root, tippecanoe="fixture-compiler")
+            with patch("ark_pipeline.cli.serving_tiles.parallel_stream", side_effect=interrupted), \
+                 patch("ark_pipeline.cli.serving_tiles.subprocess.Popen") as compiler:
+                with self.assertRaises(KeyboardInterrupt):
+                    compile_queries(None, [(name, 7, "query", 1) for name in ("a", "b")],
+                                    root / "out.pmtiles", {}, args, {})
+            compiler.assert_not_called()
+            self.assertFalse(any(path.exists() for path in inputs))
+
     def test_stream_interruption_stops_compiler_and_removes_partial_archive(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -551,6 +587,46 @@ class TilePublicationTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "stream failed"):
                     build(args)
             self.assertEqual((root / "tiles/current").resolve(), previous)
+
+    def test_rejected_boundary_change_cannot_poison_restored_input_group_reuse(self):
+        for changed_call in (1, 2):
+            with self.subTest(changed_producer_call=changed_call):
+                with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):
+                    root = Path(temporary)
+                    args, _, cells = prepared_fixture(root)
+                    args.tile_threads = 3
+                    original = args.admin0.read_bytes()
+                    calls = 0
+                    def changed_producer(*positional, **keywords):
+                        nonlocal calls
+                        calls += 1
+                        if calls == changed_call:
+                            changed = json.loads(original)
+                            for feature in changed["features"]:
+                                feature["properties"]["code"] = "WRONG_" + feature["properties"]["code"]
+                            args.admin0.write_text(json.dumps(changed))
+                        return parallel_stream(*positional, **keywords)
+                    with patch("ark_pipeline.cli.serving_tiles.parallel_stream", side_effect=changed_producer):
+                        with self.assertRaisesRegex(ValueError, "input changed"):
+                            build(args)
+                    self.assertFalse((root / "tiles/current").exists())
+                    args.admin0.write_bytes(original)
+                    with patch("ark_pipeline.cli.serving_tiles.compile_queries", wraps=compile_queries) as compiler:
+                        resumed = build(args)
+                    self.assertGreater(compiler.call_count, 0)
+                    self.assertFalse(resumed["shards"]["coarse"]["reused"])
+                    for cell in cells:
+                        lat, lon = h3.cell_to_latlng(cell)
+                        x = int((lon + 180) / 360 * 256)
+                        y = int((1 - math.asinh(math.tan(math.radians(lat))) / math.pi) / 2 * 256)
+                        decoded = json.loads(subprocess.check_output([
+                            "tippecanoe-decode", str(root / "tiles/current/priorities.pmtiles"), "8", str(x), str(y),
+                        ], stderr=subprocess.DEVNULL))
+                        found = [f for layer in decoded["features"] for f in layer["features"]
+                                 if f["properties"]["h3_index"] == cell]
+                        self.assertEqual(len(found), 1)
+                        self.assertEqual(found[0]["properties"]["j"], "B|A")
+                        self.assertEqual(found[0]["properties"]["a_total"], 1)
 
     def test_source_changes_and_incomplete_coverage_are_rejected(self):
         with tempfile.TemporaryDirectory() as temporary:

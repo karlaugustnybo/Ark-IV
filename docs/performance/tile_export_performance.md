@@ -57,7 +57,12 @@ Handled failures and interruptions retain the previous selected generation.
 Failed compiler launches stop processes already started by that compilation.
 Consumers needing archive and metadata across requests should pin the immutable
 generation path. Interrupted groups restart; completed groups remain reusable.
-Ordinary concurrent input changes are rejected before publication.
+The builder checks captured input inode, size and modification-time snapshots
+before accepting new resolution-group receipts and before publication. A detected
+change revokes group receipts accepted during that attempt, so restoring the
+original inputs cannot reuse suspect groups. This guards ordinary persistent
+concurrent changes; it is not an immutable input snapshot and cannot detect a
+change restored between checks.
 
 ## Verification and performance claims
 
