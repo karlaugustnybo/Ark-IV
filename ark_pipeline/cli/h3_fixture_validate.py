@@ -65,6 +65,8 @@ def _verify_sources(source: Path, producer: dict) -> dict:
     verified_files = set()
     for name in producer["chunk_receipts"]:
         receipt_path = source / name
+        if sha256(receipt_path) != producer["chunk_receipt_sha256"][name]:
+            raise ValueError(f"chunk receipt hash differs from producer report: {receipt_path}")
         receipt = json.loads(receipt_path.read_text())
         if (
             receipt["status"] != "passed"
@@ -119,6 +121,8 @@ def run(
 ) -> dict:
     source = source.resolve()
     output = output.resolve()
+    if base_cell is not None and (output / "pilot_generation.json").exists():
+        raise ValueError("partial validation cannot reuse a completed output; use a separate output")
     producer_path = source / "producer_report.json"
     producer = json.loads(producer_path.read_text())
     dictionary = _verify_sources(source, producer)

@@ -128,6 +128,75 @@ class H3FixtureTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "stale chunk"):
                 produce(fixture, source, PROFILE, chunk_size=2)
 
+    def test_producer_reuse_preserves_validated_identity_and_original_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fixture, species, systems = self.fixtures(root)
+            source, output = root / "source", root / "validation"
+            original = produce(fixture, source, PROFILE, chunk_size=2)
+            validate(source, species, systems, output)
+            report_path = source / "producer_report.json"
+            report_bytes = report_path.read_bytes()
+            with patch("ark_pipeline.cli.h3_fixture_partitions.runtime_identity", return_value={"different": "reuse runtime"}):
+                reused = produce(fixture, source, PROFILE, chunk_size=2)
+            self.assertEqual(reused, original)
+            self.assertEqual(report_path.read_bytes(), report_bytes)
+            with patch("ark_pipeline.cli.h3_fixture_validate.aggregate_cover_base", side_effect=AssertionError("recomputed")):
+                self.assertTrue(validate(source, species, systems, output)["complete_fixture"])
+            table = pq.read_table(fixture)
+            rows = table.to_pylist()
+            rows[0]["source_sha256"] = "b" * 64
+            pq.write_table(pa.Table.from_pylist(rows, schema=table.schema), fixture)
+            with self.assertRaisesRegex(ValueError, "dictionary"):
+                produce(fixture, source, PROFILE, chunk_size=2)
+            self.assertEqual(report_path.read_bytes(), report_bytes)
+
+    def test_completed_generation_survives_partial_and_failed_reuse(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fixture, species, systems = self.fixtures(root)
+            source, output = root / "source", root / "validation"
+            producer = produce(fixture, source, PROFILE, chunk_size=2)
+            base = int(next(iter(producer["by_base"])))
+            partial = validate(source, species, systems, output, base_cell=base)
+            self.assertFalse(partial["complete_fixture"])
+            self.assertFalse((output / "pilot_generation.json").exists())
+            self.assertTrue(validate(source, species, systems, output)["complete_fixture"])
+            before = {path: path.read_bytes() for path in output.rglob("*") if path.is_file()}
+            with self.assertRaisesRegex(ValueError, "partial.*completed"):
+                validate(source, species, systems, output, base_cell=base)
+            self.assertEqual({path: path.read_bytes() for path in output.rglob("*") if path.is_file()}, before)
+            with patch("ark_pipeline.cli.h3_fixture_validate.prepare_species", side_effect=RuntimeError("interrupted")):
+                with self.assertRaisesRegex(RuntimeError, "interrupted"):
+                    validate(source, species, systems, output)
+            self.assertEqual({path: path.read_bytes() for path in output.rglob("*") if path.is_file()}, before)
+            rows = pq.read_table(species).to_pylist()
+            rows[0]["has_dna_species_level"] = False
+            pq.write_table(pa.Table.from_pylist(rows), species)
+            with self.assertRaisesRegex(ValueError, "stale base receipt"):
+                validate(source, species, systems, output)
+            self.assertEqual({path: path.read_bytes() for path in output.rglob("*") if path.is_file()}, before)
+
+    def test_completed_producer_refuses_modified_receipt_without_replacing_report(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fixture, species, systems = self.fixtures(root)
+            source = root / "source"
+            produce(fixture, source, PROFILE, chunk_size=2)
+            report_path = source / "producer_report.json"
+            before = report_path.read_bytes()
+            receipt_path = source / "chunk_0000" / "receipt.json"
+            receipt = json.loads(receipt_path.read_text())
+            receipt["kernel_seconds"] += 1
+            receipt_path.write_text(json.dumps(receipt))
+            with self.assertRaisesRegex(ValueError, "completed producer report"):
+                produce(fixture, source, PROFILE, chunk_size=2)
+            self.assertEqual(report_path.read_bytes(), before)
+            output = root / "validation"
+            with self.assertRaisesRegex(ValueError, "chunk receipt hash differs"):
+                validate(source, species, systems, output)
+            self.assertFalse(output.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

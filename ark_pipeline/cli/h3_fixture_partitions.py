@@ -306,8 +306,20 @@ def run(
         "elapsed_seconds": time.perf_counter() - started,
         "by_base": {str(base): dict(values) for base, values in by_base.items()},
         "chunk_receipts": [str(path.relative_to(output)) for path in chunks],
+        "chunk_receipt_sha256": {str(path.relative_to(output)): sha256(path) for path in chunks},
     }
-    atomic_json(output / "producer_report.json", report)
+    report_path = output / "producer_report.json"
+    if report_path.exists():
+        completed = json.loads(report_path.read_text())
+        run_metadata = {"created_at", "runtime", "elapsed_seconds"}
+        if {k: v for k, v in completed.items() if k not in run_metadata} != {
+            k: v for k, v in report.items() if k not in run_metadata
+        }:
+            raise ValueError("completed producer report does not match verified inputs and outputs")
+        # This is the completed production record, including its original runtime/timing.
+        # A checksum-verified reuse does not replace it with a later invocation's metadata.
+        return completed
+    atomic_json(report_path, report)
     return report
 
 

@@ -62,7 +62,10 @@ comparisons. Use fresh outputs for each single-base comparison.
 
 The fixture validator checks source/dictionary hashes, chunk totals and output
 hashes before receipt reuse. An incomplete chunk/base requires manual review;
-stale or damaged receipts are refused. A selected-base run is partial. Only a
+stale or damaged receipts are refused. Verified producer reuse preserves the
+completed report and its original runtime/timing; receipt checksums bind that
+report to its partitions. A selected-base run is partial and requires a separate
+output if the requested output already has a complete-generation marker. Only a
 complete fixture comparison writes `pilot_generation.json`; this marker never
 changes serving `current`. A failed fresh attempt does not write a marker; existing validated outputs are
 not overwritten when an input mismatch is refused.
