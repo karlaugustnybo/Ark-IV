@@ -573,6 +573,7 @@ def spatial_code_fingerprint() -> str:
         [
             Path(__file__),
             REPOSITORY_ROOT / "ark_pipeline/spatial/coverage.py",
+            REPOSITORY_ROOT / "ark_pipeline/spatial/boundaries.py",
             REPOSITORY_ROOT / "ark_pipeline/spatial/tile_parallel.py",
             REPOSITORY_ROOT / "config/data_sources.toml",
             _configured_inventory_path("iucn-spatial-tables"),

@@ -32,6 +32,30 @@ class AntimeridianUnwrapTests(unittest.TestCase):
         multi = MultiPolygon([source])
         self.assertIs(unwrap_antimeridian(multi), multi)
 
+    def test_explicit_polar_cap_keeps_planar_shell_and_holes(self):
+        for hemisphere in (1, -1):
+            shell = [(-179.999, 89.9 * hemisphere), (179.999, 89.9 * hemisphere),
+                     (179.999, 60 * hemisphere), (90, 60 * hemisphere),
+                     (0, 60 * hemisphere), (-90, 60 * hemisphere),
+                     (-179.999, 60 * hemisphere)]
+            hole = [(-20, 70 * hemisphere), (20, 70 * hemisphere),
+                    (20, 75 * hemisphere), (-20, 75 * hemisphere)]
+            source = Polygon(shell, [hole])
+            self.assertTrue(source.is_valid)
+            self.assertIs(unwrap_antimeridian(source), source)
+            self.assertFalse(source.covers(Point(0, 72 * hemisphere)))
+            self.assertTrue(source.covers(Point(0, 80 * hemisphere)))
+            self.assertIs(unwrap_antimeridian(MultiPolygon([source])).geoms[0].equals(source), True)
+
+    def test_global_range_clipped_at_latitude_keeps_original_shell(self):
+        source = Polygon([(-179, -55), (179, -55), (179.2, -55.00013), (179.2, -25),
+                          (90, -25), (0, -25), (-90, -25), (-179, -25)],
+                         [[(-20, -45), (20, -45), (20, -35), (-20, -35)]])
+        self.assertTrue(source.is_valid)
+        self.assertIs(unwrap_antimeridian(source), source)
+        self.assertFalse(source.covers(Point(0, -40)))
+        self.assertTrue(source.covers(Point(0, -30)))
+
     def test_crossing_shell_places_hole_by_containment_regardless_of_start_vertex(self):
         shell = [(179, -3), (-179, -3), (-179, 3), (179, 3), (179, -3)]
         # The hole starts on the other side of the seam from the shell.
