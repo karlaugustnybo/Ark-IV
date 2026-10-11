@@ -43,6 +43,11 @@ uv run python -m ark_pipeline.cli.sources_check_hydrobasins --root /path/to/auth
 The checker returns exit code 2 when IDs remain missing. Inputs and reports stay
 local under the publication policy; inventory URLs do not grant redistribution rights.
 
+Normal `just download` and `just update` acquisition refresh a registered
+HydroBASINS snapshot when required inventory files are missing, including upgrades
+from nine standard archives to all eighteen standard and lake archives within the
+same `v1c` release. Complete same-release inventories remain current.
+
 The row policy follows IUCN's published 2021+ richness selection: Presence
 codes 1 and 4, Origin codes 1, 2 and 6, and Seasonality codes 1, 2, 3 and 5.
 This is a *potential richness* definition, not a claim that every included
