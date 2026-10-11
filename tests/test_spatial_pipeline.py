@@ -3,9 +3,11 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import math
 import tempfile
 import unittest
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
@@ -16,10 +18,17 @@ import h3.api.numpy_int as h3_int
 import numpy as np
 import pyarrow.parquet as pq
 import pyogrio
+from h3ronpy import ContainmentMode, compact
+from h3ronpy.vector import geometry_to_cells
 from shapely.geometry import MultiPolygon, Polygon, box
 
 from ark_pipeline.cli.spatial_pairs import (
     GeometryWorkerFailure,
+    GeometryWorkerSuccess,
+    _iter_zipped_csv_batches,
+    _pair_writer,
+    _process_tagged_bounded,
+    _write_pair_table,
     build,
     build_parser,
     exclusion_reason_values,
@@ -30,12 +39,17 @@ from ark_pipeline.cli.spatial_pairs import (
 from ark_pipeline.runtime.provenance import sha256
 from ark_pipeline.spatial.coverage import (
     GeometryCoverageError,
+    _candidate_tile_jobs,
     _candidate_tile_size,
+    _canonical_piece,
+    _fill_candidate_tile,
+    _fill_complex_overlap,
     _simplified_decision_geometry,
     cell_polygon,
     direct_any_touch_intersecting_cells_native,
     exact_intersecting_cells_native,
     load_spatial_profile,
+    polygonal_parts,
 )
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -47,6 +61,112 @@ class AnyTouchSpatialSemanticsTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.profile = load_spatial_profile(ANY_TOUCH_PROFILE_PATH)
+
+    def test_relationship_csv_streams_quoted_newlines_across_blocks(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "relations.zip"
+            rows = 60000
+            with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr(
+                    "relations.csv",
+                    'hybas_id,id_no,presence,origin,seasonal,notes\n'
+                    + '1120000010,42,1,1,1,"first line\nsecond line"\n' * rows,
+                )
+            columns = ["hybas_id", "id_no", "presence", "origin", "seasonal"]
+            batches = list(_iter_zipped_csv_batches(
+                {"resolved_path": path, "logical_name": "relations.zip", "format": "hydrobasin"},
+                columns, 1,
+            ))
+            self.assertGreater(len(batches), 1)
+            self.assertEqual(sum(batch.num_rows for _, batch in batches), rows)
+            for member, batch in batches:
+                self.assertEqual(member, "relations.csv")
+                self.assertEqual(batch.schema.names, columns)
+                self.assertEqual(set(batch["hybas_id"].to_pylist()), {1120000010})
+                self.assertEqual(set(batch["id_no"].to_pylist()), {42})
+
+    def test_subdivision_preserves_native_overlap_with_many_holes(self) -> None:
+        holes = [box(12 + x * .03, 55 + y * .03, 12.01 + x * .03, 55.01 + y * .03)
+                 for x in range(1, 10) for y in range(1, 10)]
+        geometry = Polygon(box(12, 55, 12.4, 55.4).exterior.coords,
+                           [hole.exterior.coords for hole in holes])
+        expected = np.unique(np.asarray(geometry_to_cells(
+            geometry, 7, ContainmentMode.IntersectsBoundary), dtype=np.uint64))
+        np.testing.assert_array_equal(np.unique(_fill_complex_overlap(geometry, 7)), expected)
+        actual = direct_any_touch_intersecting_cells_native(geometry, self.profile)
+        np.testing.assert_array_equal(actual.cells, expected)
+
+    def test_delta_pair_encoding_round_trips_across_polygon_resets(self) -> None:
+        cells = np.asarray([608531686325485567, 608531686325485568,
+                            608531686006718463, 608531686006718464], dtype=np.uint64)
+        ids = np.asarray([19, 19, 4, 4], dtype=np.int64)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "pairs.parquet"
+            with _pair_writer(path) as writer:
+                _write_pair_table(writer, cells, ids)
+            table = pq.read_table(path)
+            np.testing.assert_array_equal(table["h3_index"].to_numpy(), cells)
+            np.testing.assert_array_equal(table["iucn_sis_id"].to_numpy(), ids)
+
+    def test_compact_worker_transport_preserves_fine_cells(self) -> None:
+        polygon = box(12.4, 55.5, 12.7, 55.8)
+        coverage = exact_intersecting_cells_native(polygon, self.profile)
+        packed = np.asarray(compact(coverage.cells), dtype=np.uint64)
+        self.assertLess(len(packed), len(coverage.cells))
+        result = GeometryWorkerSuccess(replace(coverage, cells=packed), 1.0, True)
+        with patch("ark_pipeline.cli.spatial_pairs._polyfill_wkb", return_value=result), ThreadPoolExecutor(max_workers=2) as executor:
+            restored = list(_process_tagged_bounded(executor, (({"row": i}, b"fixture") for i in range(6))))
+        self.assertEqual(sorted(tag["row"] for tag, _ in restored), list(range(6)))
+        for _, item in restored:
+            self.assertFalse(item.cells_compacted)
+            np.testing.assert_array_equal(item.coverage.cells, coverage.cells)
+
+    def test_preclassified_tiles_preserve_overlap_and_guaranteed_cell_sets(self) -> None:
+        fixtures = [
+            box(12, 55, 12.3, 55.3),
+            box(12, 55, 12.3, 55.3).difference(box(12.1, 55.1, 12.2, 55.2)),
+            MultiPolygon([box(12, 55, 12.12, 55.12), box(12.2, 55.2, 12.3, 55.3)]),
+            box(179.8, 10, 180.2, 10.2),
+            box(-180.2, -10.2, -179.8, -10),
+            box(20, 85, 20.2, 85.2),
+            Polygon(box(12, 55, 12.4, 55.4).exterior.coords,
+                    [box(12 + x * .03, 55 + y * .03, 12.01 + x * .03, 55.01 + y * .03).exterior.coords
+                     for x in range(1, 10) for y in range(1, 10)]),
+        ]
+        tile_size = .1
+        empty_tiles = full_tiles = 0
+        for geometry in fixtures:
+            original = []
+            polygons = list(geometry.geoms) if isinstance(geometry, MultiPolygon) else [geometry]
+            for polygon in polygons:
+                x0, y0, x1, y1 = polygon.bounds
+                x = math.floor(x0 / tile_size) * tile_size
+                while x < x1 or math.isclose(x, x1):
+                    y = math.floor(y0 / tile_size) * tile_size
+                    while y < y1 or math.isclose(y, y1):
+                        original.append((polygon, x, y, tile_size))
+                        y += tile_size
+                    x += tile_size
+            optimized = list(_candidate_tile_jobs(geometry, tile_size))
+            self.assertEqual(len(original), len(optimized))
+            for before, after in zip(original, optimized, strict=True):
+                empty_tiles += after[0] is None
+                full_tiles += after[0] is not None and after[0].equals(box(after[1], after[2], after[1] + tile_size, after[2] + tile_size))
+                for guaranteed in (False, True):
+                    polygon, x, y, size = before
+                    clipped = polygonal_parts(polygon.intersection(box(x, y, x + size, y + size)))
+                    if clipped is None or clipped.is_empty:
+                        expected = (np.empty(0, dtype=np.uint64), np.empty(0, dtype=np.uint64))
+                    else:
+                        canonical = _canonical_piece(clipped)
+                        expected = (np.asarray(geometry_to_cells(canonical, 7, ContainmentMode.IntersectsBoundary), dtype=np.uint64),
+                                    np.asarray(geometry_to_cells(canonical, 7, ContainmentMode.ContainsBoundary), dtype=np.uint64)
+                                    if guaranteed else np.empty(0, dtype=np.uint64))
+                    actual = _fill_candidate_tile(after, 7, guaranteed)
+                    for left, right in zip(expected, actual, strict=True):
+                        np.testing.assert_array_equal(np.sort(left), np.sort(right))
+        self.assertGreater(empty_tiles, 0)
+        self.assertGreater(full_tiles, 0)
 
     def test_production_rejects_superseded_kernel_profiles(self) -> None:
         profile = replace(self.profile, production_kernel="direct-tiled-exact-v1")

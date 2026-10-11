@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import fcntl
 import os
+import resource
 import signal
 import subprocess
 import time
@@ -399,11 +400,52 @@ class LogTail:
             dashboard.logs.append((time.time(), line[:500]))
 
 
+def _group_has_live_members(group):
+    for member in psutil.process_iter(["pid", "status"]):
+        try:
+            if os.getpgid(member.pid) == group and member.info["status"] != psutil.STATUS_ZOMBIE:
+                return True
+        except (ProcessLookupError, PermissionError, psutil.NoSuchProcess):
+            continue
+    return False
+
+
+def _signal_stage_group(process, sig):
+    try:
+        os.killpg(process.pid, sig)
+    except ProcessLookupError:
+        pass
+    except PermissionError:
+        # Darwin can return EPERM for a group whose final member just exited.
+        # Never hide a signal failure while the owned group is still running.
+        if process.poll() is None or _group_has_live_members(process.pid):
+            raise
+
+
+def _terminate_group(process, grace_seconds=5):
+    """Cancel only the stage session we created, including an exited leader's workers."""
+    _signal_stage_group(process, signal.SIGTERM)
+    deadline = time.monotonic() + grace_seconds
+    while time.monotonic() < deadline:
+        process.poll()  # reap the leader independently of the group lifecycle
+        if not _group_has_live_members(process.pid):
+            process.wait()
+            return
+        time.sleep(0.05)
+    # The leader may already have exited while a worker ignored SIGTERM.
+    _signal_stage_group(process, signal.SIGKILL)
+    process.wait()
+    # Wait for killed workers to leave the runnable tree before releasing the lock.
+    while _group_has_live_members(process.pid):
+        time.sleep(0.01)
+
+
 def run_command(stage, output: Path, environment: dict, dashboard: Dashboard | None = None, cwd=None):
     log_path = output / "logs" / (stage["name"] + ".log")
     log_path.parent.mkdir(parents=True, exist_ok=True)
     events = output / "progress.jsonl"
     env = {**environment, "PIPELINE_PROGRESS_PATH": str(events), "PIPELINE_STAGE": stage["name"], "PYTHONUNBUFFERED": "1"}
+    usage_before = resource.getrusage(resource.RUSAGE_CHILDREN)
     started = time.monotonic()
     result = {**stage, "status": "running", "started_at": datetime.now().isoformat(), "log": str(log_path), "peak_process_tree_rss_bytes": None}
     if dashboard and stage["name"] in dashboard.states:
@@ -415,6 +457,8 @@ def run_command(stage, output: Path, environment: dict, dashboard: Dashboard | N
         tail = LogTail(log_path)
         try:
             while process.poll() is None:
+                if stage.get("timeout_seconds") and time.monotonic() - started > stage["timeout_seconds"]:
+                    raise TimeoutError(f"{stage['name']} exceeded its {stage['timeout_seconds']}-second cutoff")
                 if dashboard:
                     tail.update(dashboard)
                     dashboard.tick(process.pid)
@@ -426,20 +470,18 @@ def run_command(stage, output: Path, environment: dict, dashboard: Dashboard | N
                 except subprocess.TimeoutExpired:
                     pass
         except BaseException as error:
-            with contextlib.suppress(ProcessLookupError):
-                os.killpg(process.pid, signal.SIGTERM)
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                with contextlib.suppress(ProcessLookupError):
-                    os.killpg(process.pid, signal.SIGKILL)
-                process.wait()
+            _terminate_group(process)
             if dashboard:
                 for name, state in dashboard.states.items():
                     if state["status"] == "running":
                         dashboard.accept({"kind": "stage_end", "stage": name, "status": "interrupted" if isinstance(error, KeyboardInterrupt) else "failed",
                                           "time": time.time(), "elapsed": time.monotonic() - started})
             raise
+    usage_after = resource.getrusage(resource.RUSAGE_CHILDREN)
+    result["filesystem_output_blocks"] = usage_after.ru_oublock - usage_before.ru_oublock
+    result["filesystem_output_bytes"] = result["filesystem_output_blocks"] * 512 or None
+    if result["filesystem_output_bytes"] is None:
+        result["filesystem_output_note"] = "Block-write accounting unavailable or zero; not evidence of zero writes."
     result.update(wall_seconds=time.monotonic() - started, exit_code=process.returncode,
                   status="passed" if process.returncode == 0 else "action-required" if process.returncode == 2 else "failed")
     if dashboard:

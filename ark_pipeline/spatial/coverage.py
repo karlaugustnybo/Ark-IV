@@ -13,13 +13,14 @@ import json
 import math
 import tomllib
 from dataclasses import dataclass, replace
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 
 import h3.api.numpy_int as h3_int
 import numpy as np
 import shapely
-from h3ronpy import ContainmentMode
+from h3ronpy import ContainmentMode, uncompact
 from h3ronpy.vector import cells_to_wkb_polygons, geometry_to_cells
 from shapely import affinity, make_valid
 from shapely.geometry import MultiPolygon, Polygon, box
@@ -438,29 +439,117 @@ def _candidate_tile_size(geometry: BaseGeometry, profile: SpatialProfile) -> flo
     return profile.candidate_tile_degrees
 
 
+def _ring_boundary_index(polygon):
+    """Index short ring sections so global shells do not defeat bbox pruning."""
+    sections = []
+    for ring in (polygon.exterior, *polygon.interiors):
+        coordinates = np.asarray(ring.coords)
+        sections.extend(
+            shapely.LineString(coordinates[start:start + 65])
+            for start in range(0, len(coordinates) - 1, 64)
+        )
+    return shapely.STRtree(sections)
+
+
 def _candidate_tile_jobs(geometry, tile_size):
     for polygon in _iter_polygons(geometry):
+        shapely.prepare(polygon)
+        boundary_index = _ring_boundary_index(polygon) if len(polygon.interiors) >= 64 else None
         min_x, min_y, max_x, max_y = polygon.bounds
         x = math.floor(min_x / tile_size) * tile_size
         while x < max_x or math.isclose(x, max_x):
             y = math.floor(min_y / tile_size) * tile_size
             while y < max_y or math.isclose(y, max_y):
-                yield polygon, x, y, tile_size
+                tile = box(x, y, x + tile_size, y + tile_size)
+                # Classify in the producer: prepared predicates are never
+                # initialized concurrently by helper threads. Full/empty tiles
+                # need no overlay against a coastline with thousands of holes.
+                if boundary_index is not None:
+                    # With no boundary crossing, a connected tile is entirely
+                    # inside or outside. Avoid covers() repeatedly scanning all
+                    # hole representatives in a global ocean polygon.
+                    if boundary_index.query(tile, predicate="intersects").size:
+                        yield polygon, x, y, tile_size
+                    elif polygon.contains(tile.centroid):
+                        yield tile, x, y, tile_size
+                    else:
+                        yield None, x, y, tile_size
+                elif not polygon.intersects(tile):
+                    yield None, x, y, tile_size
+                elif polygon.covers(tile):
+                    yield tile, x, y, tile_size
+                else:
+                    yield polygon, x, y, tile_size
                 y += tile_size
             x += tile_size
 
 
+def _fill_complex_overlap(geometry, resolution, depth=0):
+    """Bound polygon complexity per native fill, retaining the closed union."""
+    if shapely.get_num_coordinates(geometry) > 48 and depth < 4:
+        x0, y0, x1, y1 = geometry.bounds
+        if max(x1 - x0, y1 - y0) > 0.25:
+            if x1 - x0 >= y1 - y0:
+                middle = (x0 + x1) / 2
+                windows = (box(x0, y0, middle, y1), box(middle, y0, x1, y1))
+            else:
+                middle = (y0 + y1) / 2
+                windows = (box(x0, y0, x1, middle), box(x0, middle, x1, y1))
+            chunks = []
+            for window in windows:
+                part = polygonal_parts(geometry.intersection(window))
+                if part is not None and not part.is_empty:
+                    chunks.append(_fill_complex_overlap(part, resolution, depth + 1))
+            return np.concatenate(chunks) if chunks else np.empty(0, dtype=np.uint64)
+    return np.asarray(geometry_to_cells(
+        geometry, resolution, ContainmentMode.IntersectsBoundary,
+    ), dtype=np.uint64)
+
+
+_SHARED_FULL_TILES = None
+
+
+def configure_full_tile_cache(shared=None):
+    """Start a build-local cache; no coverage survives a worker initialization."""
+    global _SHARED_FULL_TILES
+    _SHARED_FULL_TILES = shared
+    _compact_full_tile.cache_clear()
+
+
+@lru_cache(maxsize=4096)
+def _compact_full_tile(x, y, tile_size, resolution):
+    key = (x, y, tile_size, resolution)
+    if _SHARED_FULL_TILES is not None:
+        cached = _SHARED_FULL_TILES.get(key)
+        if cached is not None:
+            return cached
+    cells = np.asarray(geometry_to_cells(
+        _canonical_piece(box(x, y, x + tile_size, y + tile_size)),
+        resolution, ContainmentMode.IntersectsBoundary, compact=True,
+    ), dtype=np.uint64)
+    if _SHARED_FULL_TILES is not None and len(_SHARED_FULL_TILES) < 16384:
+        _SHARED_FULL_TILES[key] = cells
+    return cells
+
+
 def _fill_candidate_tile(job, resolution, include_guaranteed):
     polygon, x, y, tile_size = job
-    clipped = polygon.intersection(box(x, y, x + tile_size, y + tile_size))
-    polygonal = polygonal_parts(clipped)
     empty = np.empty(0, dtype=np.uint64)
+    if polygon is None:
+        return empty, empty
+    tile = box(x, y, x + tile_size, y + tile_size)
+    if not include_guaranteed and polygon.equals_exact(tile, 0):
+        return np.asarray(uncompact(_compact_full_tile(x, y, tile_size, resolution), resolution), dtype=np.uint64), empty
+    clipped = polygon.intersection(tile)
+    polygonal = polygonal_parts(clipped)
     if polygonal is None or polygonal.is_empty:
         return empty, empty
     canonical = _canonical_piece(polygonal)
-    candidates = np.asarray(geometry_to_cells(
+    # Guaranteed cells must be contained by a complete original tile, so that
+    # reference path deliberately keeps the unsplit calculation.
+    candidates = (np.asarray(geometry_to_cells(
         canonical, resolution, ContainmentMode.IntersectsBoundary,
-    ), dtype=np.uint64)
+    ), dtype=np.uint64) if include_guaranteed else _fill_complex_overlap(canonical, resolution))
     guaranteed = np.asarray(geometry_to_cells(
         canonical, resolution, ContainmentMode.ContainsBoundary,
     ), dtype=np.uint64) if include_guaranteed else empty
