@@ -737,8 +737,13 @@ relationships rather than silently publish reduced totals.
 
 The coarse map uses a compact Arrow snapshot. PMTiles features carry cell ID,
 resolution, compact metric names, system prefixes, and delimiter-encoded
-boundary memberships. The managed compiler streams GeoJSON sequences into
-Tippecanoe without materializing a global GeoJSON file. It disables feature and
+boundary memberships. Managed static tiles encode zero metric counts by absent
+properties, with `sparse-zero-v1` and default zero declared in map metadata. Null
+metric inputs are rejected; missing scientific evidence retains its upstream
+meaning. Dense diagnostic features remain available. The managed compiler uses
+bounded GeoJSON sequences or ordered partitioned FlatGeobuf inputs, without
+materializing a global GeoJSON file. Coarse and fine zoom groups compile separately
+and are joined after validation. It disables feature and
 tile-size limits and preserves input order; it does not promise pixel-perfect
 source geometry at every zoom. Tile geometry is a display representation, not
 the authoritative pair relation. Current build zoom ranges are 0–6 for coarse

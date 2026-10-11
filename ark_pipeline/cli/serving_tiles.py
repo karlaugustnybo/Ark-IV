@@ -5,16 +5,19 @@ from __future__ import annotations
 import argparse
 import contextlib
 import fcntl
+import gc
 import json
 import os
 import shutil
 import subprocess
+import sys
 import time
 from importlib.metadata import version
 from pathlib import Path
 from types import SimpleNamespace
 
 import duckdb
+import psutil
 import pyarrow.parquet as pq
 
 from ark_pipeline.builders.coarse_cache import sql_path, wide_aggregate_query
@@ -34,7 +37,7 @@ from ark_pipeline.runtime.provenance import (
     sha256,
 )
 from ark_pipeline.runtime.resources import configure_duckdb, configured_count, positive_int
-from ark_pipeline.tiles import METRIC_COLUMNS, BoundaryBatchIndex, stream_query
+from ark_pipeline.tiles import METRIC_COLUMNS, PROPERTY_KEYS, BoundaryBatchIndex, stream_query
 from backend.config import get_settings
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -179,61 +182,198 @@ def write_receipt(directory: Path, identity: dict, names: tuple[str, ...], **ext
     })
 
 
+def parallel_stream(jobs, target, stream, args, environment, progress, total, offset):
+    """Isolate the producer so its fork server exits before native compilation."""
+    config_path = target.with_suffix(".stream.json")
+    report_path = target.with_suffix(".stream-report.json")
+    report_path.unlink(missing_ok=True)
+    atomic_json(config_path, {
+        "database": args._tile_database, "jobs": jobs, "workers": max(1, args.tile_threads - 1),
+        "threads": args.threads, "memory_limit": args.memory_limit, "scratch_dir": str(args.scratch_dir),
+        "batch_size": args.batch_size, "overall_total": total, "overall_offset": offset,
+        "report": str(report_path), "format": "fgb",
+    })
+    child_env = {**environment,
+                 "ARK_TILE_BOUNDARIES": json.dumps({key: str(getattr(args, key)) for key in BOUNDARIES}),
+                 "OPENBLAS_NUM_THREADS": "1", "VECLIB_MAXIMUM_THREADS": "1", "OMP_NUM_THREADS": "1"}
+    producer = subprocess.Popen([sys.executable, "-m", "ark_pipeline.tile_stream_worker", str(config_path)],
+                                stdout=stream, env=child_env)
+    reported = set()
+    def read_report():
+        if report_path.exists():
+            report = json.loads(report_path.read_text())
+            for name, detail in report.items():
+                if name not in reported:
+                    if progress:
+                        progress(name, detail)
+                    reported.add(name)
+            return report
+        return {}
+    try:
+        while producer.poll() is None:
+            read_report()
+            time.sleep(.2)
+        if producer.returncode:
+            raise subprocess.CalledProcessError(producer.returncode, producer.args)
+        return read_report()
+    except BaseException:
+        # Keep descendants in the benchmark's process group, so its normal
+        # SIGTERM cleanup reaches them too. Local exceptions kill only this tree.
+        with contextlib.suppress(psutil.NoSuchProcess):
+            for child in reversed(psutil.Process(producer.pid).children(recursive=True)):
+                with contextlib.suppress(psutil.NoSuchProcess):
+                    child.kill()
+        producer.kill()
+        producer.wait()
+        raise
+
+
+def split_balanced_jobs(jobs: list, count: int) -> list[list]:
+    """Divide jobs into deterministic feature-balanced buckets for parallel compilers."""
+    buckets: list[list] = [[] for _ in range(count)]
+    totals = [0] * count
+    for job in sorted(jobs, key=lambda job: (-job[3], job[0])):
+        index = totals.index(min(totals))
+        buckets[index].append(job)
+        totals[index] += job[3]
+    return [bucket for bucket in buckets if bucket]
+
+
 def compile_queries(connection, jobs: list, target: Path, indexes: dict,
-                    args: argparse.Namespace, environment: dict, progress=None) -> dict:
+                    args: argparse.Namespace, environment: dict, progress=None,
+                    *, release_indexes: bool = False, overall_total: int | None = None,
+                    overall_offset: int = 0, groups: int | None = None) -> dict:
     from ark_pipeline.runtime.progress import relay_compiler
     target.parent.mkdir(parents=True, exist_ok=True)
     minimum = min(0 if resolution == 3 else 8 for _, resolution, _, _ in jobs)
     maximum = max(6 if resolution == 3 else 12 for _, resolution, _, _ in jobs)
-    command = [args.tippecanoe, "--force", "--output", str(target),
-               "--minimum-zoom", str(minimum), "--maximum-zoom", str(maximum),
-               "--no-feature-limit", "--no-tile-size-limit", "--preserve-input-order",
-               "--read-parallel", "--temporary-directory", str(args.scratch_dir), "--quiet"]
+    parallel = bool(getattr(args, "_parallel_tiles", False))
+    # Several concurrent compiler processes trade temporary space for wall
+    # time. One process per balanced partition group keeps each compiler's
+    # resident tile buffers small while saturating more cores during mushing.
+    effective = max(1, min(groups or 1, len(jobs))) if parallel else 1
+    shared_flags = ["--minimum-zoom", str(minimum), "--maximum-zoom", str(maximum),
+                    "--no-feature-limit", "--no-tile-size-limit", "--preserve-input-order",
+                    "--read-parallel"]
     started = time.perf_counter()
-    if progress_enabled():
-        command.remove("--quiet")
-    process = subprocess.Popen(command, stdin=subprocess.PIPE, stderr=subprocess.PIPE if progress_enabled() else None, text=True, env=environment)
-    relay = relay_compiler(process.stderr) if process.stderr else None
+    feature_total = sum(expected for _, _, _, expected in jobs)
+    overall_total = feature_total if overall_total is None else overall_total
+    emit("work", task="tile-stream", phase="Stream map features", overall=True, scope="phase",
+         completed=overall_offset, total=overall_total, unit="features streamed", force=True)
+    profiles = None
+    resolutions = None
+    if parallel:
+        resolutions = {job[1] for job in jobs}
+        if len(resolutions) != 1:
+            raise ValueError("Binary compiler inputs must belong to one resolution group")
+        emit("phase", phase="Encode binary map features", force=True)
+        profiles = parallel_stream(jobs, target, subprocess.DEVNULL, args, environment, progress,
+                                   overall_total, overall_offset)
+    buckets = split_balanced_jobs(jobs, effective) if effective > 1 else [jobs]
+    commands = []
+    for index, bucket in enumerate(buckets):
+        bucket_target = target if index == len(buckets) - 1 and effective == 1 \
+            else target.with_name(f"{target.stem}-{index}.pmtiles")
+        scratch = Path(args.scratch_dir)
+        scratch = scratch if effective == 1 else scratch / f"compiler-{index}"
+        scratch.mkdir(parents=True, exist_ok=True)
+        command = [args.tippecanoe, "--force", "--output", str(bucket_target), *shared_flags,
+                   "--temporary-directory", str(scratch), "--quiet"]
+        if parallel:
+            command += ["--layer", f"res{next(iter(resolutions))}"]
+            # Tippecanoe reads FlatGeobuf Int64 properties as strings unless their
+            # output type is declared. Keep the existing integer MVT contract.
+            for key in ("resolution", *PROPERTY_KEYS):
+                command += ["--attribute-type", f"{key}:int"]
+            command += [profiles[job[0]]["input_path"] for job in bucket]
+        if progress_enabled():
+            command.remove("--quiet")
+        commands.append(command)
+    stdin_stream = subprocess.PIPE if not parallel else subprocess.DEVNULL
+    processes, relays = [], []
     try:
+        # Track each compiler immediately: a later launch or relay failure must
+        # also stop compilers already started by this call.
+        for command in commands:
+            process = subprocess.Popen(command, stdin=stdin_stream,
+                                       stderr=subprocess.PIPE if progress_enabled() else None,
+                                       text=True, env=environment)
+            processes.append(process)
+            relays.append(None)
+            if process.stderr:
+                relays[-1] = relay_compiler(process.stderr)
         count = 0
-        feature_total = sum(expected for _, _, _, expected in jobs)
-        emit("work", task="tile-stream", phase="Stream map features", overall=True, scope="phase",
-             completed=0, total=feature_total, unit="features streamed", force=True)
-        for name, resolution, query, expected in jobs:
-            part_started = time.perf_counter()
-            def features_progress(done):
-                emit(task="features", phase=f"Stream {name}", completed=done, total=expected,
-                     fraction=done / max(1, expected), unit="partition features")
-                emit("work", task="tile-stream", phase="Stream map features", overall=True, scope="phase",
-                     completed=count + done, total=feature_total, unit="features streamed")
+        stream_totals = {}
+        if parallel:
+            if set(profiles) != {job[0] for job in jobs}:
+                raise ValueError("Parallel producer did not finish every partition")
+            for name, _, _, expected in jobs:
+                detail = profiles[name]
+                if detail["features"] != expected:
+                    raise ValueError(f"Unexpected feature count for {name}")
+                count += expected
+                for key in ("query_seconds", "feature_encoding_seconds", "pipe_write_seconds",
+                            "geojson_bytes", "flatgeobuf_bytes", "metric_cache_hits", "metric_cache_misses"):
+                    stream_totals[key] = stream_totals.get(key, 0) + detail[key]
+        else:
+            for name, resolution, query, expected in jobs:
+                part_started = time.perf_counter()
+                stream_profile = {}
+                def features_progress(done):
+                    emit(task="features", phase=f"Stream {name}", completed=done, total=expected,
+                         fraction=done / max(1, expected), unit="partition features")
+                    emit("work", task="tile-stream", phase="Stream map features", overall=True, scope="phase",
+                         completed=overall_offset + count + done, total=overall_total, unit="features streamed")
 
-            emitted = stream_query(connection, query, process.stdin, resolution, indexes, args.batch_size, progress=features_progress)
-            if emitted != expected:
-                raise ValueError(f"Expected {expected} features, emitted {emitted}")
-            count += emitted
-            if progress:
-                progress(name, {"features": emitted, "stream_with_backpressure_seconds": time.perf_counter() - part_started})
-        process.stdin.close()
+                emitted = stream_query(connection, query, processes[0].stdin, resolution, indexes,
+                                       args.batch_size, progress=features_progress,
+                                       omit_zero_metrics=True, profile=stream_profile)
+                if emitted != expected:
+                    raise ValueError(f"Expected {expected} features, emitted {emitted}")
+                count += emitted
+                for key, value in stream_profile.items():
+                    stream_totals[key] = stream_totals.get(key, 0) + value
+                if progress:
+                    progress(name, {"features": emitted, "stream_with_backpressure_seconds": time.perf_counter() - part_started,
+                                    **stream_profile})
+            processes[0].stdin.close()
+        if release_indexes:
+            # GEOS boundary indexes are large and no longer needed. Give their
+            # memory back before the compiler's most memory-intensive phase.
+            indexes.clear()
+            gc.collect()
         emit("task_end", task="features")
         emit("phase", phase="Compile tile zooms & archive indexes", force=True)
         streamed = time.perf_counter()
-        if process.wait():
-            raise subprocess.CalledProcessError(process.returncode, command)
-        if not valid_archive(target):
-            raise ValueError(f"Invalid PMTiles output: {target}")
+        for process in processes:
+            if process.wait():
+                raise subprocess.CalledProcessError(process.returncode, process.args)
+        targets = [target if index == len(buckets) - 1 and effective == 1
+                   else target.with_name(f"{target.stem}-{index}.pmtiles")
+                   for index in range(len(buckets))]
+        for path in targets:
+            if not valid_archive(path):
+                raise ValueError(f"Invalid PMTiles output: {path}")
         return {"features": count, "seconds": time.perf_counter() - started,
-                "stream_with_backpressure_seconds": streamed - started}
+                "stream_with_backpressure_seconds": streamed - started, **stream_totals}
     except BaseException:
-        process.kill()
-        with contextlib.suppress(BrokenPipeError):
-            process.stdin.close()
-        process.wait()
-        target.unlink(missing_ok=True)
+        for process in processes:
+            process.kill()
+            if process.stdin is not None and not parallel:
+                with contextlib.suppress(BrokenPipeError):
+                    process.stdin.close()
+            process.wait()
+        for command in commands:
+            Path(command[command.index("--output") + 1]).unlink(missing_ok=True)
         raise
     finally:
-        if relay:
-            relay.join(timeout=2)
-            process.stderr.close()
+        if profiles:
+            for detail in profiles.values():
+                Path(detail["input_path"]).unlink(missing_ok=True)
+        for process, relay in zip(processes, relays):
+            if relay:
+                relay.join(timeout=2)
+                process.stderr.close()
 
 
 def compile_shard(connection, query: str, resolution: int, expected: int, directory: Path,
@@ -243,6 +383,28 @@ def compile_shard(connection, query: str, resolution: int, expected: int, direct
                              indexes, args, environment)
     os.replace(target, directory / "part.pmtiles")
     return report
+
+
+def nonzero_metric_columns(parquet: pq.ParquetFile) -> tuple[str, ...]:
+    """Skip reading/sorting columns proven zero for every row, using footer stats.
+
+    Missing statistics, nulls or nonzero values retain the column. This proof
+    applies only to the immutable, verified partition read by the tile builder.
+    """
+    metadata = parquet.metadata
+    columns = {name: offset for offset, name in enumerate(parquet.schema.names)}
+    retained = []
+    for name in METRIC_COLUMNS:
+        offset = columns[name]
+        all_zero = metadata.num_row_groups > 0
+        for group in range(metadata.num_row_groups):
+            stats = metadata.row_group(group).column(offset).statistics
+            if stats is None or not stats.has_min_max or stats.null_count != 0 or stats.min != 0 or stats.max != 0:
+                all_zero = False
+                break
+        if not all_zero:
+            retained.append(name)
+    return tuple(retained)
 
 
 def publish(output: Path, generation: Path) -> None:
@@ -276,16 +438,21 @@ def build_locked(args: argparse.Namespace) -> dict:
         raise ValueError("Missing boundary inputs: " + ", ".join(missing))
     common = {
         "code": code_fingerprint([Path(__file__), ROOT / "ark_pipeline/tiles.py",
+                                  ROOT / "ark_pipeline/tile_spatial.py", ROOT / "ark_pipeline/tile_worker_state.py",
+                                  ROOT / "ark_pipeline/tile_stream_worker.py",
                                   ROOT / "ark_pipeline/builders/coarse_cache.py", ROOT / "ark_pipeline/builders/fine_metrics.py",
                                   ROOT / "ark_pipeline/spatial/boundaries.py", ROOT / "ark_pipeline/runtime/provenance.py"]),
-        "dependencies": {**dependency_identity(), "numpy": version("numpy")},
+        "dependencies": {**dependency_identity(), "numpy": version("numpy"), "orjson": version("orjson"),
+                         "pyogrio": version("pyogrio")},
         "boundaries": {key: file_record(path) for key, path in boundary_paths.items()},
         "tippecanoe": tool_record(args.tippecanoe),
-        "tile_join": tool_record(args.tile_join) if args.checkpoint_shards else None,
+        "tile_join": tool_record(args.tile_join),
         "tile_threads": args.tile_threads,
+        "metric_encoding": "sparse-zero-v1",
     }
     identity = {"schema_version": 1, "prepared": prepared, "compiler": common,
-                "checkpoint_shards": args.checkpoint_shards}
+                "checkpoint_shards": args.checkpoint_shards,
+                "fine_groups": getattr(args, "fine_groups", 1)}
     generation = args.output_dir / "generations" / identity_digest(identity)
     outputs = ("priorities.pmtiles", "map-metadata.json")
     current = args.output_dir / "current"
@@ -301,7 +468,11 @@ def build_locked(args: argparse.Namespace) -> dict:
         generation = generation.with_name(generation.name + f"-{time.time_ns()}")
     generation.mkdir(parents=True)
     args.scratch_dir.mkdir(parents=True, exist_ok=True)
-    indexes = {key: BoundaryBatchIndex.from_path(path) for key, path in boundary_paths.items()}
+    args._parallel_tiles = args.tile_threads > 1 and not args.checkpoint_shards
+    args._tile_database = str(prepared["files"]["build_duckdb"]["path"])
+    indexes = {} if args._parallel_tiles else {
+        key: BoundaryBatchIndex.from_path(path) for key, path in boundary_paths.items()
+    }
     environment = {**os.environ, "TIPPECANOE_MAX_THREADS": str(args.tile_threads)}
     report = {"status": "building", "shards": {}, "current": str(args.output_dir / "current")}
     # Detect normal concurrent rebuilds during the export without rereading all
@@ -315,18 +486,21 @@ def build_locked(args: argparse.Namespace) -> dict:
         connection.execute("SET threads=?", [args.threads])
         connection.execute("SET memory_limit=?", [args.memory_limit])
         connection.execute(f"SET temp_directory={sql_path(args.scratch_dir)}")
-        projection = ", ".join(f'"{column}"' for column in METRIC_COLUMNS)
+        metric_names = ", ".join(f'"{column}"' for column in METRIC_COLUMNS)
         coarse_count = connection.execute("SELECT count(*) FROM h3_res3_agg_all").fetchone()[0]
-        jobs = [("coarse", 3, wide_aggregate_query(3), coarse_count,
+        coarse_query = f"WITH metrics(h3_index, {metric_names}) AS ({wide_aggregate_query(3)}) SELECT * FROM metrics ORDER BY h3_index"
+        jobs = [("coarse", 3, coarse_query, coarse_count,
                  prepared["files"]["build_duckdb"])]
         parts = []
         for base, records in sorted(prepared["parts"].items(), key=lambda item: int(item[0])):
             path = Path(records["aggregate"]["path"])
             parts.append(path)
+            parquet = pq.ParquetFile(path)
+            projection = ", ".join(['h3_index', *(f'"{column}"' for column in nonzero_metric_columns(parquet))])
             # Sort one base cell at a time. No global fine-cell sort or GeoJSON files.
             jobs.append((f"base_{base}", 7,
-                         f"SELECT h3_index, {projection} FROM read_parquet({sql_path(path)}) ORDER BY h3_index",
-                         pq.ParquetFile(path).metadata.num_rows, records["aggregate"]))
+                         f"SELECT {projection} FROM read_parquet({sql_path(path)}) ORDER BY h3_index",
+                         parquet.metadata.num_rows, records["aggregate"]))
         if args.checkpoint_shards:
             shard_paths = []
             for name, resolution, query, count, source in jobs:
@@ -354,10 +528,59 @@ def build_locked(args: argparse.Namespace) -> dict:
                 atomic_json(generation / "build-report.json", report)
                 print(f"Streamed {name}: {detail['features']:,} features", flush=True)
 
-            report["compilation"] = compile_queries(
-                connection, [job[:4] for job in jobs], generation / "priorities.pmtiles",
-                indexes, args, environment, progress,
-            )
+            # Do not push fine cells through zooms 0..7 merely to
+            # reach their minzoom. Each resolution starts at its own minzoom;
+            # the two archives have disjoint zoom ranges and are then joined.
+            report["compilations"] = {}
+            compiled_paths = []
+            for label, selected in (("coarse", jobs[:1]), ("fine", jobs[1:])):
+                fine = label == "fine"
+                estimate = min(max(1, getattr(args, "fine_groups", 1)), len(selected))
+                effective = estimate if fine and getattr(args, "_parallel_tiles", False) else 1
+                output_names = tuple(f"part-{index}.pmtiles" for index in range(effective)) \
+                    if effective > 1 else ("part.pmtiles",)
+                group_identity = {"compiler": common, "resolution": selected[0][1],
+                                  "sources": [job[4] for job in selected],
+                                  "group": f"{label}-{effective}"}
+                directory = args.output_dir / "shards" / identity_digest(group_identity)
+                if reusable(directory, group_identity, output_names):
+                    receipt = json.loads((directory / "receipt.json").read_text())
+                    detail = receipt["profile"]
+                    report["shards"].update({name: {**part, "reused": True}
+                                             for name, part in receipt["partitions"].items()})
+                    if fine:
+                        indexes.clear()
+                        gc.collect()
+                else:
+                    detail = compile_queries(
+                        connection, [job[:4] for job in selected], directory / "part.tmp.pmtiles",
+                        indexes, args, environment, progress, release_indexes=fine,
+                        overall_total=sum(job[3] for job in jobs),
+                        overall_offset=coarse_count if fine else 0,
+                        groups=estimate if fine else None,
+                    )
+                    for index, name in enumerate(output_names):
+                        tmp = directory / (f"part.tmp-{index}.pmtiles" if effective > 1
+                                           else "part.tmp.pmtiles")
+                        os.replace(tmp, directory / name)
+                    write_receipt(directory, group_identity, output_names, profile=detail,
+                                  partitions={job[0]: report["shards"][job[0]] for job in selected})
+                report["compilations"][label] = detail
+                compiled_paths.extend(str(directory / name) for name in output_names)
+                atomic_json(generation / "build-report.json", report)
+            report["compilation"] = {
+                key: sum(detail[key] for detail in report["compilations"].values())
+                for key in report["compilations"]["coarse"]
+            }
+            merge_started = time.perf_counter()
+            emit("phase", phase="Join coarse & fine tile archives", force=True)
+            with (generation / "tile-join.log").open("w") as log:
+                subprocess.run([args.tile_join, "--force", "--no-tile-size-limit", "--output",
+                                str(generation / "priorities.pmtiles"), *map(str, compiled_paths)],
+                               check=True, env=environment, stdout=log, stderr=log)
+            report["merge_seconds"] = time.perf_counter() - merge_started
+            if not valid_archive(generation / "priorities.pmtiles"):
+                raise ValueError("Joined PMTiles archive is invalid")
         if not valid_archive(generation / "priorities.pmtiles"):
             raise ValueError("Merged PMTiles archive is invalid")
         write_preview_metadata(connection=duckdb.connect(config={"threads": args.threads,
@@ -365,6 +588,10 @@ def build_locked(args: argparse.Namespace) -> dict:
                                template=Path(prepared["files"]["metadata"]["path"]),
                                target=generation / "map-metadata.json", parts=parts,
                                source_parts_dir=Path(prepared["h3_root"]) / "res7_merged_parts")
+        metadata_path = generation / "map-metadata.json"
+        metadata = json.loads(metadata_path.read_text())
+        metadata.update(tile_metric_encoding="sparse-zero-v1", tile_metric_default=0)
+        atomic_json(metadata_path, metadata)
         report.update(status="passed", reused=False, seconds=time.perf_counter() - started,
                       features=sum(item["features"] for item in report["shards"].values()))
         after = {str(path): (path.stat().st_ino, path.stat().st_size, path.stat().st_mtime_ns) for path in watched}
@@ -396,6 +623,9 @@ def parser() -> argparse.ArgumentParser:
     tiles.add_argument("--tile-join", default="tile-join")
     tiles.add_argument("--threads", type=positive_int, default=configured_count("TILE_DUCKDB_THREADS", default=1))
     tiles.add_argument("--tile-threads", type=positive_int, default=configured_count("TIPPECANOE_MAX_THREADS"))
+    tiles.add_argument("--fine-groups", type=positive_int,
+                       default=configured_count("TIPPECANOE_FINE_GROUPS", default=4),
+                       help="Concurrent compiler processes for the binary fine compile")
     tiles.add_argument("--memory-limit", default="750MB")
     tiles.add_argument("--batch-size", type=int, default=2048)
     tiles.add_argument("--checkpoint-shards", action="store_true",

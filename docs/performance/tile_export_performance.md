@@ -1,157 +1,83 @@
-# From metrics to PMTiles
+# Static tile export
 
-Historical harnesses and raw reports below are retained in the Git-ignored
-`archive/` only. They are not required for the supported build or test suite.
-Use `just data-benchmark` for current end-to-end measurements.
+`just data-tiles` reads the verified prepared-input report and builds a static
+PMTiles generation. The default remains static export; database loading and
+public data deployment are separate actions. Use a new isolated output directory
+for experiments and follow [the data policy](../../DATA_POLICY.md) before releasing
+any generated artifact.
 
-After generating pairs, the complete post-pair build is now:
+## Encoding and compilation
 
-```bash
-just data-prepare --tiles --dry-run
-just data-prepare --tiles
+Managed streams omit metric properties whose value is zero. The metadata declares
+`tile_metric_encoding: sparse-zero-v1` and `tile_metric_default: 0`. Consumers must
+interpret an absent declared metric as zero; this is a transport encoding of a
+calculated count, not a replacement for missing scientific evidence. Null metric
+inputs fail the export. The dense diagnostic stream keeps its prior JSON bytes.
+
+Parquet columns are excluded from the query only when every row group's statistics
+prove zero values with no nulls. Missing statistics retain the column. Projected
+values map to compact properties by column name, preserving all 164 metric slots.
+A query-scoped cache retains at most 4,096 encoded metric vectors. Geometry and
+boundary membership remain specific to each cell; writes use bounded batches.
+
+Boundary parts are indexed separately and deduplicated back to their catalogue
+entries. Catalogue order and duplicate codes on distinct entries are preserved.
+Outward-snapped quarter-degree rectangles cache exact covered/disjoint proofs;
+border cases still use cell intersection predicates. Each framework retains at
+most 8,192 proofs. H3 parent polygons are not used as containment substitutes.
+The established H3 geometry and dateline lookup behavior are retained.
+
+Coarse features compile at zooms 0–6 and fine features at zooms 8–12, followed by
+`tile-join`. One compiler thread uses a GeoJSON pipe. With multiple tile threads,
+a separate producer uses a bounded fork-server pool and ordered batches to write
+partitioned FlatGeobuf inputs. Integer MVT attribute types are declared explicitly.
+The producer exits before native compilation starts. Fine partitions are assigned
+to deterministic feature-balanced compiler groups (`--fine-groups`, default 4,
+capped by partition count). Each compiler may use `--tile-threads` threads, so
+multiple groups can increase CPU and memory demand; start with one group when
+resources are constrained. Temporary binary inputs are removed after compilation.
+
+`--checkpoint-shards` retains the serial per-base-cell compilation mode. The
+batch size, DuckDB threads and memory limit can be set separately. DuckDB's limit
+does not cap Arrow, Shapely, producer workers or compiler memory. Budget disk space
+for binary inputs, compiler scratch, cached archives and retained generations.
+Automatic pruning is not implemented.
+
+## Publication and recovery
+
+Prepared inputs are checksummed and require complete coarse/fine coverage and
+current metric receipts. All five boundary inputs are required. Compiler identity
+includes exporter code, dependencies, boundaries, binaries and thread settings.
+Each completed resolution group has a checksum receipt; a failed join reuses these
+groups. Per-base-cell shard receipts support finer recovery when explicitly chosen.
+
+The builder validates compiler success, emitted counts and PMTiles format, then
+writes metadata and switches `current` atomically only after a complete generation.
+Handled failures and interruptions retain the previous selected generation.
+Failed compiler launches stop processes already started by that compilation.
+Consumers needing archive and metadata across requests should pin the immutable
+generation path. Interrupted groups restart; completed groups remain reusable.
+Ordinary concurrent input changes are rejected before publication.
+
+## Verification and performance claims
+
+The synthetic tile tests compare dense and sparse GeoJSON, all metric slots,
+serial and binary batches, native decoded integer MVT properties, coarse/fine
+zooms, boundary memberships, seam/polar cells, pentagons, holes, overlaps, nulls,
+unknown statistics, cache eviction, interruption and receipt reuse. Native tests
+run only when Tippecanoe, tile-join and tippecanoe-decode are installed; compiler-free
+encoding and orchestration tests still run without them:
+
+```sh
+uv run python -m unittest discover -s tests -p 'test_tile_export.py'
 ```
 
-This pins one source generation, aggregates the pairs, builds species metadata
-and coarse/fine metrics, records the verified preparation, and creates the static
-map. A reviewed crosswalk matching the source snapshots is required.
-To resume only the final export, use `just data-tiles` (also exposed as
-`just global-res7-tiles`). It reads `GLOBAL_PREVIEW_ROOT/prepared-inputs.json`,
-so no separate manual `GLOBAL_H3_ROOT` handoff is needed for tile export.
-
-The final files are:
-
-```text
-GLOBAL_PREVIEW_ROOT/tiles/current/priorities.pmtiles
-GLOBAL_PREVIEW_ROOT/tiles/current/map-metadata.json
-GLOBAL_PREVIEW_ROOT/tiles/current/build-report.json
-```
-
-`current` is an atomic symlink to an immutable generation. Consumers needing
-both files across multiple requests should resolve/pin the generation path.
-Deployment and database loading remain separate. The old low-level
-`ark_pipeline.builders.fine_metrics tiles` command remains available for diagnostics; its
-direct output is not managed by these receipts.
-
-## Profiling results
-
-The diagnostic cProfile run spent 16.34 of 17.49 seconds on 60,000 boundary
-lookups for 12,000 fine cells. Most time went into repeated intersections with
-complex geographic boundaries. Each of the five frameworks also reconstructed
-the same H3 polygon independently.
-
-The new exporter prepares boundary geometries once and evaluates candidate
-intersections in native Shapely batches. It builds each ordinary H3 ring once,
-shares that geometry across frameworks, preserves catalogue order for overlapping
-codes, and retains the established antimeridian clipping behavior.
-
-Three alternating runs per implementation used fresh processes, a local SSD,
-one DuckDB thread, and the same five real boundary catalogues. Separate cProfile
-runs omitted the RSS sampler thread, following the pair-generation methodology.
-The municipality input was the bundled three-country preview, before global
-ADM2 installation. These results do not measure the larger global boundary index.
-Feature timings include reading/sorting the metric sample, boundary assignment,
-polygon generation, JSON encoding, and writing the stream.
-
-| Measurement | Previous exporter | Batched exporter |
-| --- | ---: | ---: |
-| Median feature generation | 15.301 s | 2.762 s |
-| Median boundary loading + feature generation | 18.589 s | 6.007 s |
-| Median sampled Python peak RSS, including boundary loading | 430.7 MiB | 431.0 MiB |
-
-Feature generation improved **5.54×**; including boundary loading, the measured
-improvement was **3.09×**. All runs produced byte-identical GeoJSON, including
-geometry, metric values, geographic codes and layer zoom ranges.
-
-Compiling that stream separately with Tippecanoe 2.79.0, two threads and zooms
-8–12 took **8.165 s** median (8.471, 8.165, 8.158 s), producing 49,030,607 bytes.
-This is an isolated disk-input measurement, not an end-to-end speedup. Compiler
-subprocess RSS was not sampled. Production streams directly into the compiler;
-its feature timings include backpressure and overlap native compilation.
-
-A complete managed sample build also passed: 12,000 fine cells, 343 distinct
-coarse cells and 3,000,214 fine species relationships. Its initial shard-based
-trial exposed a 13.74-second merge pass, erasing the cold-build feature gain.
-Consequently, **the default streams all partitions through one compiler**.
-Per-base-cell tile checkpoints are an explicit option for long, interruption-prone
-runs where resumability is worth the extra merge and storage.
-The subsequent single-pass smoke build completed the same 12,343-cell archive
-in 14.82 seconds, including input verification, boundary loading, compilation and
-map metadata. This was one functional run, not a repeated end-to-end benchmark.
-
-The sample comes from an existing data pack, not a completed run of the new
-global spatial profile. It is not geographically representative. These timings
-do not establish global throughput, archive size, or a universal memory bound.
-The earlier metric benchmark is in [serving_metrics_performance.md](serving_metrics_performance.md).
-
-## Publication and reuse
-
-`global-prepare` records the source generation, species tables, coarse database,
-map metadata and every source/metric partition. Coarse cell/species counts must
-match the source lists; fine partitions require current aggregation receipts.
-Tile export verifies checksums and current metric code/dependencies, and rejects
-changed inputs or incomplete fine coverage. All five boundary inputs are required;
-alternative catalogues can be supplied explicitly to `data-tiles`.
-
-Both modes sort one base cell at a time, stream GeoJSON through a pipe, verify
-outputs, and switch `current` only after the archive and metadata are complete.
-Unchanged complete generations are reused after checksum verification. Failed
-builds leave the previously selected generation intact. A single-pass build
-restarts compilation after interruption.
-
-For persistent tile checkpoints:
-
-```bash
-just data-prepare
-just data-tiles --checkpoint-shards
-```
-
-This produces one coarse PMTiles shard and one per fine H3 base cell, then merges
-them with `tile-join`. Shard receipts cover the metric input, boundaries, code,
-dependencies, compiler binaries and compiler thread setting. Completed shards
-survive interruption and remain reusable when only unrelated partitions or map
-metadata change. A failed merge can restart from those shards.
-
-H3 IDs remain feature properties. The managed builder omits transient generated
-numeric MVT IDs, which would collide when independently numbered shards were joined.
-Layer names, zoom ranges, geometry and metric properties are retained.
-
-Publication checks include compiler success, PMTiles format/truncation guards,
-emitted feature counts, full file checksums and detection of ordinary concurrent
-input changes. They do not exhaustively decode every production tile. Real
-Tippecanoe tests decode fine tiles containing cells from two H3 base cells and
-check retained metrics. Tests also cover pentagons, polar/dateline cells, holes,
-overlapping boundaries, stale inputs, missing partitions, interrupted shards and
-merges, unchanged reruns, corrupted archives, and pinning the source generation.
-
-Budget space for final archives, earlier generations, compiler scratch and optional
-cached shards. Automatic pruning is not implemented. DuckDB's memory limit does
-not cap Shapely, Arrow or Tippecanoe. Defaults are 2,048-cell batches, one DuckDB
-thread and a 750 MB DuckDB limit. Compiler threads follow `PIPELINE_WORKERS`
-(CPU/memory-aware `auto` by default), with `TIPPECANOE_MAX_THREADS` or
-`--tile-threads` overrides. The benchmark above explicitly used two compiler
-threads. For example:
-
-```bash
-just data-tiles --batch-size 1024 --tile-threads 4 --memory-limit 1GB
-```
-
-## Reproduce
-
-Use an existing wide metric partition and a new output directory:
-
-```bash
-uv run python -m archive.research.profile_tile_export \
-  --source /path/to/res7_aggregates/base_12.parquet \
-  --output-dir /tmp/ark-tile-profile-new \
-  --repeats 3 --cprofile --compile
-```
-
-To reproduce the original boundary scope after installing global ADM2, set
-`MUNICIPALITY_BOUNDARIES_PATH=app/static/data/boundaries/municipality.geojson`.
-
-The harness records timing, sampled Python RSS, hashes, separate `.prof` files,
-text profiles and compiler artifacts. It intentionally writes GeoJSON for exact
-comparison and isolated compiler timing. Every subprocess has a timeout.
-The tracked summary is
-archive/research/tile_export_profile_2026-09-02.json (local-only `archive/research/tile_export_profile_2026-09-02.json`).
-Raw local profiles are under ignored `data/spatial-test/tile-profiles/`.
+These checks establish fixture equivalence, not global throughput. No global
+speedup, runtime, archive size or universal memory bound is claimed here. For a
+benchmark, first compare decoded cell IDs, geometry, boundary membership and all
+164 metric values with absent properties expanded to zero. Record hardware,
+compiler/dependency versions, fixture construction, resolutions, worker/group
+counts, storage and cold/warm cache conditions. Separate query, feature encoding,
+pipe-write, binary byte counts and compiler/join time. Producer encoding totals
+sum worker CPU durations and can exceed elapsed wall time. Repeat comparable
+runs and keep source-derived reports and outputs local.
