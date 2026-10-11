@@ -11,7 +11,7 @@ from ark_pipeline.builders.iucn_metadata import evidence_identity, id_matches, v
 from ark_pipeline.cli.reconcile_species_metadata import reconcile
 from ark_pipeline.cli.sources_download_iucn import DEFAULT_BASE_URL, IucnApi, read_iucn_token
 from ark_pipeline.cli.sources_fetch_iucn_details import fetch_details, positive_id
-from ark_pipeline.runtime.metadata_publication import publish_metadata
+from ark_pipeline.runtime.metadata_publication import publish_metadata, source_registration_guard
 from ark_pipeline.runtime.provenance import atomic_json, sha256
 
 
@@ -140,14 +140,15 @@ def reconcile_stage(
         raise ValueError("Unknown IUCN metadata mode")
     if mode == "off":
         return {"status": "disabled", "reason": "explicit pipeline option"}
+    validate_registration = source_registration_guard(root)
     pinned_evidence = evidence_identity(reviewed_evidence_path)
     dimension_inputs = {species_dir / name: sha256(species_dir / name)
                         for name in ("species.parquet", "species_systems.parquet", "build-report.json")}
     manifest_path = root / "acquisition/current.json"
     if manifest_path.is_file():
-        dimension_inputs[manifest_path] = sha256(manifest_path)
         if json.loads(manifest_path.read_text()) != manifest:
             raise ValueError("Spatial source registration changed before metadata reconciliation")
+    validate_registration()
     release = spatial_release(manifest)
     queue = reconciliation_queue(species_dir)
     atomic_json(species_dir / "iucn-reconciliation-queue.json", queue)
@@ -209,10 +210,12 @@ def reconcile_stage(
         raise ValueError("Metadata inputs changed before publication")
     if evidence_identity(reviewed_evidence_path) != pinned_evidence:
         raise ValueError("Reviewed ecosystem evidence changed before metadata publication")
-    atomic_json(output / "build-report.json", baseline)
     def validate():
+        validate_registration()
         validate_evidence(report)
         if evidence_identity(reviewed_evidence_path) != pinned_evidence:
             raise ValueError("Reviewed ecosystem evidence changed before metadata publication")
+    validate()
+    atomic_json(output / "build-report.json", baseline)
     publish_metadata(output, species_dir, validate=validate)
     return report

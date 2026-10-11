@@ -17,7 +17,7 @@ class SpatialMetadataTests(unittest.TestCase):
             archive.writestr('points.csv', text)
         (root / 'acquisition').mkdir(exist_ok=True)
         (root / 'acquisition/current.json').write_text(json.dumps({'sources': {
-            'iucn-spatial-tables': {'files': [dict(path=path.name, logical_name=path.name,
+            'iucn-spatial-tables': {'validation_status': 'passed', 'files': [dict(path=path.name, logical_name=path.name,
                                                   bytes=path.stat().st_size, sha256=sha256(path))]}
         }}))
         return path

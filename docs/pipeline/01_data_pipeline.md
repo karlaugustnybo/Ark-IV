@@ -364,10 +364,15 @@ replaces species, systems and report with backups and rollback on replacement
 failure. Serving refreshes, direct species builds and standalone repairs finish
 both Parquet files and the report in isolation before selecting the dimension.
 Failed intake, reconciliation, report serialization or publication retains the
-previous three files. Collected detail hashes and the selected reviewed-evidence
-identity (including absence) are rechecked throughout publication. Three file
+previous three files. Collected detail hashes and selected reviewed-evidence
+identity (including absence) are rechecked throughout publication. Managed
+reconciliation and serving also pin acquisition registration, including absence,
+before reading source releases and recheck it before final report serialization
+and before/after every selected replacement. Direct source-backed builds retain
+the same registration guard through their final selection. Three file
 renames do not provide an atomic snapshot for concurrent readers; coordinate
 readers with the metadata writer. Legacy packs without acquisition registration
 retain placeholders when optional spatial recovery is unavailable; present
-registrations still require validation. Species IDs, pinned categories, sequencing
-traits and existing realms are checked before publication.
+registrations require an explicit `validation_status: passed`; matching file
+checksums alone do not establish validation. Species IDs, pinned categories,
+sequencing traits and existing realms are checked before publication.

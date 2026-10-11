@@ -1,5 +1,6 @@
 """Synthetic public-entrypoint refresh and provenance failure checks."""
 
+import json
 import shutil
 import tempfile
 import unittest
@@ -14,6 +15,7 @@ from ark_pipeline.cli import serving_metadata
 from tests import test_iucn_metadata as detail_fixtures
 from tests import test_iucn_reconcile_stage as stage_fixtures
 from tests import test_refresh_crosswalk as crosswalk_fixtures
+from tests.test_spatial_metadata import SpatialMetadataTests
 
 NAMES = ("species.parquet", "species_systems.parquet", "build-report.json")
 
@@ -172,3 +174,133 @@ class MetadataPublicationTests(unittest.TestCase):
                 with self.assertRaisesRegex(OSError, "builder report fault"):
                     species_metadata.build_global_species(**kwargs)
             self.assertEqual(contents(output), baseline)
+
+    def test_serving_requires_explicit_validation_for_present_spatial_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            crosswalk, legacy, h3, output = self.serving_fixture(root)
+            self.write_h3(h3, [101, 999])
+            SpatialMetadataTests().source(legacy, 'id_no,sci_name,terrestria\n999,Spatial species,1\n')
+            path = legacy / "acquisition/current.json"
+            manifest = json.loads(path.read_text())
+            manifest["schema_version"] = 1
+            path.write_text(json.dumps(manifest))
+            common = ["--root", str(legacy), "--h3-root", str(h3), "--crosswalk", str(crosswalk),
+                      "--output-dir", str(output), "--iucn-metadata-mode", "off"]
+            self.assertEqual(serving_metadata.main(common), 0)
+            with duckdb.connect() as db:
+                self.assertEqual(db.execute("SELECT species_name FROM read_parquet(?) WHERE gbif_accepted_id='999'", [str(output / "species.parquet")]).fetchone(), ("Spatial species",))
+                self.assertEqual(db.execute("SELECT system FROM read_parquet(?) WHERE gbif_accepted_id='999'", [str(output / "species_systems.parquet")]).fetchall(), [("Terrestrial",)])
+            baseline = contents(output)
+            for status in (None, "failed"):
+                with self.subTest(status=status):
+                    source = manifest["sources"]["iucn-spatial-tables"]
+                    source.pop("validation_status", None)
+                    if status is not None:
+                        source["validation_status"] = status
+                    path.write_text(json.dumps(manifest))
+                    self.assertEqual(serving_metadata.main(common), 1)
+                    self.assertEqual(contents(output), baseline)
+
+    def test_source_registration_survives_all_public_selection_boundaries(self):
+        # Real serving/off, direct source-backed build, and cache-only stage each
+        # retain a startup identity through final serialization and replacements.
+        from ark_pipeline.cli import iucn_reconcile_stage as stage
+        from ark_pipeline.runtime import provenance
+        for entry in ("serving", "direct", "stage"):
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                if entry == "stage":
+                    output, details, _ = self.repair_fixture(root)
+                    legacy = root
+                else:
+                    crosswalk, legacy, h3, output = self.serving_fixture(root)
+                    self.write_h3(h3, [101, 999])
+                    kwargs = dict(crosswalk_path=crosswalk,
+                                  assessments_path=legacy / "IUCN_Red_List/assessments.csv",
+                                  goat_species_path=legacy / "TOL/tol_species_all_ranks.tsv",
+                                  h3_paths=[h3 / "h3_res3_species_global_merged.parquet"],
+                                  output_dir=output, spatial_source_root=legacy)
+                    species_metadata.build_global_species(**kwargs)
+                baseline = contents(output)
+                path = legacy / "acquisition/current.json"
+                path.parent.mkdir(exist_ok=True)
+                manifest = {"schema_version": 1, "sources": {"iucn-spatial": {
+                    "validation_status": "passed", "release": "2026-1", "files": []}}}
+                original_json, original_write, original_replace = provenance.atomic_json, Path.write_text, Path.replace
+                for mutation in ("release", "remove", "create"):
+                    for boundary in ("report", "first", "last"):
+                        with self.subTest(entry=entry, mutation=mutation, boundary=boundary):
+                            if path.exists():
+                                path.unlink()
+                            if mutation != "create":
+                                path.write_text(json.dumps(manifest))
+                            selected = path.read_bytes() if path.exists() else None
+                            def mutate():
+                                if mutation == "remove":
+                                    path.unlink()
+                                else:
+                                    changed = json.loads(json.dumps(manifest))
+                                    changed["sources"]["iucn-spatial"]["release"] = "2027-1"
+                                    original_write(path, json.dumps(changed))
+                            def atomic(dest, value):
+                                original_json(dest, value)
+                                final = (entry == "stage" and dest == output / "api-reconciled/build-report.json") or (entry == "serving" and "iucn_reconciliation" in value)
+                                if boundary == "report" and final:
+                                    mutate()
+                            def write(dest, *args, **kw):
+                                result = original_write(dest, *args, **kw)
+                                if entry == "direct" and boundary == "report" and dest.name == "build-report.json" and dest.parent.name.startswith(".metadata-build-"):
+                                    mutate()
+                                return result
+                            def replace(source, dest):
+                                result = original_replace(source, dest)
+                                name = "species.parquet" if boundary == "first" else "build-report.json"
+                                if boundary != "report" and Path(dest).resolve() == (output / name).resolve():
+                                    mutate()
+                                return result
+                            with patch.object(provenance, "atomic_json", atomic), patch.object(stage, "atomic_json", atomic), patch.object(Path, "write_text", write), patch.object(Path, "replace", replace):
+                                if entry == "serving":
+                                    code = serving_metadata.main(["--root", str(legacy), "--h3-root", str(h3), "--crosswalk", str(crosswalk), "--output-dir", str(output), "--iucn-metadata-mode", "off"])
+                                    self.assertEqual(code, 1)
+                                else:
+                                    with self.assertRaisesRegex(ValueError, "registration changed"):
+                                        if entry == "direct":
+                                            species_metadata.build_global_species(**kwargs)
+                                        else:
+                                            stage.reconcile_stage(root, output, manifest if selected is not None else {}, details_dir=details, mode="cache-only", reviewed_evidence_path=root / "absent-reviewed.json")
+                            self.assertEqual(contents(output), baseline)
+                            self.assertNotEqual(path.read_bytes() if path.exists() else None, selected)
+
+    def test_registration_guard_rollback_retains_initial_target_absence(self):
+        from ark_pipeline.runtime.metadata_publication import (
+            publish_metadata,
+            source_registration_guard,
+        )
+        for boundary in NAMES:
+            for present in (False, True):
+                with self.subTest(boundary=boundary, present=present), tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    selected = root / "acquisition/current.json"
+                    selected.parent.mkdir()
+                    if present:
+                        selected.write_text('{"sources": {}}')
+                    validate = source_registration_guard(root)
+                    staged, target = root / "staged", root / "target"
+                    staged.mkdir()
+                    for name in NAMES:
+                        (staged / name).write_bytes(b"synthetic metadata fixture")
+                    original = Path.replace
+                    def replace(source, dest):
+                        result = original(source, dest)
+                        if Path(dest) == target / boundary:
+                            if present:
+                                selected.unlink()
+                            else:
+                                selected.write_text('{"sources": {}}')
+                        return result
+                    with patch.object(Path, "replace", replace):
+                        with self.assertRaisesRegex(ValueError, "registration changed"):
+                            publish_metadata(staged, target, validate=validate)
+                    self.assertTrue(all(not (target / name).exists() for name in NAMES))
+                    self.assertEqual(selected.exists(), not present)

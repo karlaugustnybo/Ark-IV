@@ -53,8 +53,10 @@ def collect_spatial_metadata(root: Path, targets: set[str]) -> list[dict]:
     manifest_hash = sha256(manifest_path)
     manifest = json.loads(manifest_path.read_text())
     for source in ('iucn-spatial', 'iucn-spatial-tables'):
-        registration = manifest.get('sources', {}).get(source, {})
-        if registration.get('validation_status', 'passed') != 'passed':
+        registration = manifest.get('sources', {}).get(source)
+        if registration is None:
+            continue
+        if registration.get('validation_status') != 'passed':
             raise ValueError('Spatial source is not validated')
         for item in registration.get('files', []):
             path = root / item['path']

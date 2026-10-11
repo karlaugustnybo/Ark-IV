@@ -59,8 +59,12 @@ def build_global_species(
 ) -> dict[str, Any]:
     """Build in isolation and publish only a complete, evidence-pinned dimension."""
     from ark_pipeline.builders.iucn_metadata import validate_evidence
-    from ark_pipeline.runtime.metadata_publication import publish_metadata
+    from ark_pipeline.runtime.metadata_publication import (
+        publish_metadata,
+        source_registration_guard,
+    )
 
+    validate_registration = source_registration_guard(spatial_source_root)
     output_dir = output_dir.expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".metadata-build-", dir=output_dir.parent) as temporary:
@@ -80,6 +84,7 @@ def build_global_species(
             output_dir=staged,
         )
         def validate():
+            validate_registration()
             if report["iucn_api_enrichment"] is not None:
                 validate_evidence(report["iucn_api_enrichment"])
         publish_metadata(staged, output_dir, validate=validate)

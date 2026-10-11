@@ -11,6 +11,7 @@ from pathlib import Path
 from ark_pipeline.builders.species_metadata import build_global_species
 from ark_pipeline.cli.sources_acquire import load_manifest
 from ark_pipeline.cli.spatial_pairs import resolve_input
+from ark_pipeline.runtime.metadata_publication import source_registration_guard
 from ark_pipeline.runtime.progress import tracked_stage
 from ark_pipeline.runtime.provenance import sha256
 
@@ -93,7 +94,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         root = args.root.expanduser().resolve()
+        validate_registration = source_registration_guard(root)
         manifest = load_manifest(root)
+        validate_registration()
         assessments = source_file(
             root,
             manifest,
@@ -170,10 +173,12 @@ def main(argv: list[str] | None = None) -> int:
             metadata_report = staged / "build-report.json"
             report = json.loads(metadata_report.read_text())
             report["iucn_reconciliation"] = {"mode": args.iucn_metadata_mode, "status": enrichment["status"]}
-            atomic_json(metadata_report, report)
             def validate():
+                validate_registration()
                 if "evidence_inputs" in enrichment:
                     validate_evidence(enrichment)
+            validate()
+            atomic_json(metadata_report, report)
             publish_metadata(staged, args.output_dir, validate=validate)
         return 0
     except (OSError, ValueError) as error:

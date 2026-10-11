@@ -7,7 +7,29 @@ import tempfile
 from collections.abc import Callable
 from pathlib import Path
 
+from ark_pipeline.runtime.provenance import sha256
+
 METADATA_FILES = ("species.parquet", "species_systems.parquet", "build-report.json")
+
+
+def source_registration_guard(root: Path | None) -> Callable[[], None]:
+    """Pin the external acquisition selection, including legacy absence.
+
+    Keep this guard separate from dimension hashes: publication intentionally
+    replaces those files, while the selected source registration must stay fixed.
+    """
+    path = root / "acquisition/current.json" if root is not None else None
+
+    def identity():
+        return sha256(path) if path is not None and path.exists() else None
+
+    pinned = identity()
+
+    def validate():
+        if identity() != pinned:
+            raise ValueError("Spatial source registration changed before metadata publication")
+
+    return validate
 
 
 def publish_metadata(staged: Path, target: Path, *, validate: Callable[[], None] = lambda: None) -> None:

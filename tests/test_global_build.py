@@ -261,7 +261,7 @@ class GlobalSpeciesDimensionTests(unittest.TestCase):
                 archive.writestr('points.csv', 'id_no,sci_name,family,category,marine,terrestria,freshwater\n999,Recovered species,FAMILY,EN,0,1,0\n')
             (root / 'acquisition').mkdir()
             (root / 'acquisition/current.json').write_text(json.dumps({'sources': {
-                'iucn-spatial-tables': {'files': [dict(path=source.name, logical_name=source.name,
+                'iucn-spatial-tables': {'validation_status': 'passed', 'files': [dict(path=source.name, logical_name=source.name,
                     bytes=source.stat().st_size, sha256=sha256(source))]}
             }}))
             recovered = build_global_species(crosswalk_path=crosswalk, assessments_path=assessments,
