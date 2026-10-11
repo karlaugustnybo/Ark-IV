@@ -84,29 +84,44 @@ def record_prepared(args: argparse.Namespace) -> dict:
         if mismatch:
             raise ValueError("Coarse metrics do not match this source generation; rerun just data-prepare")
     metric_args = SimpleNamespace(species=args.species, species_systems=args.species_systems)
+    identities = {base: aggregate_input_identity(metric_args, source) for base, source in sources.items()}
+    metadata_identity = next(iter(identities.values()))["metadata"]
+    if any(identity["metadata"] != metadata_identity for identity in identities.values()):
+        raise ValueError("Metric metadata changed while recording prepared inputs")
     parts = {}
     for base, source in sorted(sources.items()):
         target = args.parts_dir / source.name
-        if not aggregate_receipt_matches(metric_args, source, target):
+        if not aggregate_receipt_matches(metric_args, source, target, identity=identities[base]):
             raise ValueError(f"Stale or unverified metrics: {target}; rerun just data-prepare")
         receipt = json.loads(target.with_suffix(".receipt.json").read_text())
+        if receipt["identity"] != identities[base]:
+            raise ValueError("Metric receipt changed while recording prepared inputs")
         output = receipt["outputs"]["aggregate"]
         parts[str(base)] = {
             "source": {"path": str(source.resolve()), "bytes": source.stat().st_size,
-                       "sha256": aggregate_input_identity(metric_args, source)["source_sha256"]},
+                       "sha256": identities[base]["source_sha256"]},
             "aggregate": {"path": str(target.resolve()), "bytes": output["bytes"], "sha256": output["sha256"]},
             "receipt": file_record(target.with_suffix(".receipt.json")),
         }
     report = {
         "status": "passed", "schema_version": 1, "h3_root": str(h3_root),
         "parts_dir": str(args.parts_dir.resolve()), "parts": parts,
-        "metric_identity": metric_args._aggregate_metadata_identity,
+        "metric_identity": metadata_identity,
         "files": {name: file_record(path) for name, path in {
             "build_duckdb": args.build_duckdb, "metadata": args.metadata_template,
             "species": args.species, "species_systems": args.species_systems,
             "coarse_source": coarse_source,
         }.items()},
     }
+    for base, source in sources.items():
+        if aggregate_input_identity(metric_args, source) != identities[base]:
+            raise ValueError("Metric input changed while recording prepared inputs")
+    if (report["files"]["species"]["sha256"] != metadata_identity["species_sha256"]
+            or report["files"]["species_systems"]["sha256"] != metadata_identity["systems_sha256"]):
+        raise ValueError("Metric metadata changed while recording prepared inputs")
+    for records in parts.values():
+        for record in records.values():
+            verify_record(record)
     atomic_json(args.output, report)
     return report
 

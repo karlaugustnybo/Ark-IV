@@ -28,7 +28,6 @@ from ark_pipeline.builders.coarse_cache import (
 )
 from ark_pipeline.builders.fine_metrics import (
     BuildDisplay,
-    _build_parts_parallel,
     aggregate_part,
     build_parts,
     completed_parts,
@@ -765,20 +764,13 @@ class Resolution7PreviewTests(unittest.TestCase):
 
             display.partition_progress = record_progress
             display.begin_aggregation(2)
-            _build_parts_parallel(
-                SimpleNamespace(
-                    workers=2,
-                    species=species,
-                    species_systems=systems,
-                    scratch_dir=root / "scratch",
-                    memory_limit="512MB",
-                    threads=1,
-                    output_dir=output_dir,
-                ),
-                sources,
-                pending,
-                display,
-            )
+            with patch("ark_pipeline.builders.fine_metrics.BuildDisplay", return_value=display):
+                build_parts(SimpleNamespace(
+                    workers=2, species=species, species_systems=systems,
+                    scratch_dir=root / "scratch", memory_limit="512MB", threads=1,
+                    output_dir=output_dir, parts_dir=root, base_cell=None, limit=None,
+                    overwrite=False, no_progress=True,
+                ))
 
             self.assertEqual(display.completed, 2)
             self.assertEqual(

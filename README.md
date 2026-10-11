@@ -192,9 +192,10 @@ just global-db-load
 ```
 
 The resolution-7 aggregation is resumable and publishes only complete,
-schema-validated partitions. Its native batch reducer was
-[3.23× faster on a 3-million-relationship sample](docs/performance/serving_metrics_performance.md),
-with identical metric output. `RES7_WORKERS=1` and a smaller
+schema-validated partitions. Synthetic regression tests compare all 164 native
+metrics with their canonical SQL expressions; see the
+[reduction and validation details](docs/performance/serving_metrics_performance.md).
+End-to-end performance remains unbenchmarked. `RES7_WORKERS=1` and a smaller
 `DUCKDB_MEMORY_LIMIT` provide a bounded mode for memory-constrained machines.
 The optional `just global-res7-tiles` creates a much larger static snapshot;
 normal serving does not require it.
