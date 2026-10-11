@@ -43,6 +43,33 @@ PREREQUISITES = {
 }
 
 
+def validate_replay_inventory(source, inventory, directories):
+    """Check recorded members first, then reject additions to consumed directories."""
+    validate_inventory(source, inventory)
+    for relative in directories:
+        directory = source / relative
+        expected = {member for member in inventory if Path(member).is_relative_to(relative)}
+        actual = set()
+        for file in directory.rglob("*"):
+            if not file.is_file():
+                continue
+            resolved = file.resolve(strict=True)
+            if not resolved.is_relative_to(source):
+                raise ValueError(f"Replay input escapes its benchmark: {file}")
+            actual.add(str(file.relative_to(source)))
+        if actual != expected:
+            raise ValueError(f"Saved benchmark directory membership changed: {relative}")
+
+
+def validate_replay_identities(config, selection=None):
+    if load_spatial_profile(Path(config["profile"])).digest != config["profile_sha256"]:
+        raise ValueError("Spatial profile changed during stage replay")
+    if selection is not None:
+        sample = Path(selection["path"])
+        if sha256(sample) != selection["sha256"] or sha256(sample.with_suffix(".json")) != selection["metadata_sha256"]:
+            raise ValueError("Polygon sample or metadata changed during stage replay")
+
+
 def replay_plan(args):
     from ark_pipeline.cli.benchmark_pipeline import REPOSITORY_ROOT, plan
 
@@ -112,22 +139,25 @@ def replay_plan(args):
         if load_spatial_profile(Path(config["profile"])).digest != saved["profile_sha256"]:
             raise ValueError("Spatial profile changed since the input benchmark")
         # Validate only consumed artifacts; unrelated outputs need not be present.
-        inventory = {}
+        inventory, directories = {}, []
         for path in required:
             target = path.resolve(strict=True)
-            files = target.rglob("*") if target.is_dir() else [target]
-            for file in files:
-                if not file.is_file():
-                    continue
-                resolved = file.resolve(strict=True)
-                if not resolved.is_relative_to(source):
-                    raise ValueError(f"Replay input escapes its benchmark: {file}")
-                relative = str(resolved.relative_to(source))
-                expected = previous.get("artifacts", {}).get(relative)
-                if expected is None:
+            if not target.is_relative_to(source):
+                raise ValueError(f"Replay input escapes its benchmark: {path}")
+            relative = str(target.relative_to(source))
+            recorded = previous.get("artifacts", {})
+            if target.is_dir():
+                members = {member: expected for member, expected in recorded.items()
+                           if Path(member).is_relative_to(relative)}
+                if not members:
                     raise ValueError(f"Replay input was not recorded as complete: {relative}")
-                inventory[relative] = expected
-        validate_inventory(source, inventory)
+                inventory.update(members)
+                directories.append(relative)
+            else:
+                if relative not in recorded:
+                    raise ValueError(f"Replay input was not recorded as complete: {relative}")
+                inventory[relative] = recorded[relative]
+        validate_replay_inventory(source, inventory, directories)
         if boundary_inputs:
             identity = json.loads((source / "dashboard-state.json").read_text()).get("identity") or {}
             expected_boundaries = {str(Path(path).resolve()): digest for path, digest in identity.get("external_files", {}).items()}
@@ -138,6 +168,7 @@ def replay_plan(args):
                 boundary_inputs[path] = digest
         report["boundary_inputs_sha256"] = boundary_inputs
         report["input_inventory"] = inventory
+        report["input_directories"] = directories
         report["acquisition_manifest_sha256"] = previous["acquisition_manifest_sha256"]
         report["code_sha256"] = pipeline_code(REPOSITORY_ROOT)
         report["runtime"] = runtime_identity(REPOSITORY_ROOT)
@@ -151,6 +182,7 @@ def run_replay(args):
     if args.dry_run:
         return report
     output, source = Path(config["output"]), Path(report["from_run"])
+    selection = None
     if stage["name"] == "pairs":
         selection = json.loads((source / "selection.json").read_text())
         # Reapply current exclusions and ensure the saved fixture has not changed.
@@ -158,6 +190,7 @@ def run_replay(args):
                                 load_spatial_profile(Path(config["profile"])), config["max_per_bin"])
         if current != selection:
             raise ValueError("Polygon selection changed since the input benchmark")
+    validate_replay_identities(config, selection)
     output.mkdir(parents=True, exist_ok=False)
     atomic_json(output / "config.json", config)
     if stage["name"] == "pairs":
@@ -177,7 +210,8 @@ def run_replay(args):
             report["stages"].append(measured)
             if measured["status"] != "passed":
                 raise RuntimeError(f"{stage['name']} failed; see {measured['log']}")
-            validate_inventory(source, report["input_inventory"])
+            validate_replay_inventory(source, report["input_inventory"], report["input_directories"])
+            validate_replay_identities(config, selection)
             for path, digest in report["boundary_inputs_sha256"].items():
                 if sha256(Path(path)) != digest:
                     raise ValueError(f"Boundary changed during stage replay: {path}")

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import csv
+import fcntl
 import io
 import json
 import os
@@ -112,6 +113,176 @@ class BenchmarkModelTests(unittest.TestCase):
         self.assertEqual(result["projected_workload"]["res7_cells"], h3.get_num_cells(7))
         with self.assertRaisesRegex(ValueError, "exceeds"):
             estimate([], {"size_bin_counts": [2]}, pairs, lists)
+
+
+class BenchmarkReplayInputTests(unittest.TestCase):
+    def saved_run(self, root, *, lists=False):
+        sample, boundary = fixture(root)
+        profile = root / "profile.toml"
+        shutil.copy2(DEFAULT_PROFILE, profile)
+        source = root / "benchmark"
+        options = ["--root", str(root), "--sample", str(sample), "--profile", str(profile),
+                   "--output-root", str(source), "--workers", "1", "--memory-limit", "512MB", "--ui", "plain"]
+        for key in ("admin0", "admin1", "municipality", "eez", "conservation-framework"):
+            options += ["--" + key, str(boundary)]
+        if lists:
+            def stop_before_database(stage, *args, **kwargs):
+                if stage["name"] == "coarse_db":
+                    raise KeyboardInterrupt
+                return run_stage(stage, *args, **kwargs)
+            with patch("ark_pipeline.cli.benchmark_pipeline.run_stage", side_effect=stop_before_database):
+                report = run(parser().parse_args(options))
+            self.assertEqual(report["status"], "interrupted")
+            self.assertEqual([s["name"] for s in report["stages"]],
+                             ["source_scan", "crosswalk", "pairs", "lists", "metadata"])
+        else:
+            config, _, _ = plan(parser().parse_args(options))
+            source.mkdir()
+            atomic_json(source / "config.json", config)
+            selection = select_sample(sample, root, load_spatial_profile(profile), None)
+            atomic_json(source / "selection.json", selection)
+            atomic_json(source / "benchmark-report.json", {
+                "stages": [{"name": "source_scan", "status": "passed"}],
+                "acquisition_manifest_sha256": sha256(root / "acquisition/current.json"),
+                "artifacts": artifact_inventory(source),
+            })
+        return source, sample, profile
+
+    def replay_args(self, source, output, stage):
+        return parser().parse_args(["--only-stage", stage, "--from-run", str(source),
+                                   "--output-root", str(output), "--workers", "1",
+                                   "--memory-limit", "512MB", "--ui", "plain"])
+
+    def assert_replay_lock_released(self, output):
+        with (output / ".run.lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def test_consumed_directory_requires_complete_saved_membership(self):
+        with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):
+            root = Path(temporary).resolve()
+            source, _, _ = self.saved_run(root, lists=True)
+            parts = source / "spatial/serving/current/res7_merged_parts"
+            partition = next(parts.glob("*.parquet"))
+            contents, stat = partition.read_bytes(), partition.stat()
+            partition.unlink()
+            output = root / "missing"
+            with self.assertRaisesRegex(ValueError, "changed or is missing"):
+                replay_plan(self.replay_args(source, output, "fine_metrics"))
+            self.assertFalse(output.exists())
+            partition.write_bytes(contents)
+            os.utime(partition, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+            extra = parts / "unexpected.parquet"
+            extra.write_bytes(contents)
+            with self.assertRaisesRegex(ValueError, "membership changed"):
+                replay_plan(self.replay_args(source, root / "extra", "fine_metrics"))
+            self.assertFalse((root / "extra").exists())
+            extra.unlink()
+            partition.write_bytes(contents + b"stale")
+            with self.assertRaisesRegex(ValueError, "changed or is missing"):
+                replay_plan(self.replay_args(source, root / "stale", "fine_metrics"))
+            partition.write_bytes(contents)
+            os.utime(partition, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+            # Changes outside the consumed paths do not invalidate this replay.
+            (source / "unrelated").mkdir()
+            (source / "unrelated/new.txt").write_text("unconsumed")
+            before = artifact_inventory(source)
+            replay = run(self.replay_args(source, root / "valid", "fine_metrics"))
+            self.assertEqual(replay["status"], "passed", replay.get("error"))
+            self.assertEqual(artifact_inventory(source), before)
+            self.assertEqual(len(list((root / "valid/metrics").glob("*.parquet"))), 3)
+            for mutation in ("missing", "extra"):
+                with self.subTest(mutation=mutation):
+                    def mutate_after_stage(stage, *args, **kwargs):
+                        measured = run_stage(stage, *args, **kwargs)
+                        if mutation == "missing":
+                            partition.unlink()
+                        else:
+                            extra.write_bytes(contents)
+                        return measured
+                    with patch("ark_pipeline.cli.benchmark_pipeline.run_stage", side_effect=mutate_after_stage):
+                        report = run(self.replay_args(source, root / ("during-" + mutation), "fine_metrics"))
+                    self.assertEqual(report["status"], "failed")
+                    self.assertNotIn("artifacts", report)
+                    self.assertIn("changed", report["error"])
+                    self.assert_replay_lock_released(root / ("during-" + mutation))
+                    if mutation == "missing":
+                        partition.write_bytes(contents)
+                        os.utime(partition, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+                    else:
+                        extra.unlink()
+                    self.assertEqual(artifact_inventory(source), before)
+
+    def test_pairs_replay_rechecks_profile_sample_and_metadata_after_execution(self):
+        with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):
+            root = Path(temporary).resolve()
+            source, sample, profile = self.saved_run(root)
+            before = artifact_inventory(source)
+            for mutation in ("profile", "sample", "metadata"):
+                with self.subTest(mutation=mutation):
+                    target = {"profile": profile, "sample": sample, "metadata": sample.with_suffix(".json")}[mutation]
+                    contents = target.read_bytes()
+                    def mutate(stage, *args, **kwargs):
+                        if mutation == "profile":
+                            profile.write_text(contents.decode().replace(
+                                "decision_simplification_min_bbox_degrees2 = 100.0",
+                                "decision_simplification_min_bbox_degrees2 = 0.0"))
+                        measured = run_stage(stage, *args, **kwargs)
+                        if mutation != "profile":
+                            target.write_bytes(contents + b"changed")
+                        return measured
+                    output = root / ("changed-" + mutation)
+                    with patch("ark_pipeline.cli.benchmark_pipeline.run_stage", side_effect=mutate):
+                        try:
+                            report = run(self.replay_args(source, output, "pairs"))
+                        finally:
+                            target.write_bytes(contents)
+                    self.assertEqual(report["status"], "failed")
+                    self.assertEqual(report["stages"][0]["status"], "passed")
+                    self.assertIn("changed during stage replay", report["error"])
+                    self.assertNotIn("artifacts", report)
+                    if mutation == "profile":
+                        observations = json.loads((output / "pairs-report.json").read_text())["observations"]
+                        self.assertEqual({row["simplification"]["method"] for row in observations},
+                                         {"topology-preserving"})
+                        self.assertEqual(report["profile_sha256"], load_spatial_profile(profile).digest)
+                    self.assertEqual(json.loads((output / "benchmark-report.json").read_text())["status"], "failed")
+                    self.assert_replay_lock_released(output)
+                    self.assertEqual(artifact_inventory(source), before)
+
+    def test_profile_and_pair_metadata_changes_are_rejected_before_output_creation(self):
+        with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):
+            root = Path(temporary).resolve()
+            source, sample, profile = self.saved_run(root)
+            contents = profile.read_bytes()
+            profile.write_text(contents.decode().replace(
+                "decision_simplification_min_bbox_degrees2 = 100.0",
+                "decision_simplification_min_bbox_degrees2 = 0.0"))
+            with self.assertRaisesRegex(ValueError, "Spatial profile changed since"):
+                run(self.replay_args(source, root / "profile-change", "pairs"))
+            self.assertFalse((root / "profile-change").exists())
+            profile.write_bytes(contents)
+            metadata = sample.with_suffix(".json")
+            metadata.write_bytes(metadata.read_bytes() + b"\n")
+            with self.assertRaisesRegex(ValueError, "Polygon selection changed since"):
+                run(self.replay_args(source, root / "metadata-change", "pairs"))
+            self.assertFalse((root / "metadata-change").exists())
+
+    def test_interrupted_replay_preserves_saved_outputs_and_reports_interruption(self):
+        with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):
+            root = Path(temporary).resolve()
+            source, _, _ = self.saved_run(root)
+            before = artifact_inventory(source)
+            output = root / "interrupted"
+            def interrupt(stage, *args, **kwargs):
+                kwargs["dashboard"].begin_stage(stage["name"])
+                raise KeyboardInterrupt
+            with patch("ark_pipeline.cli.benchmark_pipeline.run_stage", side_effect=interrupt):
+                report = run(self.replay_args(source, output, "pairs"))
+            self.assertEqual(report["status"], "interrupted")
+            self.assertNotIn("artifacts", report)
+            self.assertEqual(artifact_inventory(source), before)
+            self.assertEqual(json.loads((output / "benchmark-report.json").read_text())["status"], "interrupted")
+            self.assert_replay_lock_released(output)
 
 
 class BenchmarkRunnerTests(unittest.TestCase):

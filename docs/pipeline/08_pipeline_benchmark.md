@@ -251,7 +251,12 @@ and memory limits are those of the new invocation. Outputs and scratch go to a
 new, separate directory under `ROOT/benchmarks/stages/`, or an explicit
 `--output-root`; the old run is read in place. Consumed saved artifacts are checked
 against their recorded inventory before and after execution; production readers
-retain their receipt/checksum checks. External boundary hashes must match the
+retain their receipt/checksum checks. Consumed directories must retain every
+recorded member and contain no added files; unrelated outputs are ignored.
+The profile and pair sample/metadata identities are rechecked before success is
+reported. A persistent input change during execution leaves a failed replay
+report and isolated outputs, preserving the previous run.
+External boundary hashes must match the
 original run. Changed or unrecorded inputs are rejected before output creation.
 Tile replay has a 20-minute cutoff, using the same owned-group cleanup as cancellation.
 
