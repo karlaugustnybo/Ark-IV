@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +43,50 @@ def _require_file(path: Path) -> Path:
 
 
 def build_global_species(
+    *,
+    crosswalk_path: Path,
+    assessments_path: Path,
+    goat_species_path: Path,
+    ncbi_names_path: Path | None = None,
+    ncbi_nodes_path: Path | None = None,
+    gbif_backbone_path: Path | None = None,
+    edge_species_path: Path | None = None,
+    h3_paths: list[Path],
+    output_dir: Path,
+    spatial_source_root: Path | None = None,
+    iucn_details_dir: Path | None = None,
+    reviewed_evidence_path: Path | None = None,
+) -> dict[str, Any]:
+    """Build in isolation and publish only a complete, evidence-pinned dimension."""
+    from ark_pipeline.builders.iucn_metadata import validate_evidence
+    from ark_pipeline.runtime.metadata_publication import publish_metadata
+
+    output_dir = output_dir.expanduser().resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".metadata-build-", dir=output_dir.parent) as temporary:
+        staged = Path(temporary)
+        report = _build_global_species(
+            crosswalk_path=crosswalk_path,
+            assessments_path=assessments_path,
+            goat_species_path=goat_species_path,
+            ncbi_names_path=ncbi_names_path,
+            ncbi_nodes_path=ncbi_nodes_path,
+            gbif_backbone_path=gbif_backbone_path,
+            edge_species_path=edge_species_path,
+            h3_paths=h3_paths,
+            spatial_source_root=spatial_source_root,
+            iucn_details_dir=iucn_details_dir,
+            reviewed_evidence_path=reviewed_evidence_path,
+            output_dir=staged,
+        )
+        def validate():
+            if report["iucn_api_enrichment"] is not None:
+                validate_evidence(report["iucn_api_enrichment"])
+        publish_metadata(staged, output_dir, validate=validate)
+    return report
+
+
+def _build_global_species(
     *,
     crosswalk_path: Path,
     assessments_path: Path,
@@ -470,9 +515,10 @@ def build_global_species(
             gbif_accepted_id VARCHAR, species_name VARCHAR, family VARCHAR,
             source_category VARCHAR, systems VARCHAR[], provenance VARCHAR, conflicts VARCHAR
         )""")
-        spatial_manifest_hash = sha256(spatial_source_root / 'acquisition/current.json') if spatial_source_root else None
+        spatial_manifest = spatial_source_root / 'acquisition/current.json' if spatial_source_root else None
+        spatial_manifest_hash = sha256(spatial_manifest) if spatial_manifest and spatial_manifest.exists() else None
         recovered = collect_spatial_metadata(spatial_source_root, targets) if spatial_source_root else []
-        if spatial_source_root and sha256(spatial_source_root / 'acquisition/current.json') != spatial_manifest_hash:
+        if spatial_manifest and (sha256(spatial_manifest) if spatial_manifest.exists() else None) != spatial_manifest_hash:
             raise ValueError("Spatial source registration changed during metadata recovery")
         if recovered:
             connection.executemany("INSERT INTO spatial_metadata VALUES (?,?,?,?,?,?,?)", [
@@ -548,7 +594,7 @@ def build_global_species(
         if iucn_details_dir is not None:
             from ark_pipeline.builders.iucn_metadata import apply_iucn_metadata
             releases = set()
-            if spatial_source_root is not None:
+            if spatial_manifest_hash is not None:
                 manifest = json.loads((spatial_source_root / 'acquisition/current.json').read_text())
                 releases = {manifest['sources'][key]['release'] for key in ('iucn-spatial','iucn-spatial-tables')
                             if key in manifest['sources'] and manifest['sources'][key].get('release')}

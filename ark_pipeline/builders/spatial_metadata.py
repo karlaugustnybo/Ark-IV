@@ -48,6 +48,8 @@ def collect_spatial_metadata(root: Path, targets: set[str]) -> list[dict]:
     """
     values = defaultdict(lambda: defaultdict(set))
     manifest_path = root / "acquisition/current.json"
+    if not manifest_path.exists():
+        return []
     manifest_hash = sha256(manifest_path)
     manifest = json.loads(manifest_path.read_text())
     for source in ('iucn-spatial', 'iucn-spatial-tables'):

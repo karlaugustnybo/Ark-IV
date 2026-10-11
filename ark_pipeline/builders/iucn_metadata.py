@@ -21,6 +21,16 @@ def evidence_identity(path: Path | None = None) -> dict:
     return {"path": str(selected), "sha256": sha256(selected) if selected.is_file() else None}
 
 
+def validate_evidence(report: dict) -> None:
+    """Check the collected identities, including an absent reviewed input."""
+    pinned = report["reviewed_evidence"]
+    if evidence_identity(Path(pinned["path"])) != pinned:
+        raise ValueError("Reviewed ecosystem evidence changed before metadata publication")
+    if any(not Path(path).is_file() or sha256(Path(path)) != digest
+           for path, digest in report["evidence_inputs"].items()):
+        raise ValueError("IUCN evidence changed before metadata publication")
+
+
 def reviewed_rules(path: Path | None = None) -> list[dict]:
     selected = (path or DEFAULT_EVIDENCE_PATH).expanduser().resolve()
     return json.loads(selected.read_text())["entries"] if selected.is_file() else []

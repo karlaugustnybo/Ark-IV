@@ -3,16 +3,15 @@
 from __future__ import annotations
 
 import json
-import shutil
-import tempfile
 from pathlib import Path
 
 import duckdb
 
-from ark_pipeline.builders.iucn_metadata import evidence_identity, id_matches
+from ark_pipeline.builders.iucn_metadata import evidence_identity, id_matches, validate_evidence
 from ark_pipeline.cli.reconcile_species_metadata import reconcile
 from ark_pipeline.cli.sources_download_iucn import DEFAULT_BASE_URL, IucnApi, read_iucn_token
 from ark_pipeline.cli.sources_fetch_iucn_details import fetch_details, positive_id
+from ark_pipeline.runtime.metadata_publication import publish_metadata
 from ark_pipeline.runtime.provenance import atomic_json, sha256
 
 
@@ -210,26 +209,10 @@ def reconcile_stage(
         raise ValueError("Metadata inputs changed before publication")
     if evidence_identity(reviewed_evidence_path) != pinned_evidence:
         raise ValueError("Reviewed ecosystem evidence changed before metadata publication")
-    # Keep all three published files recoverable if any replacement fails.
-    names = ("species.parquet", "species_systems.parquet", "build-report.json")
-    with tempfile.TemporaryDirectory(prefix=".metadata-rollback-", dir=species_dir) as temporary:
-        backup = Path(temporary)
-        for name in names:
-            shutil.copyfile(species_dir / name, backup / name)
-        def validate_evidence():
-            if evidence_identity(reviewed_evidence_path) != pinned_evidence or any(
-                sha256(Path(path)) != digest for path, digest in report["evidence_inputs"].items()
-            ):
-                raise ValueError("IUCN evidence changed before metadata publication")
-
-        try:
-            for name in names[:2]:
-                validate_evidence()
-                (output / name).replace(species_dir / name)
-            validate_evidence()
-            atomic_json(species_dir / "build-report.json", baseline)
-        except BaseException:
-            for name in names:
-                shutil.copyfile(backup / name, species_dir / name)
-            raise
+    atomic_json(output / "build-report.json", baseline)
+    def validate():
+        validate_evidence(report)
+        if evidence_identity(reviewed_evidence_path) != pinned_evidence:
+            raise ValueError("Reviewed ecosystem evidence changed before metadata publication")
+    publish_metadata(output, species_dir, validate=validate)
     return report

@@ -361,5 +361,13 @@ ark_pipeline.cli.reconcile_species_metadata --input-dir <dimension>
 `--expected-release` and `--reviewed-evidence-path` constrain the evidence.
 This does not rebuild spatial membership, scores, tiles or databases. Publication
 replaces species, systems and report with backups and rollback on replacement
-failure. Species IDs, pinned categories, sequencing traits and existing realms
-are checked before publication.
+failure. Serving refreshes, direct species builds and standalone repairs finish
+both Parquet files and the report in isolation before selecting the dimension.
+Failed intake, reconciliation, report serialization or publication retains the
+previous three files. Collected detail hashes and the selected reviewed-evidence
+identity (including absence) are rechecked throughout publication. Three file
+renames do not provide an atomic snapshot for concurrent readers; coordinate
+readers with the metadata writer. Legacy packs without acquisition registration
+retain placeholders when optional spatial recovery is unavailable; present
+registrations still require validation. Species IDs, pinned categories, sequencing
+traits and existing realms are checked before publication.

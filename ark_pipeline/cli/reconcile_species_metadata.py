@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import tempfile
 from pathlib import Path
 
 import duckdb
 
-from ark_pipeline.builders.iucn_metadata import apply_iucn_metadata
+from ark_pipeline.builders.iucn_metadata import apply_iucn_metadata, validate_evidence
 from ark_pipeline.cli.sources_download_iucn import atomic_json
+from ark_pipeline.runtime.metadata_publication import publish_metadata
 
 
 def reconcile(
@@ -81,14 +83,15 @@ def reconcile(
             scope="metadata-only-no-serving-build",
         )
         output_dir.mkdir(parents=True, exist_ok=True)
-        for table in ("species", "species_systems"):
-            temporary = output_dir / f".{table}.parquet.part"
-            connection.execute(
-                f"COPY (SELECT * FROM {table} ORDER BY gbif_accepted_id) TO ? (FORMAT PARQUET,COMPRESSION ZSTD)",
-                [str(temporary)],
-            )
-            temporary.replace(output_dir / f"{table}.parquet")
-        atomic_json(output_dir / "build-report.json", report)
+        with tempfile.TemporaryDirectory(prefix=".metadata-repair-", dir=output_dir.parent) as temporary:
+            staged = Path(temporary)
+            for table in ("species", "species_systems"):
+                connection.execute(
+                    f"COPY (SELECT * FROM {table} ORDER BY gbif_accepted_id) TO ? (FORMAT PARQUET,COMPRESSION ZSTD)",
+                    [str(staged / f"{table}.parquet")],
+                )
+            atomic_json(staged / "build-report.json", report)
+            publish_metadata(staged, output_dir, validate=lambda: validate_evidence(report))
         return report
 
 
