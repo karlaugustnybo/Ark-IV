@@ -1407,6 +1407,24 @@ def _hybas_region_level(hybas_id: int) -> tuple[int, int]:
     return region, level
 
 
+def hydrobasin_records_by_code(records: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    """Order exact-ID sources: lake first, standard fallback, separate islands."""
+    by_code = {
+        code: sorted(
+            (record for record in records
+             if f"hybas_{code}_" in record["logical_name"].lower()
+             or f"hybas_lake_{code}_" in record["logical_name"].lower()),
+            key=lambda record: ("hybas_lake_" not in record["logical_name"].lower(), record["logical_name"]),
+        )
+        for code in HYDROBASIN_REGION_CODES.values()
+    }
+    by_code["islands"] = [
+        record for record in records
+        if record.get("source_id") == "hydrobasins-iucn-islands"
+    ]
+    return by_code
+
+
 def _hybas_id_digest(ids: list[int]) -> str:
     digest = hashlib.sha256()
     for value in ids:
@@ -1555,22 +1573,10 @@ def build_hydrobasin_index(
     by_region_level: dict[tuple[int, int], set[int]] = {}
     for hybas_id in requested_ids:
         by_region_level.setdefault(_hybas_region_level(hybas_id), set()).add(hybas_id)
-    by_code = {
-        code: sorted(
-            (record for record in basin_records
-             if f"hybas_{code}_" in record["logical_name"].lower()
-             or f"hybas_lake_{code}_" in record["logical_name"].lower()),
-            key=lambda record: ("hybas_lake_" not in record["logical_name"].lower(), record["logical_name"]),
-        )
-        for code in HYDROBASIN_REGION_CODES.values()
-    }
+    by_code = hydrobasin_records_by_code(basin_records)
     required_codes = {
         HYDROBASIN_REGION_CODES[region] for region, _ in by_region_level if region
     }
-    by_code["islands"] = [
-        record for record in basin_records
-        if record.get("source_id") == "hydrobasins-iucn-islands"
-    ]
     if (0, 0) in by_region_level:
         required_codes.add("islands")
     missing_sources = [

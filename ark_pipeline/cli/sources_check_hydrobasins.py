@@ -16,6 +16,7 @@ from ark_pipeline.cli.spatial_pairs import (
     HYDROBASIN_REGION_CODES,
     _hybas_region_level,
     hydrobasin_files,
+    hydrobasin_records_by_code,
 )
 
 
@@ -33,6 +34,7 @@ def audit(root: Path, relations_root: Path) -> dict:
             ).fetchall()
         )
     records = hydrobasin_files(root, load_manifest(root))
+    by_code = hydrobasin_records_by_code(records)
     groups = defaultdict(set)
     unsupported = set()
     for identifier in relationships:
@@ -45,13 +47,12 @@ def audit(root: Path, relations_root: Path) -> dict:
     scans = []
     for (region, level), wanted in sorted(groups.items()):
         code = HYDROBASIN_REGION_CODES[region] if region else "islands"
-        for record in records:
+        claimed = set()
+        for record in by_code[code]:
             name = record["logical_name"]
-            is_standard = region and f"hybas_{code}_" in name
-            is_lake = region and f"hybas_lake_{code}_" in name
-            is_island = not region and record["source_id"] == "hydrobasins-iucn-islands"
-            if not (is_standard or is_lake or is_island):
-                continue
+            is_lake = bool(region) and "hybas_lake_" in name.lower()
+            is_standard = bool(region) and not is_lake
+            is_island = not region
             column = "hybas_id" if is_island else "HYBAS_ID"
             layer = (
                 Path(name).stem
@@ -60,6 +61,7 @@ def audit(root: Path, relations_root: Path) -> dict:
             )
             matched = set()
             invalid = set()
+            seen = set()
             with pyogrio.open_arrow(
                 record["resolved_path"],
                 layer=layer,
@@ -78,6 +80,9 @@ def audit(root: Path, relations_root: Path) -> dict:
                     geometries = batch[geometry_column]
                     for index in selected:
                         identifier = ids[index]
+                        if identifier not in claimed and identifier in seen:
+                            raise ValueError(f"{layer}: duplicate HYBAS_ID values in geometry source")
+                        seen.add(identifier)
                         wkb = geometries[index].as_py()
                         geometry = shapely.from_wkb(wkb) if wkb else None
                         if (
@@ -88,7 +93,10 @@ def audit(root: Path, relations_root: Path) -> dict:
                             invalid.add(identifier)
                         else:
                             matched.add(identifier)
-            found.update(matched)
+            # Presence selects the source even if its polygon is unusable. A
+            # valid standard polygon cannot rescue a malformed winning lake row.
+            found.update(matched - claimed)
+            claimed.update(seen)
             if is_standard:
                 standard_found.update(matched)
             scans.append(

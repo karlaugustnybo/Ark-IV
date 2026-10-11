@@ -344,7 +344,10 @@ coverage status. Missing geometry is unresolved coverage, never absence evidence
 The receipt binds the profile, source inventories, requested IDs, output schemas
 and hashes; partial receipts additionally bind relationship-table hashes.
 The read-only `sources_check_hydrobasins` CLI reports exact-ID and nonempty
-polygon coverage with distinct basin/species denominators; it does not perform
+polygon coverage with distinct basin/species denominators using the same lake-first
+exact-ID selection. Standard-only inventory counts remain separate diagnostics;
+a present but unusable lake row is unresolved even when standard has a polygon.
+The checker does not perform
 H3 filling or establish biological accuracy. Its reports remain local.
 
 ### Repair policy
