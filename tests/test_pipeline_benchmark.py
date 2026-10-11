@@ -11,6 +11,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import duckdb
@@ -30,7 +31,9 @@ from ark_pipeline.cli.benchmark_pipeline import (
     select_sample,
 )
 from ark_pipeline.cli.benchmark_sample import build_sample
+from ark_pipeline.cli.benchmark_stage import PREREQUISITES, replay_plan
 from ark_pipeline.runtime.benchmark_estimates import estimate
+from ark_pipeline.runtime.checkpoints import artifact_inventory, benchmark_environment
 from ark_pipeline.runtime.provenance import atomic_json, sha256
 from ark_pipeline.spatial.coverage import load_spatial_profile
 from tests import test_global_adm2
@@ -112,6 +115,40 @@ class BenchmarkModelTests(unittest.TestCase):
 
 
 class BenchmarkRunnerTests(unittest.TestCase):
+    def test_stage_replay_requires_both_options_and_completed_prerequisites(self):
+        for options in (["--only-stage", "pairs"], ["--from-run", "/unused"]):
+            with self.assertRaisesRegex(ValueError, "together"):
+                run(parser().parse_args(options))
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "source"
+            source.mkdir()
+            sample = source / "sample.parquet"
+            sample.touch()
+            config, _, _ = plan(parser().parse_args(["--root", temporary, "--sample", str(sample), "--output-root", str(source)]))
+            atomic_json(source / "config.json", config)
+            atomic_json(source / "benchmark-report.json", {"stages": []})
+            with self.assertRaisesRegex(ValueError, "prerequisites: pairs"):
+                run(parser().parse_args(["--only-stage", "lists", "--from-run", str(source), "--dry-run"]))
+            atomic_json(source / "benchmark-report.json", {"stages": [
+                {"name": name, "status": "passed"} for name in PREREQUISITES
+            ]})
+            for name in PREREQUISITES:
+                output = (Path(temporary) / f"replay-{name}").resolve()
+                args = parser().parse_args(["--only-stage", name, "--from-run", str(source),
+                                            "--output-root", str(output), "--workers", "2", "--dry-run"])
+                report, stage, _, environment = replay_plan(args)
+                self.assertEqual([s["name"] for s in report["planned_stages"]], [name])
+                self.assertEqual(report["scope"], "stage-replay")
+                self.assertFalse(output.exists())
+                for flag in ("--target", "--output", "--output-dir", "--output-root", "--scratch-dir"):
+                    if flag in stage["command"]:
+                        self.assertTrue(Path(stage["command"][stage["command"].index(flag) + 1]).is_relative_to(output))
+                for key in ("BUILD_DUCKDB_PATH", "EXPORT_DIR", "TILE_DIR", "PMTILES_PATH"):
+                    self.assertTrue(Path(environment[key]).is_relative_to(output))
+            with self.assertRaisesRegex(ValueError, "separate"):
+                replay_plan(parser().parse_args(["--only-stage", "pairs", "--from-run", str(source),
+                                                 "--output-root", str(source / "nested"), "--dry-run"]))
+
     def test_plan_uses_shared_resources_and_isolates_all_output_paths(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -227,6 +264,34 @@ class BenchmarkRunnerTests(unittest.TestCase):
             self.assertEqual(metric_cells, {h3.int_to_str(cell) for cell, _ in expected})
             tile_report = json.loads((output / "tiles/current/build-report.json").read_text())
             self.assertEqual(tile_report["features"], report["workload"]["res3_cells"] + report["workload"]["res7_cells"])
+            # Exercise actual stages through the replay CLI with immutable inputs.
+            original_inventory = artifact_inventory(output)
+            for stage_name in ("pairs", "lists", "coarse_db", "coarse_cache", "fine_metrics", "prepared_inputs", "tiles"):
+                replay_output = root / f"replay-{stage_name}"
+                replay = run(parser().parse_args([
+                    "--only-stage", stage_name, "--from-run", str(output), "--output-root", str(replay_output),
+                    "--workers", "1", "--memory-limit", "512MB", "--ui", "plain",
+                ]))
+                if replay["status"] != "passed":
+                    self.fail(f"{stage_name}: {replay.get('error')}\n" +
+                              "\n".join(p.read_text()[-3000:] for p in (replay_output / "logs").glob("*.log")))
+                self.assertEqual([s["name"] for s in replay["stages"]], [stage_name])
+                self.assertNotIn("estimate", replay)
+                self.assertEqual(artifact_inventory(output), original_inventory)
+                self.assertEqual(before, snapshot())
+            self.assertEqual(
+                pq.read_table(root / "replay-coarse_cache/exports/cell_boundaries.parquet"),
+                pq.read_table(output / "exports/cell_boundaries.parquet"),
+            )
+            # A changed consumed input is rejected before creating replay output.
+            with (output / "pairs.parquet").open("ab") as handle:
+                handle.write(b"changed")
+            with self.assertRaisesRegex(ValueError, "changed or is missing"):
+                run(parser().parse_args(["--only-stage", "lists", "--from-run", str(output),
+                                         "--output-root", str(root / "stale-replay")]))
+            self.assertFalse((root / "stale-replay").exists())
+            with (output / "pairs.parquet").open("r+b") as handle:
+                handle.truncate(handle.seek(0, 2) - len(b"changed"))
             # The memory-aware default may select one worker. Its inline kernel
             # path must preserve exactly the same pairs as process-pool mode.
             serial = root / "serial-pairs"
@@ -262,6 +327,81 @@ class BenchmarkRunnerTests(unittest.TestCase):
             self.assertEqual(report["status"], "failed")
             self.assertNotIn("estimate", report)
             self.assertEqual(json.loads((output / "benchmark-report.json").read_text())["status"], "failed")
+
+    def test_resume_keeps_original_runtime_and_rejects_changed_measurement_environment(self):
+        with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):
+            root = Path(temporary)
+            sample, boundary = fixture(root)
+            options = ["--root", str(root), "--sample", str(sample), "--workers", "1", "--ui", "plain"]
+            for key in ("admin0", "admin1", "municipality", "eez", "conservation-framework"):
+                options += ["--" + key, str(boundary)]
+            original = {"python": "fixture-python", "dependencies": {"h3ronpy": "A"},
+                        "machine": "fixture-machine", "cpu_count": 4, "git": {"commit": "original"}}
+            calls = []
+
+            def measured(stage, *args, **kwargs):
+                calls.append(stage["name"])
+                if stage["name"] != "source_scan":
+                    raise KeyboardInterrupt
+                return {**stage, "status": "passed", "wall_seconds": 2, "log": "fixture.log"}
+
+            with patch("ark_pipeline.cli.benchmark_pipeline.shutil.which", return_value="fixture-compiler"), \
+                 patch("ark_pipeline.cli.benchmark_pipeline.run_stage", side_effect=measured), \
+                 patch("ark_pipeline.cli.benchmark_pipeline.runtime_identity", return_value=original):
+                first = run(parser().parse_args(options))
+            self.assertEqual(calls, ["source_scan", "crosswalk"])
+            compatible = {**original, "git": {"commit": "new-informational-commit"}}
+            calls.clear()
+            with patch("ark_pipeline.cli.benchmark_pipeline.shutil.which", return_value="fixture-compiler"), \
+                 patch("ark_pipeline.cli.benchmark_pipeline.run_stage", side_effect=measured), \
+                 patch("ark_pipeline.cli.benchmark_pipeline.runtime_identity", return_value=compatible):
+                resumed = run(parser().parse_args(options))
+            self.assertEqual(calls, ["crosswalk"])
+            self.assertEqual(resumed["runtime"], original)
+            self.assertEqual(resumed["attempts"][0]["runtime"], original)
+            self.assertEqual(resumed["attempts"][1]["runtime"], compatible)
+            self.assertEqual(resumed["stages"][0]["attempt_id"], first["attempts"][0]["id"])
+            checkpoint = Path(first["output"]) / "dashboard-state.json"
+            saved = checkpoint.read_bytes()
+            variants = [({**original, "dependencies": {"h3ronpy": "B"}}, "fixture-compiler"),
+                        ({**original, "python": "other-python"}, "fixture-compiler"),
+                        ({**original, "machine": "other-machine"}, "fixture-compiler"),
+                        (original, "other-compiler")]
+            for runtime, compiler in variants:
+                with self.subTest(runtime=runtime, compiler=compiler), \
+                     patch("ark_pipeline.cli.benchmark_pipeline.shutil.which", return_value=compiler), \
+                     patch("ark_pipeline.cli.benchmark_pipeline.run_stage", side_effect=measured), \
+                     patch("ark_pipeline.cli.benchmark_pipeline.runtime_identity", return_value=runtime):
+                    explicit = [*options, "--output-root", first["output"]]
+                    with self.assertRaisesRegex(ValueError, "already exists"):
+                        run(parser().parse_args(explicit))
+                    calls.clear()
+                    changed = run(parser().parse_args(options))
+                    self.assertNotEqual(changed["output"], first["output"])
+                    self.assertEqual(calls, ["source_scan", "crosswalk"])
+                    self.assertEqual(checkpoint.read_bytes(), saved)
+            # Legacy state is preserved, but cannot safely authorize old measurements.
+            legacy = json.loads(saved)
+            legacy["identity"].pop("measurement_environment")
+            atomic_json(checkpoint, legacy)
+            with patch("ark_pipeline.cli.benchmark_pipeline.shutil.which", return_value="fixture-compiler"), \
+                 patch("ark_pipeline.cli.benchmark_pipeline.runtime_identity", return_value=original):
+                with self.assertRaisesRegex(ValueError, "already exists"):
+                    run(parser().parse_args([*options, "--output-root", first["output"]]))
+
+    def test_environment_fingerprints_compiler_bytes_and_hardware(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            compiler = Path(temporary) / "fixture-compiler"
+            compiler.write_text("version A")
+            with patch("ark_pipeline.runtime.checkpoints.shutil.which", return_value=str(compiler)), \
+                 patch("ark_pipeline.runtime.checkpoints.psutil.virtual_memory", return_value=SimpleNamespace(total=1024)):
+                first = benchmark_environment({"python": "A"})
+                compiler.write_text("version B")
+                changed = benchmark_environment({"python": "A"})
+                self.assertNotEqual(first["compiler"], changed["compiler"])
+                with patch("ark_pipeline.runtime.checkpoints.psutil.virtual_memory", return_value=SimpleNamespace(total=2048)):
+                    other_hardware = benchmark_environment({"python": "A"})
+                self.assertNotEqual(changed["hardware"], other_hardware["hardware"])
 
     def test_default_command_rediscovers_interruption_and_fresh_uses_new_directory(self):
         with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):
