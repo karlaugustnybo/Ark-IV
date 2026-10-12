@@ -90,6 +90,123 @@ def regenerate_fine(recorded):
 
 
 class ServingExportCoherenceTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("tippecanoe"), "Tippecanoe required for publication preservation")
+    def test_nonidentity_mapping_rejects_genuine_fresh_preparation(self):
+        from backend.app import _external_res7_species_ids
+
+        for source_name, target_name in (('source_species_id', 'app_species_id'), ('iucn_sis_id', 'gbif_accepted_id')):
+            with self.subTest(source_name=source_name), tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):
+                root = Path(temporary)
+                args, recorded, cells = prepared_exports(root)
+                with duckdb.connect(str(recorded.build_duckdb), read_only=True) as connection:
+                    species = connection.execute('SELECT * FROM SpecInfo').to_arrow_table()
+                first = species.to_pylist()[0]
+                pq.write_table(pa.Table.from_pylist([{**first, 'iucn_sis_id': '2'},
+                    {**first, 'gbif_accepted_id': '2', 'iucn_sis_id': '1',
+                     'redlist_category': 'Critically Endangered'}], schema=species.schema), recorded.species)
+                pq.write_table(pa.table({'gbif_accepted_id': ['1', '2'], 'system': ['Terrestrial', 'Terrestrial']}), recorded.species_systems)
+                pq.write_table(pa.table({source_name: [1, 2], target_name: ['1', '2']}), recorded.crosswalk)
+
+                def rebuild():
+                    metric_args = regenerate_fine(recorded)
+                    source = root / f'source-{len(list(root.glob("source-*.duckdb")))}.duckdb'
+                    with duckdb.connect(str(source)) as connection:
+                        build_species_tables(connection, recorded.species, recorded.species_systems)
+                        build_h3_table(connection, 3, recorded.h3_root / 'h3_res3_species_global_merged.parquet', recorded.crosswalk)
+                    with duckdb.connect(str(recorded.build_duckdb)) as connection:
+                        connection.execute(f"ATTACH {sql_path(source)} AS source (READ_ONLY)")
+                        materialize_aggregates(connection, (3,))
+                        export_parquet(connection, root / 'exports', resolutions=(3,))
+                        snapshot = export_coarse_snapshot(connection, recorded.metadata_template.parent)
+                    metadata = json.loads(recorded.metadata_template.read_text())
+                    metadata['coarse_snapshot'] = snapshot
+                    recorded.metadata_template.write_text(json.dumps(metadata))
+                    return metric_args
+
+                rebuild()
+                report = record_prepared(recorded)
+                accepted = recorded.output.read_bytes()
+                for mode in (False, True):
+                    args.static_fine = mode
+                    self.assertEqual(build(args)['status'], 'passed')
+                pointers = [(root / path).resolve() for path in ('tiles/current', 'tiles/static/current')]
+                pq.write_table(pa.table({source_name: [1, 2], target_name: ['2', '1']}), recorded.crosswalk)
+                metric_args = rebuild()
+                # All producers completed: coarse/SQL/Arrow use mapped CR species2,
+                # while native fine metrics/detail still interpret raw1 as EN species1.
+                with duckdb.connect(str(recorded.build_duckdb), read_only=True) as connection:
+                    self.assertEqual(connection.execute('SELECT DISTINCT crit_endangered_count, endangered_count FROM h3_res3_agg_all').fetchall(), [(1, 0)])
+                self.assertEqual(pq.read_table(root / 'exports/cell_species_lists.parquet')['species_ids'].to_pylist(), [['2'], ['2']])
+                snapshot = json.loads(recorded.metadata_template.read_text())['coarse_snapshot']
+                with ipc.open_file(recorded.metadata_template.parent / Path(snapshot['url']).name) as reader:
+                    self.assertEqual(reader.read_all().select(['a_cr_sp', 'a_en_sp']).to_pylist(),
+                        [{'a_cr_sp': 1, 'a_en_sp': 0}, {'a_cr_sp': 1, 'a_en_sp': 0}])
+                for path in recorded.parts_dir.glob('*.parquet'):
+                    self.assertEqual(pq.read_table(path).select(['crit_endangered_count__all', 'endangered_count__all']).to_pylist(),
+                        [{'crit_endangered_count__all': 0, 'endangered_count__all': 1}])
+                with patch('backend.app.settings', SimpleNamespace(res7_parts_dir=recorded.h3_root / 'res7_merged_parts')):
+                    self.assertEqual(_external_res7_species_ids(h3.str_to_int(cells[0])), ['1'])
+                error = 'Managed fine serving requires identity source-to-serving IDs'
+                with self.assertRaisesRegex(ValueError, error):
+                    record_prepared(recorded)
+                self.assertEqual(recorded.output.read_bytes(), accepted)
+                # Simulate an old intake using genuine new file/receipt identities;
+                # do not modify any producer receipt or the accepted report.
+                report['files'] = {name: file_record(Path(value['path'])) for name, value in report['files'].items() if name != 'coarse_snapshot'}
+                snapshot = json.loads(recorded.metadata_template.read_text())['coarse_snapshot']
+                report['files']['coarse_snapshot'] = file_record(recorded.metadata_template.parent / Path(snapshot['url']).name)
+                report['exports'] = {path.name: file_record(path) for path in (root / 'exports').glob('*.parquet')}
+                report['metric_identity'] = metric_args._aggregate_metadata_identity
+                for records in report['parts'].values():
+                    for name, value in records.items():
+                        records[name] = file_record(Path(value['path']))
+                legacy = root / 'old-intake.json'
+                legacy.write_text(json.dumps(report))
+                with self.assertRaisesRegex(ValueError, error):
+                    read_prepared(legacy)
+                args.prepared_inputs = legacy
+                for mode in (False, True):
+                    args.static_fine = mode
+                    with self.assertRaisesRegex(ValueError, error):
+                        build(args)
+                self.assertEqual(recorded.output.read_bytes(), accepted)
+                self.assertEqual([(root / path).resolve() for path in ('tiles/current', 'tiles/static/current')], pointers)
+
+    @unittest.skipUnless(shutil.which("tippecanoe"), "Tippecanoe required for identity publication")
+    def test_used_identity_mappings_publish_with_unused_nonidentity_rows(self):
+        for columns in ({'source_species_id': [1, 2], 'app_species_id': ['1', 'other']},
+                        {'iucn_sis_id': [1, 2], 'gbif_accepted_id': ['1', 'other']},
+                        {'source_species_id': [1, 2], 'app_species_id': [1, 20]},
+                        {'iucn_sis_id': [1, 2]}):
+            with self.subTest(columns=columns), tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):
+                root = Path(temporary)
+                args, recorded, cells = prepared_exports(root)
+                pq.write_table(pa.table(columns), recorded.crosswalk)
+                self.assertEqual(record_prepared(recorded)['status'], 'passed')
+                self.assertEqual(read_prepared(recorded.output)['status'], 'passed')
+                for mode in (False, True):
+                    args.static_fine = mode
+                    self.assertEqual(build(args)['status'], 'passed')
+                    self.assertTrue(build(args)['reused'])
+                config = validate_config(root / 'tiles/current/serving.json')
+                self.assertEqual(config['status'], 'passed')
+                from backend.app import _external_res7_species_ids
+                with patch('backend.app.settings', SimpleNamespace(res7_parts_dir=Path(config['environment']['RES7_PARTS_DIR']))):
+                    self.assertEqual(_external_res7_species_ids(h3.str_to_int(cells[0])), ['1'])
+
+    def test_noncanonical_serving_id_is_not_fine_identity(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source, crosswalk, build_path = root / 'coarse.parquet', root / 'crosswalk.parquet', root / 'build.duckdb'
+            pq.write_table(pa.table({'h3_cell': [h3.str_to_int(h3.latlng_to_cell(55, 12, 3))], 'species_ids': [[1]]}), source)
+            pq.write_table(pa.table({'source_species_id': [1], 'app_species_id': ['001']}), crosswalk)
+            with duckdb.connect(str(build_path)) as connection:
+                build_h3_table(connection, 3, source, crosswalk)
+            report = {'files': {name: file_record(path) for name, path in
+                (('coarse_source', source), ('crosswalk', crosswalk), ('build_duckdb', build_path))}}
+            with self.assertRaisesRegex(ValueError, 'Managed fine serving requires identity source-to-serving IDs'):
+                validate_coarse_membership(report)
+
     def test_coarse_recomputation_covers_dna_nulls_and_all_ecosystems(self):
         for field, value in (('has_dna_species_level', True), ('genus_has_dna', False),
                              ('family_has_dna', False), ('goat_data_deficient', True),
@@ -399,7 +516,12 @@ class ServingExportCoherenceTests(unittest.TestCase):
                     connection.execute('UPDATE H3Res3Species SET gbif_ids=list_reverse(gbif_ids)')
                 report = {'files': {name: file_record(path) for name, path in
                     (('coarse_source', source), ('crosswalk', crosswalk), ('build_duckdb', build_path))}}
-                validate_coarse_membership(report)
+                # Standalone source construction retains arbitrary string targets;
+                # managed fine serving cannot apply that mapping downstream.
+                with duckdb.connect(str(build_path), read_only=True) as connection:
+                    self.assertEqual(set(connection.execute('SELECT unnest(gbif_ids) FROM H3Res3Species').fetchall()), {('app-a',), ('app-b',)})
+                with self.assertRaisesRegex(ValueError, 'Managed fine serving requires identity source-to-serving IDs'):
+                    validate_coarse_membership(report)
                 fine = root / 'fine.parquet'
                 # Multiple child cells and reversed/repeated source IDs still
                 # produce the same distinct parent relation before ID mapping.

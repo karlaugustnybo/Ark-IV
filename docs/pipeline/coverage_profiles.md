@@ -42,6 +42,19 @@ without this input require preparation again; old species metadata schemas can
 still omit optional identity/evidence columns. A same-count species substitution
 requires rebuilding the coarse preparation even with fresh fine receipts and
 unchanged species dimensions, and even when SQL exports are absent.
+Managed fine serving requires identity mappings for every actually used source
+ID: its native fine metric lookup and selected-cell detail reader use raw SIS IDs
+directly as serving keys. Both explicit crosswalk schemas and source-only identity
+crosswalks remain supported; unused nonidentity rows do not prevent acceptance.
+Numeric IDs and their canonical string representations denote the same key;
+noncanonical strings such as `001` do not denote raw ID `1`. Optional species
+identity metadata is not a substitute for the consumed mapping. The standalone
+coarse source builder can still map to different numeric or string serving IDs,
+but that capability does not establish end-to-end managed fine support.
+Recording or reading a preparation with used nonidentity mappings rejects before
+publication or reuse. Correct the preparation to use matching SIS-valued serving
+keys and rebuild coarse/fine products; merely relabeling a crosswalk cannot repair
+already-produced fine evidence. This gate changes acceptance, not taxonomy or scores.
 Raw coarse membership is also reconciled bidirectionally with the distinct
 resolution-3 parent/species relation of the selected fine lists, before the
 shared source-to-serving mapping. This explicitly validates legacy/manual packs

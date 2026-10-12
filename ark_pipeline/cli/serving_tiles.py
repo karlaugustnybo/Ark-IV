@@ -331,11 +331,11 @@ def validate_coarse_membership(report: dict) -> None:
     if "crosswalk" not in files:
         raise ValueError("Prepared coarse membership requires an explicit crosswalk; rerun just data-prepare")
     crosswalk = Path(files["crosswalk"]["path"])
-    # Reuse both supported crosswalk schemas and the producer's identity/nonidentity
-    # mapping, rather than assuming source IDs equal the serving primary key.
+    # Reuse the producer's schema/mapping validation. Managed fine metrics and
+    # detail readers require identity IDs, unlike the standalone coarse builder.
     with duckdb.connect() as connection:
         configure_duckdb(connection)
-        validate_crosswalk(connection, crosswalk)
+        mapping = validate_crosswalk(connection, crosswalk)
         mapped = build_h3_table(connection, 3, Path(files["coarse_source"]["path"]),
                                 crosswalk, deep_validation=False)
         if mapped.get("unmatched_relationships", 0) or mapped.get("unmatched_cells", 0):
@@ -349,6 +349,18 @@ def validate_coarse_membership(report: dict) -> None:
         """).fetchone()[0]
         if mismatch:
             raise ValueError("Consumed coarse membership does not match prepared build; rerun just data-prepare")
+        nonidentity = connection.execute(f"""
+            WITH used AS (SELECT DISTINCT CAST(unnest(species_ids) AS VARCHAR) AS source_id
+                FROM read_parquet(?)),
+            mapping AS (SELECT CAST({mapping['source_column']} AS VARCHAR) AS source_id,
+                CAST({mapping['target_column']} AS VARCHAR) AS serving_id FROM read_parquet(?))
+            SELECT count(*) FROM used JOIN mapping USING (source_id)
+            WHERE serving_id IS DISTINCT FROM source_id
+        """, [files["coarse_source"]["path"], str(crosswalk)]).fetchone()[0]
+        if nonidentity:
+            raise ValueError("Managed fine serving requires identity source-to-serving IDs for used species: "
+                "native fine metrics and detail readers use raw IDs directly; prepare matching SIS-valued "
+                "serving keys and rebuild coarse/fine products, rather than relabeling the crosswalk")
 
 
 def read_prepared(path: Path) -> dict:
