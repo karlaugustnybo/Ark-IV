@@ -22,21 +22,30 @@ from ark_pipeline.builders.coarse_cache import (
     SYSTEMS,
     export_coarse_snapshot,
     export_parquet,
+    materialize_aggregates,
+    sql_path,
+)
+from ark_pipeline.builders.coarse_cache import (
+    main as coarse_main,
 )
 from ark_pipeline.builders.fine_metrics import (
     aggregate_part,
     prepare_species,
     record_aggregate_receipt,
 )
+from ark_pipeline.builders.source_database import build_h3_table, build_species_tables
+from ark_pipeline.cli.map_serving import validate_config
 from ark_pipeline.cli.serving_tiles import (
     build,
     file_record,
     read_prepared,
     record_prepared,
     validate_coarse_membership,
+    validate_coarse_metrics,
     validate_exports,
     validate_fine_membership,
 )
+from backend.config import Settings
 from tests.test_tile_export import prepared_fixture
 
 
@@ -58,7 +67,10 @@ def prepared_exports(root, *, expanded=False, empty=False):
             original = pq.read_table(coarse_source)
             pq.write_table(pa.Table.from_pylist([{**row, 'species_ids': []} for row in original.to_pylist()],
                 schema=original.schema), coarse_source)
-            connection.execute('UPDATE h3_res3_agg_all SET total_species=0')
+            # This isolated empty SQL relation has no scored cell rows; it is
+            # not a publishable empty-fine preparation.
+            for system in SYSTEMS:
+                connection.execute(f'DELETE FROM h3_res3_agg_{system}')
             for path in (recorded.h3_root / 'res7_merged_parts').glob('*.parquet'):
                 original = pq.read_table(path)
                 pq.write_table(pa.Table.from_pylist([], schema=original.schema), path)
@@ -78,6 +90,136 @@ def regenerate_fine(recorded):
 
 
 class ServingExportCoherenceTests(unittest.TestCase):
+    def test_coarse_recomputation_covers_dna_nulls_and_all_ecosystems(self):
+        for field, value in (('has_dna_species_level', True), ('genus_has_dna', False),
+                             ('family_has_dna', False), ('goat_data_deficient', True),
+                             ('family_has_dna', None), ('system', 'Freshwater'), ('system', 'Marine')):
+            with self.subTest(field=field, value=value), tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):
+                root = Path(temporary)
+                _, recorded, _ = prepared_exports(root)
+                path = recorded.species_systems if field == 'system' else recorded.species
+                table = pq.read_table(path)
+                pq.write_table(pa.Table.from_pylist([{**row, field: value} for row in table.to_pylist()], schema=table.schema), path)
+                source = root / 'source.duckdb'
+                with duckdb.connect(str(source)) as connection:
+                    build_species_tables(connection, recorded.species, recorded.species_systems)
+                    build_h3_table(connection, 3, recorded.h3_root / 'h3_res3_species_global_merged.parquet', recorded.crosswalk)
+                with duckdb.connect(str(recorded.build_duckdb)) as connection:
+                    connection.execute(f'ATTACH {sql_path(source)} AS source (READ_ONLY)')
+
+                    class InterruptedConnection:
+                        def execute(self, query, *arguments):
+                            if 'CREATE OR REPLACE TABLE h3_res3_agg_all' in query:
+                                raise KeyboardInterrupt('fixture interruption before first aggregate replacement')
+                            return connection.execute(query, *arguments)
+
+                    with self.assertRaises(KeyboardInterrupt):
+                        materialize_aggregates(InterruptedConnection(), (3,))
+                    with self.assertRaisesRegex(ValueError, 'Coarse scored metrics do not match current dimensions and membership'):
+                        validate_coarse_metrics(connection)
+                    materialize_aggregates(connection, (3,))
+                    validate_coarse_metrics(connection)
+
+    @unittest.skipUnless(shutil.which("tippecanoe"), "Tippecanoe required for publication preservation")
+    def test_interrupted_coarse_refresh_rejects_matching_new_arrow_and_fine(self):
+        for sql_exports, snapshot in ((True, True), (False, False)):
+            with self.subTest(sql_exports=sql_exports, snapshot=snapshot), tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):
+                root = Path(temporary)
+                args, recorded, _ = prepared_exports(root)
+                # The real source builder copies the full supplied schema.
+                with duckdb.connect(str(recorded.build_duckdb), read_only=True) as connection:
+                    species = connection.execute('SELECT * FROM SpecInfo').to_arrow_table()
+                pq.write_table(species, recorded.species)
+                regenerate_fine(recorded)
+                settings = Settings(_env_file=None, build_duckdb_path=recorded.build_duckdb,
+                    source_duckdb_path=root / 'source.duckdb', export_dir=root / 'exports',
+                    tile_dir=recorded.metadata_template.parent, map_metadata_path=recorded.metadata_template,
+                    validation_report_path=root / 'producer-validation.json', jurisdictions_path=args.admin0,
+                    admin1_boundaries_path=args.admin1, municipality_boundaries_path=args.municipality,
+                    eez_boundaries_path=args.eez, conservation_boundaries_path=args.conservation_framework)
+
+                def export(rebuild=False):
+                    command = ['coarse_cache', '--resolutions', '3', '--skip-tiles']
+                    if rebuild:
+                        command.append('--rebuild-aggregates')
+                    with patch('ark_pipeline.builders.coarse_cache.get_settings', return_value=settings), patch('sys.argv', command):
+                        coarse_main()
+                    self.assertEqual(json.loads(settings.validation_report_path.read_text())['status'], 'ok')
+                    if not snapshot:
+                        metadata = json.loads(recorded.metadata_template.read_text())
+                        metadata.pop('coarse_snapshot')
+                        recorded.metadata_template.write_text(json.dumps(metadata))
+                    if not sql_exports:
+                        settings.export_dir.rename(root / ('unused-exports-' + str(len(list(root.glob('unused-exports-*'))))))
+
+                export()
+                report = record_prepared(recorded)
+                for mode in (False, True):
+                    args.static_fine = mode
+                    build(args)
+                pointers = [(root / path).resolve() for path in ('tiles/current', 'tiles/static/current')]
+                accepted = recorded.output.read_bytes()
+                pq.write_table(pa.Table.from_pylist([{**row, 'redlist_category': 'Critically Endangered'} for row in species.to_pylist()],
+                    schema=species.schema), recorded.species)
+                metric_args = regenerate_fine(recorded)
+                with duckdb.connect(str(settings.source_duckdb_path)) as connection:
+                    build_species_tables(connection, recorded.species, recorded.species_systems)
+                    build_h3_table(connection, 3, recorded.h3_root / 'h3_res3_species_global_merged.parquet', recorded.crosswalk)
+                with duckdb.connect(str(recorded.build_duckdb)) as connection:
+                    connection.execute(f'ATTACH {sql_path(settings.source_duckdb_path)} AS source (READ_ONLY)')
+
+                    class InterruptedConnection:
+                        def execute(self, query, *arguments):
+                            if 'CREATE OR REPLACE TABLE h3_res3_agg_all' in query:
+                                raise KeyboardInterrupt('fixture interruption before first aggregate replacement')
+                            return connection.execute(query, *arguments)
+
+                    with self.assertRaises(KeyboardInterrupt):
+                        materialize_aggregates(InterruptedConnection(), (3,))
+                # Supported reuse exports genuinely new SQL/Arrow from stale
+                # metric tables; neither scores nor producer receipts are edited.
+                export()
+                with duckdb.connect(str(recorded.build_duckdb), read_only=True) as connection:
+                    self.assertEqual(connection.execute('SELECT DISTINCT redlist_category FROM SpecInfo').fetchall(), [('Critically Endangered',)])
+                    self.assertEqual(connection.execute('SELECT DISTINCT crit_endangered_count, endangered_count FROM h3_res3_agg_all').fetchall(), [(0, 1)])
+                with self.assertRaisesRegex(ValueError, 'Coarse scored metrics do not match current dimensions and membership'):
+                    record_prepared(recorded)
+                self.assertEqual(recorded.output.read_bytes(), accepted)
+                # A pre-fix intake pins these real new outputs. Consumption must
+                # reject it before either publishing or reusing an existing pack.
+                report['files'] = {name: file_record(Path(value['path'])) for name, value in report['files'].items() if name != 'coarse_snapshot'}
+                metadata = json.loads(recorded.metadata_template.read_text())
+                if snapshot:
+                    report['files']['coarse_snapshot'] = file_record(recorded.metadata_template.parent / Path(metadata['coarse_snapshot']['url']).name)
+                report['exports'] = {path.name: file_record(path) for path in settings.export_dir.glob('*.parquet')}
+                report['metric_identity'] = metric_args._aggregate_metadata_identity
+                for records in report['parts'].values():
+                    for name, value in records.items():
+                        records[name] = file_record(Path(value['path']))
+                legacy = root / 'old-intake.json'
+                legacy.write_text(json.dumps(report))
+                with self.assertRaisesRegex(ValueError, 'Coarse scored metrics do not match current dimensions and membership'):
+                    read_prepared(legacy)
+                args.prepared_inputs = legacy
+                for mode in (False, True):
+                    args.static_fine = mode
+                    with self.assertRaisesRegex(ValueError, 'Coarse scored metrics do not match current dimensions and membership'):
+                        build(args)
+                self.assertEqual(recorded.output.read_bytes(), accepted)
+                self.assertEqual([(root / path).resolve() for path in ('tiles/current', 'tiles/static/current')], pointers)
+                # A genuine completed producer refresh, with the same inputs,
+                # is accepted and can select both new publication modes.
+                export(rebuild=True)
+                self.assertEqual(record_prepared(recorded)['status'], 'passed')
+                args.prepared_inputs = recorded.output
+                for mode in (False, True):
+                    args.static_fine = mode
+                    self.assertEqual(build(args)['status'], 'passed')
+                    self.assertTrue(build(args)['reused'])
+                self.assertEqual(validate_config(root / 'tiles/current/serving.json')['status'], 'passed')
+                self.assertTrue(all((root / path).resolve() != previous for path, previous in
+                    zip(('tiles/current', 'tiles/static/current'), pointers, strict=True)))
+
     @unittest.skipUnless(shutil.which("tippecanoe"), "Tippecanoe required for publication preservation")
     def test_fine_only_refresh_rejects_with_genuine_fresh_metrics(self):
         for sql_exports in (True, False):

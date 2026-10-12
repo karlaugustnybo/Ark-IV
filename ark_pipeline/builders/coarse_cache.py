@@ -162,6 +162,48 @@ def sql_path(path: Path) -> str:
     return "'" + str(path).replace("'", "''") + "'"
 
 
+def aggregate_partition_query(resolution: int, cell_predicate: str) -> str:
+    """Recompute every metric/system from current dimensions and selected cells.
+
+    The producer and serving coherence gate share these exact predicates and
+    joins. Table names and the cell predicate are trusted internal SQL.
+    """
+    wide_columns = []
+    for system, system_predicate in SYSTEM_PREDICATES.items():
+        suffix = system.lower()
+        for metric, metric_predicate in METRICS.items():
+            wide_columns.append(
+                "COUNT(*) FILTER (WHERE "
+                f"({system_predicate}) AND ({metric_predicate}))::BIGINT "
+                f'AS "{metric}__{suffix}"'
+            )
+    return f"""
+    WITH species AS (
+        SELECT
+            info.*,
+            coalesce(bool_or(systems.system = 'Terrestrial'), false)
+                AS is_terrestrial,
+            coalesce(bool_or(systems.system = 'Freshwater'), false)
+                AS is_freshwater,
+            coalesce(bool_or(systems.system = 'Marine'), false)
+                AS is_marine
+        FROM SpecInfo info
+        LEFT JOIN SpecSystems systems USING (gbif_accepted_id)
+        GROUP BY ALL
+    ),
+    cells AS (
+        SELECT hs.h3_index, ids.gbif_id
+        FROM H3Res{resolution}Species hs,
+        UNNEST(hs.gbif_ids) AS ids(gbif_id)
+        WHERE {cell_predicate}
+    )
+    SELECT cells.h3_index, {", ".join(wide_columns)}
+    FROM cells
+    JOIN species ON species.gbif_accepted_id = cells.gbif_id
+    GROUP BY cells.h3_index
+    """
+
+
 def materialize_aggregates(
     connection: duckdb.DuckDBPyConnection,
     resolutions: tuple[int, ...] = (3, 7),
@@ -205,15 +247,6 @@ def materialize_aggregates(
                 """
             )
 
-        wide_columns = []
-        for system, system_predicate in SYSTEM_PREDICATES.items():
-            suffix = system.lower()
-            for metric, metric_predicate in METRICS.items():
-                wide_columns.append(
-                    "COUNT(*) FILTER (WHERE "
-                    f"({system_predicate}) AND ({metric_predicate}))::BIGINT "
-                    f'AS "{metric}__{suffix}"'
-                )
         base_cells = [
             int(row[0])
             for row in connection.execute(
@@ -222,32 +255,8 @@ def materialize_aggregates(
         ]
         for base_cell in base_cells:
             connection.execute(
-                f"""
-                CREATE OR REPLACE TEMP TABLE aggregate_partition AS
-                WITH species AS (
-                    SELECT
-                        info.*,
-                        coalesce(bool_or(systems.system = 'Terrestrial'), false)
-                            AS is_terrestrial,
-                        coalesce(bool_or(systems.system = 'Freshwater'), false)
-                            AS is_freshwater,
-                        coalesce(bool_or(systems.system = 'Marine'), false)
-                            AS is_marine
-                    FROM SpecInfo info
-                    LEFT JOIN SpecSystems systems USING (gbif_accepted_id)
-                    GROUP BY ALL
-                ),
-                cells AS (
-                    SELECT hs.h3_index, ids.gbif_id
-                    FROM {input_table} hs,
-                    UNNEST(hs.gbif_ids) AS ids(gbif_id)
-                    WHERE hs.base_cell = {base_cell}
-                )
-                SELECT cells.h3_index, {", ".join(wide_columns)}
-                FROM cells
-                JOIN species ON species.gbif_accepted_id = cells.gbif_id
-                GROUP BY cells.h3_index
-                """
+                "CREATE OR REPLACE TEMP TABLE aggregate_partition AS "
+                + aggregate_partition_query(resolution, f"hs.base_cell = {base_cell}")
             )
             for system in SYSTEMS:
                 suffix = system.lower()

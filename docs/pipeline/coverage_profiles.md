@@ -48,6 +48,16 @@ shared source-to-serving mapping. This explicitly validates legacy/manual packs
 without assuming that matching paths or base-cell sets prove a common generation.
 It scans fine membership in DuckDB at recording and each prepared-report read,
 including reuse; no global relationship table is materialized in Python.
+Scored coarse aggregates must also match the current species dimensions and
+mapped cell membership. At recording and each read, including reuse, the gate
+recomputes all metric columns for every ecosystem one H3 base cell at a time
+using the materializer's exact SQL predicates. This catches interrupted aggregate
+refreshes even when new SQL exports and Arrow agree with the stale scored tables.
+The reductions stay in DuckDB with its validation connection's memory/temp
+defaults and configured thread count; the compiler's resource arguments do not
+configure these reads. Global validation cost has not been measured. A completed
+coarse refresh is required before accepting the preparation, including packs
+without SQL exports or an Arrow snapshot.
 A selected Arrow snapshot must have the producer descriptor/columns and the same
 cell IDs and scored metric values as the validated coarse build. Its batches are
 streamed through the producer's shared projection at recording and consumption;

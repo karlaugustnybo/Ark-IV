@@ -25,8 +25,10 @@ from ark_pipeline.builders.coarse_cache import (
     BOUNDARY_TILE_PROPERTIES,
     COARSE_SNAPSHOT_SCHEMA_VERSION,
     METRIC_TILE_NAMES,
+    METRICS,
     SYSTEM_TILE_PREFIXES,
     SYSTEMS,
+    aggregate_partition_query,
     coarse_snapshot_query,
     sql_path,
     wide_aggregate_query,
@@ -178,6 +180,7 @@ def validate_exports(report: dict) -> None:
             """, [report["files"][name]["path"]]).fetchone()[0]
             if mismatch:
                 raise ValueError(f"Consumed {name} metadata does not match prepared build")
+        validate_coarse_metrics(connection)
         validate_coarse_snapshot(connection, report)
         if not exports:
             return  # Maps without SQL still require matching coarse/fine metadata.
@@ -238,6 +241,43 @@ def validate_fine_membership(connection: duckdb.DuckDBPyConnection, report: dict
     """, [sources, report["files"]["coarse_source"]["path"]]).fetchone()[0]
     if mismatch:
         raise ValueError("Coarse source does not match fine parent membership; rerun just data-prepare")
+
+
+def validate_coarse_metrics(connection: duckdb.DuckDBPyConnection) -> None:
+    """Reconcile scored aggregates with current dimensions and mapped membership.
+
+    Recompute one base cell at a time using the materializer's exact SQL. Legacy
+    packs may represent a zero-species ecosystem with either no row or a single
+    zero row; retain both representations, while rejecting extras/duplicates.
+    Only the small set of base-cell numbers leaves DuckDB.
+    """
+    base = "((CAST('0x' || h3_index AS UBIGINT) >> 45) & 127)"
+    tables = ['H3Res3Species', *(f'h3_res3_agg_{system}' for system in SYSTEMS)]
+    bases = connection.execute(' UNION '.join(f'SELECT DISTINCT {base} AS base_cell FROM {table}' for table in tables)).fetchall()
+    metrics = ', '.join(f'coalesce("{metric}", 0) AS "{metric}"' for metric in METRICS)
+    for (base_cell,) in bases:
+        if base_cell is None:
+            raise ValueError("Coarse scored metrics contain a null cell")
+        predicate = f"{base} = {int(base_cell)}"
+        query = aggregate_partition_query(3, predicate.replace('h3_index', 'hs.h3_index'))
+        expected, actual = [], []
+        for system in SYSTEMS:
+            suffix = system.lower()
+            projection = ', '.join(f'"{metric}__{suffix}" AS "{metric}"' for metric in METRICS)
+            expected.append(f"""SELECT '{system}' AS system, h3_index, {projection} FROM recomputed
+                WHERE "total_species__{suffix}" > 0 OR EXISTS (
+                    SELECT 1 FROM actual WHERE actual.system = '{system}' AND actual.h3_index = recomputed.h3_index)
+            """)
+            actual.append(f"SELECT '{system}' AS system, h3_index, {metrics} FROM h3_res3_agg_{system} WHERE {predicate}")
+        mismatch = connection.execute(f"""
+            WITH recomputed AS MATERIALIZED ({query}),
+            actual AS MATERIALIZED ({' UNION ALL '.join(actual)}),
+            expected AS ({' UNION ALL '.join(expected)})
+            SELECT count(*) FROM ((SELECT * FROM expected EXCEPT ALL SELECT * FROM actual)
+            UNION ALL (SELECT * FROM actual EXCEPT ALL SELECT * FROM expected))
+        """).fetchone()[0]
+        if mismatch:
+            raise ValueError("Coarse scored metrics do not match current dimensions and membership; rerun just data-prepare")
 
 
 def validate_coarse_snapshot(connection: duckdb.DuckDBPyConnection, report: dict) -> None:
