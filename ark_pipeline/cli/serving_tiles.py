@@ -644,7 +644,7 @@ def parser() -> argparse.ArgumentParser:
     tiles.add_argument("--memory-limit", default="750MB")
     tiles.add_argument("--batch-size", type=int, default=2048)
     tiles.add_argument("--checkpoint-shards", action="store_true",
-                       help="Cache independently compiled base cells; adds a final tile-join pass.")
+                       help="Cache independently compiled base cells instead of resolution groups; both modes use a final tile-join pass.")
     for key, path in BOUNDARIES.items():
         tiles.add_argument("--" + key.replace("_", "-"), type=Path, default=path)
     tiles.set_defaults(run=build)
