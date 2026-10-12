@@ -14,6 +14,7 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(env_file=ROOT / ".env", extra="ignore")
 
+    coverage_profiles_path: Path | None = None
     database_url: str = "postgresql://ark:ark@127.0.0.1:5432/ark_iv"
     api_host: str = "127.0.0.1"
     api_port: int = 8000
@@ -78,6 +79,7 @@ class Settings(BaseSettings):
         return value if value.is_absolute() else (ROOT / value).resolve()
 
     @field_validator(
+        "coverage_profiles_path",
         "h3_id_crosswalk_path",
         "res7_parts_dir",
         "res7_aggregate_parts_dir",
@@ -90,6 +92,7 @@ class Settings(BaseSettings):
         return value if value.is_absolute() else (ROOT / value).resolve()
 
     @field_validator(
+        "coverage_profiles_path",
         "h3_id_crosswalk_path",
         "res7_parts_dir",
         "res7_aggregate_parts_dir",

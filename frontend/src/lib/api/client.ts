@@ -1,3 +1,4 @@
+import { withCoverageProfile } from '$lib/map/coverageProfile';
 import { config } from '$lib/config';
 import type { components } from './schema';
 
@@ -12,12 +13,17 @@ export type CellSpeciesRow = components['schemas']['CellSpeciesRow'];
 
 async function get<T>(path: string, params?: URLSearchParams, options?: RequestInit): Promise<T> {
   const suffix = params?.size ? `?${params}` : '';
-  const response = await fetch(`${config.apiBaseUrl}${path}${suffix}`, options);
+  const response = await fetch(withCoverageProfile(`${config.apiBaseUrl}${path}${suffix}`), options);
   if (!response.ok) {
     let message = `${response.status} ${response.statusText}`;
     try {
       const body: unknown = await response.json();
-      if (typeof body === 'object' && body !== null && 'detail' in body && typeof body.detail === 'string') {
+      if (
+        typeof body === 'object' &&
+        body !== null &&
+        'detail' in body &&
+        typeof body.detail === 'string'
+      ) {
         message = body.detail;
       }
     } catch {
@@ -29,6 +35,7 @@ async function get<T>(path: string, params?: URLSearchParams, options?: RequestI
 }
 
 export const api = {
+  coverageProfiles: (signal?: AbortSignal) => get<components['schemas']['CoverageProfilesResponse']>('/api/coverage-profiles', undefined, { signal }),
   stats: () => get<StatsResponse>('/api/stats'),
   species: (params: URLSearchParams, signal?: AbortSignal) =>
     get<SpeciesPage>('/api/species', params, { signal }),
@@ -38,14 +45,22 @@ export const api = {
       new URLSearchParams({ search, limit: String(limit) }),
       { signal }
     ),
-  speciesCells: (gbifAcceptedId: string, resolution: number, signal?: AbortSignal) =>
+  speciesCells: (
+    gbifAcceptedId: string,
+    resolution: number,
+    signal?: AbortSignal,
+    includePassage = false
+  ) =>
     get<SpeciesCellsResponse>(
       `/api/species/${encodeURIComponent(gbifAcceptedId)}/cells`,
-      new URLSearchParams({ resolution: String(resolution) }),
+      new URLSearchParams({
+        resolution: String(resolution),
+        include_passage: String(includePassage)
+      }),
       { signal }
     ),
   cell: (h3Index: string, params: URLSearchParams, signal?: AbortSignal) =>
-    get<CellDetailsResponse>(
-      `/api/cells/${encodeURIComponent(h3Index)}/species`, params, { signal }
-    )
+    get<CellDetailsResponse>(`/api/cells/${encodeURIComponent(h3Index)}/species`, params, {
+      signal
+    })
 };

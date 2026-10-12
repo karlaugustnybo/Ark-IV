@@ -64,6 +64,8 @@ class Forecast:
                               "lists": "duckdb_threads", "coarse_db": "duckdb_threads", "coarse_cache": "duckdb_threads"}.items():
                 if self.base.get(name) is not None:
                     self.base[name] *= prior["resources"][key] / resources[key]
+        if not prior or prior.get("serving_contract") != "dynamic-h3-v1":
+            self.base.pop("tiles", None)
         self.reference_base = self.base.copy()
         self.initial_counts = self.counts.copy()
         self.reference_work = (prior.get("estimate", {}).get("projected_workload", {}) if mode == "full" else prior.get("workload", {})) if prior else {}
@@ -146,7 +148,7 @@ class Forecast:
                 keys = [f"res{resolution}_{unit}" for unit in ("cells", "relationships")]
                 if stage not in self.started and self.reference_base.get(stage) and all(self.reference_work.get(k) and self.live_workload.get(k) for k in keys):
                     self.base[stage] = self.reference_base[stage] * sum(self.live_workload[k] / self.reference_work[k] for k in keys) / 2
-            keys = ["res3_cells", "res7_cells"]
+            keys = ["res3_cells"]
             if "tiles" not in self.started and self.reference_base.get("tiles") and all(self.reference_work.get(k) and self.live_workload.get(k) for k in keys):
                 self.base["tiles"] = self.reference_base["tiles"] * sum(self.live_workload[k] for k in keys) / sum(self.reference_work[k] for k in keys)
         elif kind == "work" and event.get("overall") and event.get("total", 0) > 0:

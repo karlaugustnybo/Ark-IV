@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import math
+import os
 import re
 import unicodedata
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 import duckdb
+import h3
 import pyarrow.parquet as pq
 from litestar import Litestar, Request, Response, get
 from litestar.config.compression import CompressionConfig
@@ -17,16 +21,19 @@ from litestar.datastructures import State
 from litestar.exceptions import HTTPException, NotFoundException
 from litestar.openapi.config import OpenAPIConfig
 from litestar.params import Parameter
-from litestar.response import File
+from litestar.response import File, Stream
 
 from ark_pipeline.spatial.boundaries import load_jurisdiction_index
 from backend.config import get_settings
+from backend.coverage_profiles import CoverageProfileMiddleware, RequestSettings, current_profile
 from backend.db import database_lifespan, get_pool
 from backend.models import (
     CellBoundaryMembership,
     CellDetailsResponse,
     CellSpeciesRow,
     CellStats,
+    CoverageProfile,
+    CoverageProfilesResponse,
     HealthResponse,
     SpeciesCellsResponse,
     SpeciesPage,
@@ -37,7 +44,7 @@ from backend.models import (
 )
 from backend.res7_tiles import SYSTEM_NAMES, aggregate_coverage, render_tile
 
-settings = get_settings()
+settings = RequestSettings()
 CELL_BOUNDARY_FRAMEWORKS = (
     ("admin0", "Countries & territories", "jurisdictions_path"),
     ("admin1", "States, regions & provinces", "admin1_boundaries_path"),
@@ -51,8 +58,13 @@ CELL_BOUNDARY_FRAMEWORKS = (
 )
 VALID_SYSTEMS = {"Terrestrial", "Freshwater", "Marine"}
 VALID_REDLIST_FILTERS = {
-    "Critically Endangered", "Endangered", "Vulnerable", "Near Threatened",
-    "Data Deficient", "Least Concern", "Not Assessed",
+    "Critically Endangered",
+    "Endangered",
+    "Vulnerable",
+    "Near Threatened",
+    "Data Deficient",
+    "Least Concern",
+    "Not Assessed",
 }
 VALID_DNA_FILTERS = {"missing_family", "missing_genus", "missing_species", "sampled"}
 VALID_SORTS = {
@@ -92,11 +104,15 @@ def _filtered_species_cte(start: int, *, include_fuzzy: bool) -> str:
     search, redlist, dna, systems, admin0, admin1, municipality, eez, conservation = range(
         start, start + 9
     )
-    fuzzy_clause = """
+    fuzzy_clause = (
+        """
               OR (length(search_query.value) >= 3 AND (
                   normalize_species_search(source.species_name) % search_query.value
                   OR normalize_species_search(source.family) % search_query.value
-              ))""" if include_fuzzy else ""
+              ))"""
+        if include_fuzzy
+        else ""
+    )
     return f"""
         normalized_query AS (
             SELECT normalize_species_search(${search}::text) AS value
@@ -154,9 +170,20 @@ def _filtered_species_cte(start: int, *, include_fuzzy: bool) -> str:
 
 def _h3_to_bigint(value: str) -> int:
     try:
-        return int(value, 16)
+        if not re.fullmatch(r"[0-9a-fA-F]{15}", value) or not h3.is_valid_cell(value.lower()):
+            raise ValueError(value)
+        return h3.str_to_int(value.lower())
     except ValueError as exc:
         raise NotFoundException(detail="Invalid H3 index") from exc
+
+
+def _res7_partition_path(h3_value: int) -> Path | None:
+    """Resolve the base-cell partition file for one fine cell, or None."""
+    if settings.res7_parts_dir is None:
+        return None
+    base_cell = (h3_value >> 45) & 127
+    partition = settings.res7_parts_dir / f"base_{base_cell}.parquet"
+    return partition if partition.is_file() else None
 
 
 def _external_res7_species_ids(h3_value: int) -> list[str] | None:
@@ -166,11 +193,8 @@ def _external_res7_species_ids(h3_value: int) -> list[str] | None:
     statistics make a selected-cell lookup cheap without importing 96 million
     rows into PostgreSQL.
     """
-    if settings.res7_parts_dir is None:
-        return None
-    base_cell = (h3_value >> 45) & 127
-    partition = settings.res7_parts_dir / f"base_{base_cell}.parquet"
-    if not partition.is_file():
+    partition = _res7_partition_path(h3_value)
+    if partition is None:
         return None
     connection = duckdb.connect()
     try:
@@ -183,19 +207,43 @@ def _external_res7_species_ids(h3_value: int) -> list[str] | None:
     return [str(species_id) for species_id in row[0]] if row else None
 
 
-@lru_cache(maxsize=1)
 def _external_res7_cell_count(parts_dir: Path | None) -> int | None:
-    """Count external res-7 cells from cheap Parquet footer metadata."""
+    """Reuse footer counts until the consumed files or selected generation change."""
     if parts_dir is None:
         return None
-    parts = sorted(parts_dir.glob("base_*.parquet"))
-    if not parts:
-        return None
-    return sum(pq.ParquetFile(path).metadata.num_rows for path in parts)
+    selected = parts_dir.resolve()
+    records = []
+    for path in sorted(selected.glob("base_*.parquet")):
+        stat = path.stat()
+        records.append(
+            (str(path), stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+        )
+    return _partition_count(tuple(records))
+
+
+@lru_cache(maxsize=16)
+def _partition_count(records: tuple[tuple, ...]) -> int | None:
+    return (
+        sum(pq.ParquetFile(record[0]).metadata.num_rows for record in records) if records else None
+    )
+
+
+@get("/api/coverage-profiles", operation_id="getCoverageProfiles")
+async def coverage_profiles(state: State, coverage_profile: Literal["resident", "with-passage"] = "resident") -> CoverageProfilesResponse:
+    from backend.coverage_profiles import LABELS, PROFILE_IDS
+
+    registry = getattr(state, "coverage_settings", {"resident": get_settings()})
+    return CoverageProfilesResponse(
+        selected=current_profile.get(),
+        profiles=[
+            CoverageProfile(id=key, label=LABELS[key], available=key in registry)
+            for key in PROFILE_IDS
+        ],
+    )
 
 
 @get("/api/health", operation_id="getHealth")
-async def health(state: State) -> HealthResponse:
+async def health(state: State, coverage_profile: Literal["resident", "with-passage"] = "resident") -> HealthResponse:
     pool = get_pool(state)
     database = "ok"
     try:
@@ -203,11 +251,13 @@ async def health(state: State) -> HealthResponse:
     except Exception:
         database = "unavailable"
     tiles = "ok" if settings.pmtiles_path.is_file() else "missing"
-    return HealthResponse(status="ok" if database == tiles == "ok" else "degraded", database=database, tiles=tiles)
+    return HealthResponse(
+        status="ok" if database == tiles == "ok" else "degraded", database=database, tiles=tiles
+    )
 
 
 @get("/api/stats", operation_id="getStats")
-async def stats(state: State) -> StatsResponse:
+async def stats(state: State, coverage_profile: Literal["resident", "with-passage"] = "resident") -> StatsResponse:
     pool = get_pool(state)
     row = await pool.fetchrow(
         """
@@ -251,13 +301,22 @@ async def species_page(
     municipality: str = "",
     eez: str = "",
     conservation_framework: str = "",
+    coverage_profile: Literal["resident", "with-passage"] = "resident",
 ) -> SpeciesPage:
+    if not all(
+        math.isfinite(value) for value in (cr, en, vu, nt, dd, lc, sp, gen, fam, gdd, samp, cov)
+    ):
+        raise HTTPException(status_code=400, detail="Score weights must be finite")
+    if any(
+        not math.isfinite(threat * dna_weight)
+        for threat in (cr, en, vu, nt, dd, lc)
+        for dna_weight in (sp, gen, fam, gdd, samp)
+    ):
+        raise HTTPException(status_code=400, detail="Score products must fit finite numbers")
     pool = get_pool(state)
     sort_key = sort if sort in VALID_SORTS else "priority"
     sort_sql = VALID_SORTS[sort_key]
-    dna_tie_break_sql = (
-        ", dna_level_rank ASC" if sort_key in {"dna_level", "priority"} else ""
-    )
+    dna_tie_break_sql = ", dna_level_rank ASC" if sort_key in {"dna_level", "priority"} else ""
     order_sql = "ASC" if order.lower() == "asc" else "DESC"
     query = _clean_search(search)
     redlist_values = _comma_values(redlist, VALID_REDLIST_FILTERS)
@@ -265,26 +324,41 @@ async def species_page(
     system_values = _comma_values(systems, VALID_SYSTEMS)
     admin0_values = list(dict.fromkeys(item.strip() for item in admin0.split(",") if item.strip()))
     admin1_values = list(dict.fromkeys(item.strip() for item in admin1.split(",") if item.strip()))
-    municipality_values = list(dict.fromkeys(
-        item.strip() for item in municipality.split(",") if item.strip()
-    ))
-    eez_values = list(dict.fromkeys(item.strip().upper() for item in eez.split(",") if item.strip()))
-    conservation_values = list(dict.fromkeys(
-        item.strip() for item in conservation_framework.split(",") if item.strip()
-    ))
+    municipality_values = list(
+        dict.fromkeys(item.strip() for item in municipality.split(",") if item.strip())
+    )
+    eez_values = list(
+        dict.fromkeys(item.strip().upper() for item in eez.split(",") if item.strip())
+    )
+    conservation_values = list(
+        dict.fromkeys(item.strip() for item in conservation_framework.split(",") if item.strip())
+    )
     if redlist.strip() and redlist_values is None:
         raise HTTPException(status_code=400, detail="Invalid Red List filter")
     if dna.strip() and dna_values is None:
         raise HTTPException(status_code=400, detail="Invalid DNA filter")
     if systems.strip() and system_values is None:
         raise HTTPException(status_code=400, detail="Invalid ecosystem filter")
-    if any(len(values) > 30 for values in (
-        admin0_values, admin1_values, municipality_values, eez_values, conservation_values
-    )):
+    if any(
+        len(values) > 30
+        for values in (
+            admin0_values,
+            admin1_values,
+            municipality_values,
+            eez_values,
+            conservation_values,
+        )
+    ):
         raise HTTPException(status_code=400, detail="Select at most 30 boundaries per framework")
     filter_values = (
-        query, redlist_values, dna_values, system_values, admin0_values or None,
-        admin1_values or None, municipality_values or None, eez_values or None,
+        query,
+        redlist_values,
+        dna_values,
+        system_values,
+        admin0_values or None,
+        admin1_values or None,
+        municipality_values or None,
+        eez_values or None,
         conservation_values or None,
     )
     summary = await pool.fetchrow(
@@ -306,11 +380,28 @@ async def species_page(
     total_pages = max(1, math.ceil(total / per_page))
     page = min(page, total_pages)
     values = [
-        cr, en, vu, nt, dd, lc, fam, gen, sp, samp, gdd,
-        query, redlist_values, dna_values, system_values,
-        admin0_values or None, admin1_values or None,
-        municipality_values or None, eez_values or None, conservation_values or None,
-        per_page, (page - 1) * per_page,
+        cr,
+        en,
+        vu,
+        nt,
+        dd,
+        lc,
+        fam,
+        gen,
+        sp,
+        samp,
+        gdd,
+        query,
+        redlist_values,
+        dna_values,
+        system_values,
+        admin0_values or None,
+        admin1_values or None,
+        municipality_values or None,
+        eez_values or None,
+        conservation_values or None,
+        per_page,
+        (page - 1) * per_page,
     ]
     rows = await pool.fetch(
         f"""
@@ -319,7 +410,7 @@ async def species_page(
                 gbif_taxon_id, goat_taxon_id,
                 COALESCE(species_name, '') AS species_name, COALESCE(family, '') AS family,
                 COALESCE(redlist_category, 'Not Assessed') AS redlist_category,
-                match_rank,
+                match_rank, metadata_status, spatial_redlist_category, iucn_assessment_latest,
                 CASE redlist_category
                     WHEN 'Critically Endangered' THEN $1::double precision WHEN 'Endangered' THEN $2::double precision
                     WHEN 'Vulnerable' THEN $3::double precision WHEN 'Near Threatened' THEN $4::double precision
@@ -341,6 +432,7 @@ async def species_page(
         SELECT gbif_accepted_id, iucn_sis_id, iucn_assessment_id,
                gbif_taxon_id, goat_taxon_id,
                species_name, family, redlist_category, threat_score, dna_level,
+               metadata_status, spatial_redlist_category, iucn_assessment_latest,
                (threat_score * dna_level_score)::float AS priority
         FROM scored
         ORDER BY match_rank ASC,
@@ -367,6 +459,7 @@ async def species_suggestions(
     state: State,
     search: str = "",
     limit: int = Parameter(default=8, ge=1, le=20),
+    coverage_profile: Literal["resident", "with-passage"] = "resident",
 ) -> SpeciesSuggestions:
     """Return compact, ranked autocomplete matches without table scoring or counts."""
     pool = get_pool(state)
@@ -407,6 +500,8 @@ async def species_suggestions(
                      LIKE '%' || search_query.pattern || '%' ESCAPE E'\\\\' THEN 5
             ELSE 6
         END,
+        CASE WHEN source.iucn_assessment_latest IS TRUE THEN 0
+             WHEN source.iucn_assessment_latest IS NULL THEN 1 ELSE 2 END,
         source.species_name ASC
         LIMIT $2::int
         """,
@@ -414,9 +509,7 @@ async def species_suggestions(
         limit,
     )
     if literal_rows:
-        return SpeciesSuggestions(
-            rows=[SpeciesSuggestion(**dict(row)) for row in literal_rows]
-        )
+        return SpeciesSuggestions(rows=[SpeciesSuggestion(**dict(row)) for row in literal_rows])
 
     if len(query) < 3:
         return SpeciesSuggestions()
@@ -436,6 +529,8 @@ async def species_suggestions(
             similarity(normalize_species_search(source.species_name), search_query.value),
             similarity(normalize_species_search(source.family), search_query.value)
         ) DESC,
+        CASE WHEN source.iucn_assessment_latest IS TRUE THEN 0
+             WHEN source.iucn_assessment_latest IS NULL THEN 1 ELSE 2 END,
         source.species_name ASC
         LIMIT $2::int
         """,
@@ -453,30 +548,43 @@ async def species_cells(
     state: State,
     gbif_accepted_id: str,
     resolution: int = 3,
+    include_passage: bool = False,
+    coverage_profile: Literal["resident", "with-passage"] = "resident",
 ) -> SpeciesCellsResponse:
     if resolution not in (3, 7):
         raise NotFoundException(detail="Resolution must be 3 or 7")
+    passage_available = (settings.export_dir / "species_passage_cells_res3.parquet").is_file()
+    if include_passage and not passage_available:
+        raise HTTPException(
+            status_code=503, detail="Passage coverage has not been built for this dataset"
+        )
     pool = get_pool(state)
     row = await pool.fetchrow(
         """
         SELECT s.species_name, coverage.resolution,
                ARRAY(
-                   SELECT to_hex(value)
-                   FROM unnest(coverage.h3_indexes) AS cells(value)
+                   SELECT DISTINCT to_hex(value)
+                   FROM unnest(coalesce(coverage.h3_indexes, '{}'::bigint[]) ||
+                       CASE WHEN $3 THEN coalesce(passage.h3_indexes, '{}'::bigint[])
+                            ELSE '{}'::bigint[] END) AS cells(value)
+                   ORDER BY 1
                ) AS cells
         FROM species s
         LEFT JOIN LATERAL (
             SELECT resolution, h3_indexes
             FROM species_cells
             WHERE gbif_accepted_id = s.gbif_accepted_id
-              AND resolution <= $2
+              AND resolution <= CASE WHEN $3 THEN 3 ELSE $2 END
             ORDER BY resolution DESC
             LIMIT 1
         ) coverage ON true
+        LEFT JOIN species_passage_cells passage
+          ON passage.gbif_accepted_id = s.gbif_accepted_id AND passage.resolution = 3
         WHERE s.gbif_accepted_id = $1
         """,
         gbif_accepted_id,
         resolution,
+        include_passage,
     )
     if row is None:
         raise NotFoundException(detail="Species not found")
@@ -486,6 +594,8 @@ async def species_cells(
         species_name=row["species_name"] or "",
         resolution=actual_resolution,
         cells=list(row["cells"] or []),
+        include_passage=include_passage,
+        passage_available=passage_available,
     )
 
 
@@ -495,30 +605,42 @@ async def cell_species(
     h3_index: str,
     resolution: int = 3,
     system: str = "",
+    coverage_profile: Literal["resident", "with-passage"] = "resident",
 ) -> CellDetailsResponse:
     if resolution not in (3, 7):
         raise NotFoundException(detail="Resolution must be 3 or 7")
-    pool = get_pool(state)
     h3_value = _h3_to_bigint(h3_index)
-    system_value = system if system in VALID_SYSTEMS else None
+    h3_index = h3.int_to_str(h3_value)
+    if h3.get_resolution(h3_index) != resolution:
+        raise HTTPException(status_code=400, detail="H3 cell resolution does not match resolution")
+    if system and system not in VALID_SYSTEMS:
+        raise HTTPException(status_code=400, detail="Invalid ecosystem system")
+    system_value = system or None
+    pool = get_pool(state)
     species_ids, boundaries = await asyncio.gather(
         pool.fetchval(
-            "SELECT species_ids FROM cell_species_lists "
-            "WHERE h3_index = $1 AND resolution = $2",
+            "SELECT species_ids FROM cell_species_lists WHERE h3_index = $1 AND resolution = $2",
             h3_value,
             resolution,
         ),
         asyncio.to_thread(_cell_boundary_memberships, h3_index),
     )
+    partition = None
     if species_ids is None and resolution == 7:
-        species_ids = await asyncio.to_thread(_external_res7_species_ids, h3_value)
+        partition = await asyncio.to_thread(_res7_partition_path, h3_value)
+        if partition is not None:
+            species_ids = await asyncio.to_thread(_external_res7_species_ids, h3_value)
+    # Only a missing generated partition makes the empty list a data gap; a
+    # configured partition simply not containing this cell is a real answer.
+    species_data_unavailable = resolution == 7 and species_ids is None and partition is None
     if not species_ids:
         return CellDetailsResponse(
             h3_index=h3_index,
             resolution=resolution,
             boundaries=boundaries,
             species=[],
-            stats=CellStats(),
+            stats=None if species_data_unavailable else CellStats(),
+            species_data_unavailable=species_data_unavailable,
         )
     rows = await pool.fetch(
         """
@@ -527,7 +649,7 @@ async def cell_species(
                s.species_name, COALESCE(s.family, '') AS family,
                COALESCE(s.redlist_category, 'Not Assessed') AS redlist_category,
                s.has_dna_species_level, s.genus_has_dna, s.family_has_dna,
-               s.goat_data_deficient
+               s.goat_data_deficient, s.metadata_status, s.spatial_redlist_category, s.iucn_assessment_latest
         FROM species s
         WHERE s.gbif_accepted_id = ANY($1::text[])
           AND ($2::text IS NULL OR EXISTS (
@@ -546,8 +668,12 @@ async def cell_species(
     stats = CellStats()
     result: list[CellSpeciesRow] = []
     categories = {
-        "Critically Endangered": "CR", "Endangered": "EN", "Vulnerable": "VU",
-        "Near Threatened": "NT", "Data Deficient": "DD", "Least Concern": "LC",
+        "Critically Endangered": "CR",
+        "Endangered": "EN",
+        "Vulnerable": "VU",
+        "Near Threatened": "NT",
+        "Data Deficient": "DD",
+        "Least Concern": "LC",
     }
     for row in rows:
         stats.total += 1
@@ -567,17 +693,22 @@ async def cell_species(
             dna_level = "Missing Species"
         else:
             dna_level = "Sampled"
-        result.append(CellSpeciesRow(
-            gbif_accepted_id=row["gbif_accepted_id"],
-            iucn_sis_id=row["iucn_sis_id"],
-            iucn_assessment_id=row["iucn_assessment_id"],
-            gbif_taxon_id=row["gbif_taxon_id"],
-            goat_taxon_id=row["goat_taxon_id"],
-            species_name=row["species_name"] or "",
-            family=row["family"],
-            redlist_category=row["redlist_category"],
-            dna_level=dna_level,
-        ))
+        result.append(
+            CellSpeciesRow(
+                gbif_accepted_id=row["gbif_accepted_id"],
+                iucn_sis_id=row["iucn_sis_id"],
+                iucn_assessment_id=row["iucn_assessment_id"],
+                gbif_taxon_id=row["gbif_taxon_id"],
+                goat_taxon_id=row["goat_taxon_id"],
+                species_name=row["species_name"] or "",
+                family=row["family"],
+                redlist_category=row["redlist_category"],
+                dna_level=dna_level,
+                metadata_status=row.get("metadata_status", "assessed"),
+                spatial_redlist_category=row.get("spatial_redlist_category"),
+                iucn_assessment_latest=row.get("iucn_assessment_latest"),
+            )
+        )
     return CellDetailsResponse(
         h3_index=h3_index,
         resolution=resolution,
@@ -626,10 +757,17 @@ def _validate_tile_boundary_filters(
 
 @get("/api/tiles/res7/{z:int}/{x:int}/{y:int}", include_in_schema=False)
 async def resolution7_tile(
-    z: int, x: int, y: int, system: str = "all", jurisdictions: str = "",
-    admin0: str = "", admin1: str = "", municipality: str = "",
+    z: int,
+    x: int,
+    y: int,
+    system: str = "all",
+    jurisdictions: str = "",
+    admin0: str = "",
+    admin1: str = "",
+    municipality: str = "",
     eez: str = "",
-    conservation_framework: str = "", v: str = "",
+    conservation_framework: str = "",
+    v: str = "",
 ) -> Response[bytes]:
     del v  # Browser cache-busting token supplied by map metadata.
     if settings.res7_aggregate_parts_dir is None:
@@ -639,26 +777,33 @@ async def resolution7_tile(
     normalized_system = system.lower()
     if normalized_system not in SYSTEM_NAMES:
         raise HTTPException(status_code=400, detail="Invalid ecosystem system")
-    selected_jurisdictions = tuple(dict.fromkeys(
-        code.strip().upper()
-        for code in f"{jurisdictions},{admin0}".split(",") if code.strip()
-    ))
-    selected_admin1 = tuple(dict.fromkeys(
-        code.strip() for code in admin1.split(",") if code.strip()
-    ))
-    selected_municipalities = tuple(dict.fromkeys(
-        code.strip() for code in municipality.split(",") if code.strip()
-    ))
-    selected_eezs = tuple(dict.fromkeys(
-        code.strip().upper() for code in eez.split(",") if code.strip()
-    ))
-    selected_conservation = tuple(dict.fromkeys(
-        code.strip() for code in conservation_framework.split(",") if code.strip()
-    ))
-    if any(len(values) > 30 for values in (
-        selected_jurisdictions, selected_admin1,
-        selected_municipalities, selected_eezs, selected_conservation,
-    )):
+    selected_jurisdictions = tuple(
+        dict.fromkeys(
+            code.strip().upper() for code in f"{jurisdictions},{admin0}".split(",") if code.strip()
+        )
+    )
+    selected_admin1 = tuple(
+        dict.fromkeys(code.strip() for code in admin1.split(",") if code.strip())
+    )
+    selected_municipalities = tuple(
+        dict.fromkeys(code.strip() for code in municipality.split(",") if code.strip())
+    )
+    selected_eezs = tuple(
+        dict.fromkeys(code.strip().upper() for code in eez.split(",") if code.strip())
+    )
+    selected_conservation = tuple(
+        dict.fromkeys(code.strip() for code in conservation_framework.split(",") if code.strip())
+    )
+    if any(
+        len(values) > 30
+        for values in (
+            selected_jurisdictions,
+            selected_admin1,
+            selected_municipalities,
+            selected_eezs,
+            selected_conservation,
+        )
+    ):
         raise HTTPException(status_code=400, detail="Select at most 30 boundaries per framework")
     active_boundary_filters = tuple(
         (selected_codes, path, error_detail)
@@ -724,17 +869,20 @@ async def resolution7_tile(
 
 
 @get("/tiles/{filename:str}", include_in_schema=False)
-async def tiles(request: Request, filename: str) -> File | Response[bytes]:
+async def tiles(request: Request, filename: str) -> File | Response[bytes] | Stream:
     if filename == settings.map_metadata_path.name:
         if not settings.map_metadata_path.is_file():
             raise NotFoundException(detail="Map metadata build artifact not found")
         metadata = json.loads(settings.map_metadata_path.read_text())
+        metadata["coverage_profile"] = current_profile.get()
+        if settings.pmtiles_path.is_file():
+            metadata["archive_version"] = _archive_version(settings.pmtiles_path.stat())
         aggregate_cells, aggregate_version = _aggregate_coverage()
         if settings.res7_aggregate_parts_dir is not None:
             metadata["res7_delivery"] = "dynamic-h3-v1"
             metadata["res7_base_cells"] = list(aggregate_cells)
             metadata["res7_coverage_version"] = aggregate_version
-            available = set(metadata.get("available_resolutions", []))
+            available = set(metadata.get("available_resolutions", [])) - {7}
             if aggregate_cells:
                 available.add(7)
             metadata["available_resolutions"] = sorted(available)
@@ -745,7 +893,7 @@ async def tiles(request: Request, filename: str) -> File | Response[bytes]:
                     for path in settings.res7_parts_dir.glob("base_*.parquet")
                     if (match := re.fullmatch(r"base_(\d+)\.parquet", path.name))
                 ]
-            complete = set(metadata.get("complete_resolutions", [3]))
+            complete = set(metadata.get("complete_resolutions", [3])) - {7}
             if source_cells and set(source_cells) == set(aggregate_cells):
                 complete.add(7)
             metadata["complete_resolutions"] = sorted(complete)
@@ -771,42 +919,88 @@ async def tiles(request: Request, filename: str) -> File | Response[bytes]:
     path = settings.pmtiles_path
     if not path.is_file():
         raise NotFoundException(detail="PMTiles build artifact not found")
-    size = path.stat().st_size
-    range_header = request.headers.get("range")
-    if not range_header:
-        return File(
-            path=path,
-            media_type="application/vnd.pmtiles",
-            content_disposition_type="inline",
-            headers={"Accept-Ranges": "bytes"},
-        )
-    match = re.fullmatch(r"bytes=(\d+)-(\d*)", range_header.strip())
-    if not match:
-        return Response(content=b"", status_code=416, headers={"Content-Range": f"bytes */{size}"})
-    start = int(match.group(1))
-    end = min(int(match.group(2)) if match.group(2) else size - 1, size - 1)
-    if start > end or start >= size:
-        return Response(content=b"", status_code=416, headers={"Content-Range": f"bytes */{size}"})
-
-    def read_range() -> bytes:
-        with path.open("rb") as stream:
-            stream.seek(start)
-            return stream.read(end - start + 1)
-
-    content = await asyncio.to_thread(read_range)
-    return Response(
-        content=content,
-        status_code=206,
-        media_type="application/vnd.pmtiles",
-        headers={
-            "Accept-Ranges": "bytes",
-            "Content-Range": f"bytes {start}-{end}/{size}",
-            "Content-Length": str(len(content)),
-            "Cache-Control": "public, max-age=3600",
-        },
+    return await asyncio.to_thread(
+        _archive_response, path, request.headers, request.query_params.get("v")
     )
+
+
+def _archive_version(stat: os.stat_result) -> str:
+    """Opaque representation identity under ordinary filesystem publication."""
+    identity = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+    return hashlib.sha256(repr(identity).encode()).hexdigest()[:32]
+
+
+def _archive_response(path: Path, headers, version: str | None) -> Response | Stream:
+    # Open once so validators and range bytes refer to one inode even if current
+    # switches while the response is being prepared. Managed producers replace
+    # published files atomically; in-place concurrent writes are unsupported.
+    stream = path.open("rb")
+    stat = os.fstat(stream.fileno())
+    token = _archive_version(stat)
+    etag = f'"{token}"'
+    common = {"ETag": etag, "Accept-Ranges": "bytes", "Cache-Control": "no-cache"}
+    if version and version != token:
+        stream.close()
+        raise HTTPException(
+            status_code=409, detail="Map archive generation changed; reload map metadata"
+        )
+    if headers.get("if-match") not in (None, "*", etag):
+        stream.close()
+        return Response(content=b"", status_code=412, headers=common)
+    if headers.get("if-none-match") in ("*", etag):
+        stream.close()
+        return Response(content=b"", status_code=304, headers=common)
+    size = stat.st_size
+    range_header = headers.get("range")
+    if headers.get("if-range") not in (None, etag):
+        range_header = None
+    if range_header:
+        match = re.fullmatch(r"bytes=(\d+)-(\d*)", range_header.strip())
+        if not match:
+            stream.close()
+            return Response(
+                content=b"", status_code=416, headers={**common, "Content-Range": f"bytes */{size}"}
+            )
+        start = int(match.group(1))
+        end = min(int(match.group(2)) if match.group(2) else size - 1, size - 1)
+        if start > end or start >= size:
+            stream.close()
+            return Response(
+                content=b"", status_code=416, headers={**common, "Content-Range": f"bytes */{size}"}
+            )
+        try:
+            stream.seek(start)
+            content = stream.read(end - start + 1)
+        finally:
+            stream.close()
+        return Response(
+            content=content,
+            status_code=206,
+            media_type="application/vnd.pmtiles",
+            headers={
+                **common,
+                "Content-Range": f"bytes {start}-{end}/{size}",
+                "Content-Length": str(len(content)),
+            },
+        )
+
+    def chunks():
+        try:
+            while chunk := stream.read(1024 * 1024):
+                yield chunk
+        finally:
+            stream.close()
+
+    return Stream(
+        chunks(),
+        media_type="application/vnd.pmtiles",
+        headers={**common, "Content-Length": str(size)},
+    )
+
+
 app = Litestar(
     route_handlers=[
+        coverage_profiles,
         health,
         stats,
         species_page,
@@ -817,16 +1011,18 @@ app = Litestar(
         tiles,
     ],
     lifespan=[database_lifespan],
+    middleware=[CoverageProfileMiddleware],
     cors_config=CORSConfig(allow_origins=[settings.frontend_origin]),
-    compression_config=CompressionConfig(
-        backend="gzip", minimum_size=1_024, gzip_compress_level=4
-    ),
+    compression_config=CompressionConfig(backend="gzip", minimum_size=1_024, gzip_compress_level=4),
     openapi_config=OpenAPIConfig(
         title="Ark-IV API",
         version="1.0.0",
         description=(
             "Typed serving API for species and H3 cell details. Coarse map data "
-            "uses PMTiles and fine global cells use cached on-demand tiles."
+            "uses Arrow/PMTiles and fine global cells use cached on-demand tiles. "
+            "coverage_profile selects matching SQL and map artifacts. Score weights "
+            "and threat/DNA products must be finite. Cell IDs must be valid H3 cells "
+            "matching resolution; nonempty ecosystem filters must be canonical."
         ),
         path="/schema",
     ),

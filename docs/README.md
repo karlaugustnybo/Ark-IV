@@ -17,7 +17,8 @@ stage-based CLI names and artifact-based builders.
 5. [Spatial row policy](pipeline/05_spatial_row_policy.md)
 6. [IUCN–GoaT crosswalk](pipeline/06_iucn_goat_global_crosswalk.md)
 7. [Global serving pipeline](pipeline/07_global_serving_pipeline.md)
-8. [End-to-end benchmark](pipeline/08_pipeline_benchmark.md)
+8. [Coverage profiles and serving bundles](pipeline/coverage_profiles.md)
+9. [End-to-end benchmark](pipeline/08_pipeline_benchmark.md)
 
 ## Reference
 

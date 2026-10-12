@@ -80,3 +80,9 @@ For source requirements and configuration, see the
 [ordered pipeline guides](../docs/README.md). Historical tools live in ignored
 `archive/` and are not imported by this package. Renames change code fingerprints;
 let the normal receipt checks decide which existing outputs need rebuilding.
+
+`cli/map_serving.py` publishes and validates coherent coarse/dynamic-fine bundles,
+selects startup inputs, and loads their recorded SQL exports.
+`cli/species_passage.py` builds the optional coarse species-range supplement.
+See [coverage profiles](../docs/pipeline/coverage_profiles.md) for request routing,
+operator responsibilities and validation limits.

@@ -127,3 +127,14 @@ CREATE INDEX IF NOT EXISTS species_name_prefix_btree ON species USING btree (nor
 CREATE INDEX IF NOT EXISTS species_family_prefix_btree ON species USING btree (normalize_species_search(family) text_pattern_ops);
 CREATE INDEX IF NOT EXISTS species_name_search_trgm ON species USING gin (normalize_species_search(species_name) gin_trgm_ops);
 CREATE INDEX IF NOT EXISTS species_family_search_trgm ON species USING gin (normalize_species_search(family) gin_trgm_ops);
+
+-- Keep spatial-only records identifiable after metadata recovery.
+ALTER TABLE species ADD COLUMN IF NOT EXISTS metadata_status TEXT NOT NULL DEFAULT 'assessed';
+ALTER TABLE species ADD COLUMN IF NOT EXISTS spatial_redlist_category TEXT;
+ALTER TABLE species ADD COLUMN IF NOT EXISTS iucn_assessment_latest BOOLEAN;
+CREATE TABLE IF NOT EXISTS species_passage_cells (
+    gbif_accepted_id TEXT NOT NULL REFERENCES species(gbif_accepted_id) ON DELETE CASCADE,
+    resolution SMALLINT NOT NULL CHECK (resolution = 3),
+    h3_indexes BIGINT[] NOT NULL,
+    PRIMARY KEY (gbif_accepted_id, resolution)
+);

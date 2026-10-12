@@ -1,3 +1,4 @@
+import { withCoverageProfile } from './coverageProfile';
 import { goto } from '$app/navigation';
 import { preloadMapBundle } from './mapBundle';
 
@@ -12,5 +13,5 @@ export function navigateToPreloadedMap(event: MouseEvent): void {
   event.preventDefault();
   void preloadMapBundle()
     .catch(() => null)
-    .then(() => goto('/map'));
+    .then(() => goto(withCoverageProfile('/map')));
 }

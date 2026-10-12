@@ -305,7 +305,7 @@ def plan(args) -> tuple[dict, list[dict], dict]:
     own("lists")
     if args.municipality is None:
         own("boundaries")
-    add("metadata", [*python, "ark_pipeline.cli.serving_metadata", "--root", root, "--h3-root", h3, "--crosswalk", crosswalk, "--output-dir", output / "species"])
+    add("metadata", [*python, "ark_pipeline.cli.serving_metadata", "--root", root, "--h3-root", h3, "--crosswalk", crosswalk, "--output-dir", output / "species", "--profile", profile_path])
     add("coarse_db", [sys.executable, "ark_pipeline/builders/source_database.py", "--target", output / "source.duckdb", "--overwrite", "--resolutions", "3",
                       "--species-parquet", species, "--species-systems-parquet", systems, "--h3-res3", h3 / "h3_res3_species_global_merged.parquet",
                       "--crosswalk", crosswalk, "--defer-lossless-validation"])
@@ -322,9 +322,13 @@ def plan(args) -> tuple[dict, list[dict], dict]:
              "MAP_METADATA_PATH": output / "coarse-tiles/map-metadata.json", "VALIDATION_REPORT_PATH": output / "build-validation.json",
              "SOURCE_VALIDATION_REPORT_PATH": output / "source-validation.json", "DUCKDB_SCRATCH_DIR": output / "scratch/duckdb",
              "H3_RES3_PARQUET": h3 / "h3_res3_species_global_merged.parquet", "H3_ID_CROSSWALK_PATH": crosswalk,
-             "GLOBAL_DATA_ROOT": root, "GLOBAL_H3_ROOT": h3, "GLOBAL_CROSSWALK_PATH": crosswalk, "GLOBAL_PREVIEW_ROOT": output}
+             "GLOBAL_DATA_ROOT": root, "GLOBAL_H3_ROOT": h3, "GLOBAL_CROSSWALK_PATH": crosswalk, "GLOBAL_PREVIEW_ROOT": output, "SPATIAL_PROFILE": profile_path}
     env = {**{key: str(value) for key, value in paths.items()}, **resources.environment(), "DUCKDB_MEMORY_LIMIT": args.memory_limit,
            **{BOUNDARY_ENV[key]: path for key, path in boundaries.items()}}
+    config["serving_contract"] = "dynamic-h3-v1"
+    for stage in stages:
+        if stage["name"] == "tiles":
+            stage["serving_contract"] = "dynamic-h3-v1"
     return config, stages, env
 
 

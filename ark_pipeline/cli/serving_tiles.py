@@ -107,15 +107,60 @@ def record_prepared(args: argparse.Namespace) -> dict:
             "coarse_source": coarse_source,
         }.items()},
     }
+    snapshot = json.loads(args.metadata_template.read_text()).get("coarse_snapshot")
+    if snapshot:
+        report["files"]["coarse_snapshot"] = file_record(args.metadata_template.parent / Path(snapshot["url"]).name)
+    passage = args.species.parent / "species_passage_cells_res3.parquet"
+    if passage.is_file():
+        receipt_path = passage.with_suffix(".report.json")
+        receipt = json.loads(receipt_path.read_text())
+        if (receipt.get("status") != "passed" or receipt.get("scope") != "species-range-overlay"
+                or receipt.get("resolution") != 3 or receipt.get("output_sha256") != sha256(passage)
+                or receipt.get("species_sha256") != report["files"]["species"]["sha256"]):
+            raise ValueError("Passage supplement does not match the prepared species metadata")
+        report["files"]["species_passage"] = file_record(passage)
+        report["files"]["species_passage_report"] = file_record(receipt_path)
+    exports = args.build_duckdb.parent / "exports"
+    report["exports"] = {path.name: file_record(path) for path in sorted(exports.glob("*.parquet"))
+                         if not path.name.startswith(".")}
+    validate_exports(report)
     atomic_json(args.output, report)
     return report
+
+
+def validate_exports(report: dict) -> None:
+    """Check recorded SQL exports against the build that supplies coarse metrics."""
+    exports = report.get("exports", {})
+    if not exports:
+        return  # Fixture/legacy preparation can serve maps without a SQL export set.
+    required = {"species.parquet", "species_systems.parquet", "cell_species_lists.parquet"}
+    if not required <= exports.keys():
+        raise ValueError("Incomplete PostgreSQL export set")
+    with duckdb.connect(report["files"]["build_duckdb"]["path"], read_only=True) as connection:
+        for name, query in {
+            "species.parquet": "SELECT {columns} FROM SpecInfo",
+            "species_systems.parquet": "SELECT DISTINCT gbif_accepted_id, system FROM SpecSystems WHERE system IN ('Terrestrial','Freshwater','Marine')",
+            "cell_species_lists.parquet": "SELECT CAST(CAST('0x' || h3_index AS UBIGINT) AS BIGINT) AS h3_index, 3::SMALLINT AS resolution, gbif_ids AS species_ids FROM H3Res3Species",
+        }.items():
+            path = exports[name]["path"]
+            names = pq.ParquetFile(path).schema_arrow.names
+            columns = ", ".join('"' + column.replace('"', '""') + '"' for column in names)
+            query = query.format(columns=columns)
+            # This serving contract loads coarse SQL lists; fine lists stay external.
+            mismatch = connection.execute(f"""
+                WITH expected AS ({query}), actual AS (SELECT {columns} FROM read_parquet(?))
+                SELECT count(*) FROM ((SELECT * FROM expected EXCEPT ALL SELECT * FROM actual)
+                UNION ALL (SELECT * FROM actual EXCEPT ALL SELECT * FROM expected))
+            """, [path]).fetchone()[0]
+            if mismatch:
+                raise ValueError(f"PostgreSQL export does not match prepared build: {name}")
 
 
 def read_prepared(path: Path) -> dict:
     report = json.loads(path.read_text())
     if report.get("status") != "passed" or report.get("schema_version") != 1:
         raise ValueError("Prepared-input report is incomplete; rerun just data-prepare")
-    for record in report["files"].values():
+    for record in (*report["files"].values(), *report.get("exports", {}).values()):
         verify_record(record)
     sources = input_parts(Path(report["h3_root"]) / "res7_merged_parts")
     if {str(base) for base in sources} != set(report["parts"]):
@@ -134,6 +179,7 @@ def read_prepared(path: Path) -> dict:
             raise ValueError("Prepared source paths no longer match the generation")
         for record in records.values():
             verify_record(record)
+    validate_exports(report)
     return report
 
 
@@ -262,6 +308,9 @@ def build(args: argparse.Namespace) -> dict:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
             raise ValueError("Another tile build is using this output directory") from exc
+        if not getattr(args, "static_fine", False):
+            from ark_pipeline.cli.map_serving import prepare_map
+            return prepare_map(args)
         return build_locked(args)
 
 
@@ -392,6 +441,7 @@ def parser() -> argparse.ArgumentParser:
     tiles = commands.add_parser("build")
     for name in ("prepared-inputs", "output-dir", "scratch-dir"):
         tiles.add_argument("--" + name, type=Path, required=True)
+    tiles.add_argument("--static-fine", action="store_true", help="Build the optional full fine PMTiles archive instead of dynamic serving.")
     tiles.add_argument("--tippecanoe", default="tippecanoe")
     tiles.add_argument("--tile-join", default="tile-join")
     tiles.add_argument("--threads", type=positive_int, default=configured_count("TILE_DUCKDB_THREADS", default=1))

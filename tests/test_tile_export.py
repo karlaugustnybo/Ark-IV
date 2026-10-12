@@ -114,7 +114,7 @@ def prepared_fixture(root: Path):
     record_prepared(record_args)
     boundaries = root / "boundaries.json"
     boundary_fixture(boundaries)
-    options = ["build", "--prepared-inputs", str(record_args.output), "--output-dir", str(root / "tiles"),
+    options = ["build", "--static-fine", "--prepared-inputs", str(record_args.output), "--output-dir", str(root / "tiles"),
                "--scratch-dir", str(root / "scratch")]
     for key in BOUNDARIES:
         options.extend(["--" + key.replace("_", "-"), str(boundaries)])

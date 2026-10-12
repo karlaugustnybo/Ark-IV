@@ -208,7 +208,7 @@ class BenchmarkRunnerTests(unittest.TestCase):
             self.assertTrue(any(e["stage"] == "tiles" and e["kind"] == "detail" for e in events))
             stream_work = [e for e in events if e["stage"] == "tiles" and e["kind"] == "work"]
             self.assertTrue(stream_work)
-            self.assertTrue(all(e["scope"] == "phase" and e["total"] == report["workload"]["res3_cells"] + report["workload"]["res7_cells"]
+            self.assertTrue(all(e["scope"] == "phase" and e["total"] == report["workload"]["res3_cells"]
                                 for e in stream_work))
             self.assertTrue(any(e["stage"] == "tiles" and e["kind"] == "phase" for e in events))
             coarse_metadata = json.loads((output / "coarse-tiles/map-metadata.json").read_text())
@@ -226,7 +226,7 @@ class BenchmarkRunnerTests(unittest.TestCase):
                             for row in pq.read_table(part, columns=["h3_index"]).to_pylist()}
             self.assertEqual(metric_cells, {h3.int_to_str(cell) for cell, _ in expected})
             tile_report = json.loads((output / "tiles/current/build-report.json").read_text())
-            self.assertEqual(tile_report["features"], report["workload"]["res3_cells"] + report["workload"]["res7_cells"])
+            self.assertEqual(tile_report["features"], report["workload"]["res3_cells"])
             # The memory-aware default may select one worker. Its inline kernel
             # path must preserve exactly the same pairs as process-pool mode.
             serial = root / "serial-pairs"

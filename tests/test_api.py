@@ -157,7 +157,7 @@ class SpeciesApiTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result.resolution, 3)
         self.assertEqual(result.cells, ["831f8dfffffffff", "831f8cfffffffff"])
-        self.assertEqual(pool.values, ("15955", 7))
+        self.assertEqual(pool.values, ("15955", 7, False))
 
     async def test_empty_cell_details_keep_resolution_and_boundary_context(self) -> None:
         class EmptyCellPool:
@@ -179,7 +179,8 @@ class SpeciesApiTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result.resolution, 7)
         self.assertEqual(result.boundaries, memberships)
-        self.assertEqual(result.stats.total, 0)
+        self.assertTrue(result.species_data_unavailable)
+        self.assertIsNone(result.stats)
 
     async def test_suggestions_use_one_compact_prefix_query(self) -> None:
         pool = SuggestionPool([SUGGESTION_ROW])

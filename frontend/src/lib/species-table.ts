@@ -14,6 +14,9 @@ export type SpeciesTableRow = {
   species_name: string;
   family: string;
   redlist_category: string;
+  metadata_status?: string;
+  spatial_redlist_category?: string | null;
+  iucn_assessment_latest?: boolean | null;
   dnaLabel: string;
   dnaStatus: 'data-deficient' | 'family' | 'genus' | 'species' | 'sampled';
   priority: number;

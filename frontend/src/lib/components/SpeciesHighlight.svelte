@@ -2,7 +2,7 @@
   import { onDestroy, tick } from 'svelte';
   import { Search, X } from 'lucide-svelte';
   import { api, type SpeciesSuggestion } from '$lib/api/client';
-  import { selectedSpecies, speciesHighlight, speciesHighlightGradient } from '$lib/stores/species';
+  import { includePassage, passageAvailable, selectedSpecies, speciesHighlight, speciesHighlightGradient } from '$lib/stores/species';
 
   let expanded = false;
   let inputEl: HTMLInputElement | undefined;
@@ -98,6 +98,7 @@
     loading = false;
     error = '';
     selectedSpecies.set(null);
+    includePassage.set(false);
   }
 
   function collapse() {
@@ -167,6 +168,7 @@
           {:else}<div class="species-result-message">No matching species</div>{/if}
         </div>
       {/if}
+      <label title="Adds a coarse passage range supplement; map scores stay unchanged"><input type="checkbox" bind:checked={$includePassage} disabled={!$passageAvailable} /> Include passage in species range</label>
       <div class="highlight-footer">
         {#if $selectedSpecies}
           <div class="highlight-status" class:is-error={$speciesHighlight.status === 'error'} aria-live="polite"><span class="highlight-key" class:has-gradient={$speciesHighlightGradient} aria-hidden="true"></span><span>{#if $speciesHighlight.status === 'loading'}Loading distribution…{:else if $speciesHighlight.status === 'error'}{$speciesHighlight.message || 'Distribution unavailable'}{:else if $speciesHighlight.status === 'ready'}{$speciesHighlight.count.toLocaleString()} cells at resolution {$speciesHighlight.resolution}{/if}</span></div>

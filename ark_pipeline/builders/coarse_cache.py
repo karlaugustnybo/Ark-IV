@@ -424,6 +424,13 @@ def export_parquet(
             ORDER BY resolution, h3_index
         """,
     }
+    available_columns = {row[0] for row in connection.execute("DESCRIBE SpecInfo").fetchall()}
+    extra = [column for column in ("metadata_status", "spatial_redlist_category",
+             "spatial_metadata_provenance", "spatial_metadata_conflicts",
+             "iucn_metadata_provenance", "iucn_ecosystem_evidence", "iucn_assessment_latest") if column in available_columns]
+    if extra:
+        exports["species.parquet"] = exports["species.parquet"].replace(
+            "FROM SpecInfo", ", " + ", ".join(extra) + " FROM SpecInfo")
     if 3 in resolutions:
         exports["species_cells_res3.parquet"] = """
             SELECT
@@ -612,6 +619,13 @@ def export_map_metadata(
         "species_normalized_score_domains": normalized_domains,
         "reference_weights": DEFAULT_WEIGHTS,
     }
+    profile_path = os.environ.get("SPATIAL_PROFILE")
+    if profile_path:
+        from ark_pipeline.spatial.coverage import load_spatial_profile
+        profile = load_spatial_profile(Path(profile_path))
+        metadata["spatial_semantics"] = {"profile_id": profile.profile_id,
+            "digest": profile.digest, "seasonality": list(profile.seasonality),
+            "presence": list(profile.presence), "origin": list(profile.origin)}
     if coarse_snapshot is not None:
         metadata["coarse_snapshot"] = coarse_snapshot
     if boundary_indexes:

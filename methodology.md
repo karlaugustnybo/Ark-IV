@@ -1027,3 +1027,22 @@ this document and its assumption audit, the relevant configuration/fingerprints,
 validation evidence, and affected roadmap entry. Preserve old results as dated
 history. Do not edit old receipts to make new code appear compatible, and do not
 mark a scientific review complete merely because an implementation test passes.
+
+
+### Serving profiles and unavailable fine evidence
+
+Whole-map resident/passage selection scopes SQL and map artifacts together;
+[coverage profiles](docs/pipeline/coverage_profiles.md) documents preparation,
+registration and validation limits. The default accepted seasons and scoring
+weights remain unchanged. A separately built passage dataset accepts season 4
+throughout spatial membership and aggregation. The optional species-range
+supplement instead uses direct unsimplified resolution-3 any-touch passage
+coverage, joined through explicit SIS metadata, and never changes map scores.
+
+Unavailable raw fine lists return an explicit availability flag with null
+statistics. Available partitions without the requested cell return an empty
+result. Aggregate fine map scores remain available independently. Optional
+metadata fields identify unresolved spatial-only records and historical
+assessments without transferring source categories into scoring. Mutable static
+archives carry a representation version independent of tile schema, reject
+stale version URLs, and require ETag revalidation for full and range responses.
