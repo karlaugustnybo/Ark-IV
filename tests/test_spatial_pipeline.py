@@ -41,6 +41,8 @@ from ark_pipeline.spatial.coverage import (
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 ANY_TOUCH_PROFILE_PATH = REPOSITORY_ROOT / "config" / "spatial_semantics_any_touch_v2.toml"
 RICHNESS_PROFILE_PATH = REPOSITORY_ROOT / "config" / "spatial_semantics_iucn_richness_v3.toml"
+PARTIAL_PROFILE_PATH = REPOSITORY_ROOT / "config" / "spatial_semantics_iucn_richness_v3_partial_basins.toml"
+PASSAGE_PROFILE_PATH = REPOSITORY_ROOT / "config" / "spatial_semantics_iucn_richness_v3_with_passage_partial_basins.toml"
 
 
 class AnyTouchSpatialSemanticsTests(unittest.TestCase):
@@ -513,9 +515,7 @@ class SpatialBuildTests(unittest.TestCase):
                         scratch_dir=root / "scratch", memory_limit="256MB", threads=1, force=False)
             self.assertEqual(sha256(report["path"]), previous_digest)
 
-            partial_path = root / "partial.toml"
-            partial_path.write_text(RICHNESS_PROFILE_PATH.read_text().replace('[hydrobasin_coverage]', '[hydrobasin_coverage]\nmissing_geometry_policy = "exclude-with-audit"'))
-            partial_profile = load_spatial_profile(partial_path)
+            partial_profile = load_spatial_profile(PARTIAL_PROFILE_PATH)
             partial_report = build_hydrobasin_index([relations], records, root / "partial-out",
                 partial_profile, "fixture", None, scratch_dir=root / "scratch", memory_limit="256MB", threads=1, force=False)
             self.assertEqual(partial_report["coverage_status"], "partial-missing-basin-geometries")
@@ -540,6 +540,19 @@ class SpatialBuildTests(unittest.TestCase):
             cached = build_hydrobasin_index([relations], records, root / "partial-out",
                 partial_profile, "fixture", None, scratch_dir=root / "scratch", memory_limit="256MB", threads=1, force=False)
             self.assertEqual(cached["status"], "reused")
+            # A different seasonal profile cannot reuse even identical basin membership.
+            passage_profile = load_spatial_profile(PASSAGE_PROFILE_PATH)
+            passage_report = build_hydrobasin_index([relations], records, root / "partial-out",
+                passage_profile, "fixture", None, scratch_dir=root / "scratch",
+                memory_limit="256MB", threads=1, force=False)
+            self.assertEqual(passage_report["status"], "built")
+            self.assertEqual(passage_report["omitted_distinct_relationships"], 1)
+            self.assertEqual(pq.read_table(passage_report["path"])["hybas_id"].to_pylist(), included)
+            identity = json.loads((root / "partial-out/hydrobasins/receipt.json").read_text())["identity"]
+            self.assertEqual(identity["semantic_profile"], {
+                "id": passage_profile.profile_id, "sha256": passage_profile.digest})
+            self.assertEqual(identity["hydrobasins"][0]["source_id"], "hydrobasins")
+            self.assertEqual(identity["hydrobasins"][-1]["source_id"], "hydrobasins-iucn-islands")
             # Omitted relationships are receipt inputs even when basin IDs stay fixed.
             pq.write_table(pa.Table.from_pydict({"hybas_id": [*ids, 100000099],
                 "iucn_sis_id": [1] * 4 + [100]}, schema=BASIN_RELATION_SCHEMA), relations)

@@ -34,6 +34,17 @@ H3 coverage starts. Missing geometry is fatal by default; an explicitly selected
 A partial receipt cannot satisfy the strict profile. See the
 [methodology](../../methodology.md#hydrobasins-relationships) for denominators and limits.
 
+Two opt-in schema-4 profiles make this policy explicit:
+`config/spatial_semantics_iucn_richness_v3_partial_basins.toml` retains seasons
+1, 2, 3 and 5; `config/spatial_semantics_iucn_richness_v3_with_passage_partial_basins.toml`
+also admits passage (4). Both retain the v3 geometry kernel, repair and bounded
+simplification settings. Select the profile explicitly with `spatial_pairs --profile`;
+the strict default is unchanged. Use separate output roots and build/serve matching
+profile generations. Profile identities prevent reuse across these choices.
+Missing basin relationships remain audited coverage gaps; these configurations do
+not establish complete biological coverage or change an existing serving generation.
+Public distribution of generated data still requires the publication-policy review.
+
 For an authorized local exact-ID audit without H3 filling:
 
 ```bash
