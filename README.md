@@ -98,8 +98,8 @@ handoff. `just download` and `just update` remain available for acquisition only
   exact, prefix, substring, and typo-tolerant matches.
 - Map colour domains support species-count normalization and selected
   jurisdiction scopes.
-- CI runs Python lint/tests, Svelte checks, frontend tests, the production build,
-  and a release-content guard.
+- CI runs Python lint/tests, type-aware Oxlint, Oxfmt formatting, Svelte checks,
+  frontend tests, the production build, and a release-content guard.
 
 Remaining product and research work is tracked in [the roadmap](docs/roadmap.md).
 
@@ -140,9 +140,13 @@ just install
 just check
 ```
 
-`just check` runs Ruff, Python unit tests, Svelte/type checking, frontend
+`just check` runs Ruff, type-aware Oxlint (including the GoaT JavaScript helper),
+Oxfmt formatting checks, Python unit tests, Svelte/type checking, frontend
 unit tests, a production build, and the prospective-commit release guard. It
 does not require a running PostgreSQL server or the global external-data disk.
+Use `just frontend-format` to format frontend sources and the GoaT helper.
+Generated API types, build output, dependencies, and the Bun lockfile are excluded
+from formatting. The frontend build uses Vite 8 with Oxc minification.
 
 ## Configure authorized local data
 

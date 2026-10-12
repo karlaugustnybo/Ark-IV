@@ -12,9 +12,23 @@
 </script>
 
 <div class="sliders-dropdown">
-  <button type="button" class:is-open={open} class="dropdown-toggle" on:click={() => (open = !open)} aria-expanded={open}>
+  <button
+    type="button"
+    class:is-open={open}
+    class="dropdown-toggle"
+    on:click={() => (open = !open)}
+    aria-expanded={open}
+  >
     {title}
-    <svg class="chevron-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+    <svg
+      class="chevron-icon"
+      width="20"
+      height="20"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="1.5"
+    >
       <path d="m19.5 8.25-7.5 7.5-7.5-7.5" />
     </svg>
   </button>
@@ -24,8 +38,25 @@
         <div class="weight-row">
           <label for={control.key}>{control.label}</label>
           <div class="weight-controls">
-            <input id={control.key} type="range" min="0" max="10" step={control.step ?? 0.5} value={$weights[control.key]} on:change={(event) => setWeight(control.key, event.currentTarget.value)} />
-            <input aria-label={`${control.label} value`} class="weight-num" type="number" min="0" max="10" step={control.step ?? 0.5} value={$weights[control.key]} on:change={(event) => setWeight(control.key, event.currentTarget.value)} />
+            <input
+              id={control.key}
+              type="range"
+              min="0"
+              max="10"
+              step={control.step ?? 0.5}
+              value={$weights[control.key]}
+              on:change={(event) => setWeight(control.key, event.currentTarget.value)}
+            />
+            <input
+              aria-label={`${control.label} value`}
+              class="weight-num"
+              type="number"
+              min="0"
+              max="10"
+              step={control.step ?? 0.5}
+              value={$weights[control.key]}
+              on:change={(event) => setWeight(control.key, event.currentTarget.value)}
+            />
           </div>
         </div>
       {/each}

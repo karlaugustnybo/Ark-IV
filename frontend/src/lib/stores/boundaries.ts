@@ -61,17 +61,18 @@ export function loadBoundaryFrameworks(): Promise<BoundaryFramework[]> {
   manifestPromise = fetch('/data/boundary-frameworks.json')
     .then(async (response) => {
       if (!response.ok) throw new Error(`Unable to load boundary frameworks (${response.status})`);
-      const data = await response.json() as { frameworks: BoundaryFramework[] };
+      const data = (await response.json()) as { frameworks: BoundaryFramework[] };
       // Local global-data installations supply a small descriptor alongside
       // country catalogues. Fresh code-only checkouts retain the bundled preview.
       const adm2 = await fetch('/data/adm2-catalogs/framework.json');
       if (adm2.ok && adm2.headers.get('content-type')?.includes('application/json')) {
-        const globalFramework = await adm2.json() as BoundaryFramework;
+        const globalFramework = (await adm2.json()) as BoundaryFramework;
         if (globalFramework.id !== 'municipality' || !globalFramework.catalog_partition_url) {
           throw new Error('Invalid global ADM2 catalogue descriptor');
         }
-        data.frameworks = data.frameworks.map((framework) => framework.id === 'municipality'
-          ? globalFramework : framework);
+        data.frameworks = data.frameworks.map((framework) =>
+          framework.id === 'municipality' ? globalFramework : framework
+        );
       } else if (!adm2.ok && adm2.status !== 404) {
         throw new Error(`Unable to load global ADM2 coverage (${adm2.status})`);
       }
@@ -80,7 +81,9 @@ export function loadBoundaryFrameworks(): Promise<BoundaryFramework[]> {
     })
     .catch((reason) => {
       manifestPromise = null;
-      boundaryLoadError.set(reason instanceof Error ? reason.message : 'Unable to load boundary frameworks');
+      boundaryLoadError.set(
+        reason instanceof Error ? reason.message : 'Unable to load boundary frameworks'
+      );
       throw reason;
     });
   return manifestPromise;
@@ -115,23 +118,31 @@ async function fetchBoundaryCatalogue(
   const cacheKey = `${frameworkId}:${url}`;
   const existing = collectionPromises.get(cacheKey);
   if (existing) return existing;
-  const pending = fetch(url).then(async (response) => {
-    if (!response.ok) throw new Error(`Unable to load ${framework.name} (${response.status})`);
-    const payload = await response.json() as BoundaryCollection | { features: BoundaryProperties[] };
-    const collection: BoundaryCollection = {
-      ...payload,
-      type: 'FeatureCollection',
-      features: payload.features.map((feature) => 'properties' in feature
-        ? feature as BoundaryFeature
-        : { type: 'Feature', properties: feature, geometry: null })
-    };
-    boundaryLoadError.set('');
-    return mergeCollection(frameworkId, collection);
-  }).catch((reason) => {
-    collectionPromises.delete(cacheKey);
-    boundaryLoadError.set(reason instanceof Error ? reason.message : `Unable to load ${framework.name}`);
-    throw reason;
-  });
+  const pending = fetch(url)
+    .then(async (response) => {
+      if (!response.ok) throw new Error(`Unable to load ${framework.name} (${response.status})`);
+      const payload = (await response.json()) as
+        | BoundaryCollection
+        | { features: BoundaryProperties[] };
+      const collection: BoundaryCollection = {
+        ...payload,
+        type: 'FeatureCollection',
+        features: payload.features.map((feature) =>
+          'properties' in feature
+            ? (feature as BoundaryFeature)
+            : { type: 'Feature', properties: feature, geometry: null }
+        )
+      };
+      boundaryLoadError.set('');
+      return mergeCollection(frameworkId, collection);
+    })
+    .catch((reason) => {
+      collectionPromises.delete(cacheKey);
+      boundaryLoadError.set(
+        reason instanceof Error ? reason.message : `Unable to load ${framework.name}`
+      );
+      throw reason;
+    });
   collectionPromises.set(cacheKey, pending);
   return pending;
 }
@@ -144,11 +155,15 @@ export async function loadBoundaryCollection(
   const framework = frameworks.find((item) => item.id === frameworkId);
   if (!framework) throw new Error(`Unknown boundary framework: ${frameworkId}`);
   const uniqueParents = [...new Set(parentCodes)];
-  const urls = uniqueParents.length && framework.catalog_partition_url
-    ? uniqueParents.map((parent) => framework.catalog_partition_url!.replace(
-        '{parent}', encodeURIComponent(parent.toLocaleLowerCase())
-      ))
-    : [framework.catalog_url ?? framework.data_url].filter(Boolean) as string[];
+  const urls =
+    uniqueParents.length && framework.catalog_partition_url
+      ? uniqueParents.map((parent) =>
+          framework.catalog_partition_url!.replace(
+            '{parent}',
+            encodeURIComponent(parent.toLocaleLowerCase())
+          )
+        )
+      : ([framework.catalog_url ?? framework.data_url].filter(Boolean) as string[]);
   if (!urls.length) throw new Error(`${framework.name} has no configured data source`);
   await Promise.all(urls.map((url) => fetchBoundaryCatalogue(frameworkId, framework, url)));
   return get(boundaryCollections)[frameworkId];
@@ -159,7 +174,9 @@ export function toggleBoundary(frameworkId: string, code: string, maximum = 30) 
     const selected = filters[frameworkId] ?? [];
     const next = selected.includes(code)
       ? selected.filter((item) => item !== code)
-      : selected.length < maximum ? [...selected, code] : selected;
+      : selected.length < maximum
+        ? [...selected, code]
+        : selected;
     const result = { ...filters, [frameworkId]: next };
     if (!next.length) delete result[frameworkId];
     return result;
@@ -168,9 +185,10 @@ export function toggleBoundary(frameworkId: string, code: string, maximum = 30) 
 
 export function clearBoundaryFilters(frameworkId?: string) {
   if (!frameworkId) boundaryFilters.set({});
-  else boundaryFilters.update((filters) => {
-    const result = { ...filters };
-    delete result[frameworkId];
-    return result;
-  });
+  else
+    boundaryFilters.update((filters) => {
+      const result = { ...filters };
+      delete result[frameworkId];
+      return result;
+    });
 }

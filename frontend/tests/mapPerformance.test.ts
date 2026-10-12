@@ -26,9 +26,7 @@ const performanceSample: MapPerformanceSample = {
   cellPixelRatio: 1
 };
 
-function performanceResult(
-  overrides: Partial<MapPerformanceResult> = {}
-): MapPerformanceResult {
+function performanceResult(overrides: Partial<MapPerformanceResult> = {}): MapPerformanceResult {
   return {
     sequence: 1,
     durationMs: 2000,

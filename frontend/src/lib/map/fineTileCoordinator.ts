@@ -54,9 +54,10 @@ function mercatorY(latitude: number, scale: number): number {
     WEB_MERCATOR_LATITUDE_LIMIT,
     Math.max(-WEB_MERCATOR_LATITUDE_LIMIT, latitude)
   );
-  const radians = bounded * Math.PI / 180;
-  return (0.5 - Math.log((1 + Math.sin(radians)) /
-    (1 - Math.sin(radians))) / (4 * Math.PI)) * scale;
+  const radians = (bounded * Math.PI) / 180;
+  return (
+    (0.5 - Math.log((1 + Math.sin(radians)) / (1 - Math.sin(radians))) / (4 * Math.PI)) * scale
+  );
 }
 
 function canonicalX(x: number, scale: number): number {
@@ -76,14 +77,14 @@ export function fineTileIndices(
   const z = Math.min(maxZoom, Math.max(minZoom, Math.round(camera.zoom + 1)));
   const scale = 2 ** z;
   if (camera.corners && camera.corners.length >= 3) {
-    const centerX = (camera.longitude + 180) / 360 * scale;
+    const centerX = ((camera.longitude + 180) / 360) * scale;
     const centerY = mercatorY(camera.latitude, scale);
     const footprintScale = 2 ** ((camera.footprintZoom ?? camera.zoom) - camera.zoom);
     const points = camera.corners.map((corner) => {
       let longitude = corner.longitude;
       while (longitude - camera.longitude > 180) longitude -= 360;
       while (longitude - camera.longitude < -180) longitude += 360;
-      const x = (longitude + 180) / 360 * scale;
+      const x = ((longitude + 180) / 360) * scale;
       const y = mercatorY(corner.latitude, scale);
       return {
         x: centerX + (x - centerX) * footprintScale,
@@ -100,8 +101,7 @@ export function fineTileIndices(
         const end = points[(index + 1) % points.length];
         if (start.y >= y && start.y <= y + 1) intersections.push(start.x);
         for (const scanY of [y, y + 1]) {
-          if ((start.y <= scanY && end.y >= scanY) ||
-            (end.y <= scanY && start.y >= scanY)) {
+          if ((start.y <= scanY && end.y >= scanY) || (end.y <= scanY && start.y >= scanY)) {
             if (start.y === end.y) {
               intersections.push(start.x, end.x);
             } else {
@@ -145,12 +145,12 @@ export function fineTileIndices(
       west = camera.longitude - 180;
       east = camera.longitude + 180;
     }
-    minX = Math.floor((west + 180) / 360 * scale) - guardTiles;
-    maxX = Math.floor((east + 180) / 360 * scale) + guardTiles;
+    minX = Math.floor(((west + 180) / 360) * scale) - guardTiles;
+    maxX = Math.floor(((east + 180) / 360) * scale) + guardTiles;
     minY = Math.max(0, Math.floor(mercatorY(camera.bounds.north, scale)) - guardTiles);
     maxY = Math.min(scale - 1, Math.floor(mercatorY(camera.bounds.south, scale)) + guardTiles);
   } else {
-    const centerX = (camera.longitude + 180) / 360 * scale;
+    const centerX = ((camera.longitude + 180) / 360) * scale;
     const centerY = mercatorY(camera.latitude, scale);
     const tilePixels = 512 * 2 ** (camera.zoom - z);
     const halfWidth = camera.width / (2 * tilePixels);
@@ -204,20 +204,11 @@ export class FineTileCoordinator {
 
   schedule(camera: FineTileCamera, source: FineTileSource): void {
     if (this.disposed) return;
-    const visibleIndices = fineTileIndices(
-      camera,
-      source.minZoom,
-      source.maxZoom,
-      0
-    );
-    const guardedIndices = fineTileIndices(
-      camera,
-      source.minZoom,
-      source.maxZoom,
-      this.guardTiles
-    );
+    const visibleIndices = fineTileIndices(camera, source.minZoom, source.maxZoom, 0);
+    const guardedIndices = fineTileIndices(camera, source.minZoom, source.maxZoom, this.guardTiles);
     const signature = `${source.key}:${visibleIndices
-      .map(({ z, x, y }) => `${z}/${x}/${y}`).join(',')}`;
+      .map(({ z, x, y }) => `${z}/${x}/${y}`)
+      .join(',')}`;
     if (signature === this.requestedSignature) return;
     this.requestedSignature = signature;
     // Every distinct camera signature supersedes all older visible and guard
@@ -225,8 +216,10 @@ export class FineTileCoordinator {
     // allowing a slower obsolete guard to publish after the current camera.
     const generation = ++this.generation;
     if (this.timer) clearTimeout(this.timer);
-    if (source.key === this.committedSourceKey && visibleIndices.every((index) =>
-      this.committedTileKeys.has(this.tileKey(index)))) {
+    if (
+      source.key === this.committedSourceKey &&
+      visibleIndices.every((index) => this.committedTileKeys.has(this.tileKey(index)))
+    ) {
       this.onLoadingChange(false);
       if (guardedIndices.every((index) => this.committedTileKeys.has(this.tileKey(index)))) {
         return;
@@ -266,8 +259,9 @@ export class FineTileCoordinator {
 
   hasCoverage(camera: FineTileCamera, source: FineTileSource): boolean {
     if (source.key !== this.committedSourceKey) return false;
-    return fineTileIndices(camera, source.minZoom, source.maxZoom, 0)
-      .every((index) => this.committedTileKeys.has(this.tileKey(index)));
+    return fineTileIndices(camera, source.minZoom, source.maxZoom, 0).every((index) =>
+      this.committedTileKeys.has(this.tileKey(index))
+    );
   }
 
   private async loadGeneration(
@@ -316,8 +310,12 @@ export class FineTileCoordinator {
 
   private commit(sourceKey: string, indices: FineTileIndex[]): void {
     const tileKeys = new Set(indices.map((index) => this.tileKey(index)));
-    if (sourceKey === this.committedSourceKey && tileKeys.size === this.committedTileKeys.size &&
-      [...tileKeys].every((key) => this.committedTileKeys.has(key))) return;
+    if (
+      sourceKey === this.committedSourceKey &&
+      tileKeys.size === this.committedTileKeys.size &&
+      [...tileKeys].every((key) => this.committedTileKeys.has(key))
+    )
+      return;
     const chunks = this.chunksForTiles(sourceKey, tileKeys);
     this.committedSourceKey = sourceKey;
     this.committedTileKeys = tileKeys;
@@ -341,15 +339,18 @@ export class FineTileCoordinator {
     }
     const existing = this.inFlight.get(key);
     if (existing) return existing;
-    const request = source.load(index).then((tile) => {
-      this.cache.set(key, { sourceKey: source.key, tile });
-      while (this.cache.size > this.maxCachedTiles) {
-        const oldest = this.cache.keys().next().value;
-        if (oldest === undefined) break;
-        this.cache.delete(oldest);
-      }
-      return tile;
-    }).finally(() => this.inFlight.delete(key));
+    const request = source
+      .load(index)
+      .then((tile) => {
+        this.cache.set(key, { sourceKey: source.key, tile });
+        while (this.cache.size > this.maxCachedTiles) {
+          const oldest = this.cache.keys().next().value;
+          if (oldest === undefined) break;
+          this.cache.delete(oldest);
+        }
+        return tile;
+      })
+      .finally(() => this.inFlight.delete(key));
     this.inFlight.set(key, request);
     return request;
   }
@@ -363,8 +364,12 @@ export class FineTileCoordinator {
   }
 
   private chunksForTiles(sourceKey: string, tileKeys: ReadonlySet<string>): FineTileChunk[] {
-    if (sourceKey === this.committedSourceKey && tileKeys.size === this.committedTileKeys.size &&
-      [...tileKeys].every((key) => this.committedTileKeys.has(key))) return this.committedChunks;
+    if (
+      sourceKey === this.committedSourceKey &&
+      tileKeys.size === this.committedTileKeys.size &&
+      [...tileKeys].every((key) => this.committedTileKeys.has(key))
+    )
+      return this.committedChunks;
     const chunks: FineTileChunk[] = [];
     for (const [cacheKey, entry] of this.cache) {
       if (entry.sourceKey !== sourceKey) continue;

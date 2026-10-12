@@ -19,10 +19,18 @@
   ];
 
   function statusClass(category: string): string {
-    return ({
-      'Critically Endangered': 'status-cr', Endangered: 'status-en', Vulnerable: 'status-vu',
-      'Near Threatened': 'status-nt', 'Least Concern': 'status-lc', 'Data Deficient': 'status-dd'
-    } as Record<string, string>)[category] ?? 'status-na';
+    return (
+      (
+        {
+          'Critically Endangered': 'status-cr',
+          Endangered: 'status-en',
+          Vulnerable: 'status-vu',
+          'Near Threatened': 'status-nt',
+          'Least Concern': 'status-lc',
+          'Data Deficient': 'status-dd'
+        } as Record<string, string>
+      )[category] ?? 'status-na'
+    );
   }
 
   function ariaSort(key: SpeciesSortKey): 'ascending' | 'descending' | 'none' {
@@ -37,8 +45,17 @@
 
 <div class="species-table-frame" aria-busy={loading}>
   <div class="mobile-table-sort">
-    <label>Sort by <select value={sort} on:change={chooseSort}>{#each columns as column}<option value={column.key}>{column.label}</option>{/each}</select></label>
-    <button class="btn-secondary" type="button" on:click={() => onSort(sort)} aria-label={`Sort ${order === 'asc' ? 'descending' : 'ascending'}`}>
+    <label
+      >Sort by <select value={sort} on:change={chooseSort}
+        >{#each columns as column}<option value={column.key}>{column.label}</option>{/each}</select
+      ></label
+    >
+    <button
+      class="btn-secondary"
+      type="button"
+      on:click={() => onSort(sort)}
+      aria-label={`Sort ${order === 'asc' ? 'descending' : 'ascending'}`}
+    >
       {order === 'asc' ? 'Ascending ↑' : 'Descending ↓'}
     </button>
   </div>
@@ -51,7 +68,22 @@
         <col class="dna-column" />
         <col class="priority-column" />
       </colgroup>
-      <thead><tr>{#each columns as column}<th class:numeric-column={column.numeric} aria-sort={ariaSort(column.key)}><button class="table-sort-link" type="button" on:click={() => onSort(column.key)}><span>{column.label}</span><span class:sort-active={sort === column.key} class="sort-indicator" aria-hidden="true">{sort === column.key ? (order === 'asc' ? '↑' : '↓') : '↕'}</span></button></th>{/each}</tr></thead>
+      <thead
+        ><tr
+          >{#each columns as column}<th
+              class:numeric-column={column.numeric}
+              aria-sort={ariaSort(column.key)}
+              ><button class="table-sort-link" type="button" on:click={() => onSort(column.key)}
+                ><span>{column.label}</span><span
+                  class:sort-active={sort === column.key}
+                  class="sort-indicator"
+                  aria-hidden="true"
+                  >{sort === column.key ? (order === 'asc' ? '↑' : '↓') : '↕'}</span
+                ></button
+              ></th
+            >{/each}</tr
+        ></thead
+      >
       <tbody>
         {#if loading && !rows.length}
           <tr><td colspan="5" class="empty-row">Loading species…</td></tr>
@@ -60,11 +92,39 @@
             {@const gbifHref = gbifSpeciesUrl(row.gbif_taxon_id)}
             {@const goatHref = goatTaxonUrl(row.goat_taxon_id)}
             <tr>
-              <td data-label="Species" class="species-name">{#if gbifHref}<SourceLink source="GBIF" href={gbifHref} context={row.species_name} fused className="species-source-link"><em>{row.species_name}</em></SourceLink>{:else}<em>{row.species_name}</em>{/if}</td>
+              <td data-label="Species" class="species-name"
+                >{#if gbifHref}<SourceLink
+                    source="GBIF"
+                    href={gbifHref}
+                    context={row.species_name}
+                    fused
+                    className="species-source-link"><em>{row.species_name}</em></SourceLink
+                  >{:else}<em>{row.species_name}</em>{/if}</td
+              >
               <td data-label="Family">{row.family || '—'}</td>
-              <td data-label="IUCN status"><SourceLink source="IUCN" href={iucnSpeciesUrl(row.species_name, row.iucn_sis_id, row.iucn_assessment_id)} context={row.species_name} fused className={`status-badge ${statusClass(row.redlist_category)}`}>{row.redlist_category}</SourceLink></td>
-              <td data-label="DNA gap">{#if goatHref}<SourceLink source="GoaT" href={goatHref} context={row.species_name} fused className={`dna-badge dna-${row.dnaStatus}`}>{row.dnaLabel}</SourceLink>{:else}<span class={`dna-badge dna-${row.dnaStatus}`}>{row.dnaLabel}</span>{/if}</td>
-              <td data-label="Priority" class="score-cell"><span class="score-value priority-value">{row.priority.toFixed(2)}</span></td>
+              <td data-label="IUCN status"
+                ><SourceLink
+                  source="IUCN"
+                  href={iucnSpeciesUrl(row.species_name, row.iucn_sis_id, row.iucn_assessment_id)}
+                  context={row.species_name}
+                  fused
+                  className={`status-badge ${statusClass(row.redlist_category)}`}
+                  >{row.redlist_category}</SourceLink
+                ></td
+              >
+              <td data-label="DNA gap"
+                >{#if goatHref}<SourceLink
+                    source="GoaT"
+                    href={goatHref}
+                    context={row.species_name}
+                    fused
+                    className={`dna-badge dna-${row.dnaStatus}`}>{row.dnaLabel}</SourceLink
+                  >{:else}<span class={`dna-badge dna-${row.dnaStatus}`}>{row.dnaLabel}</span
+                  >{/if}</td
+              >
+              <td data-label="Priority" class="score-cell"
+                ><span class="score-value priority-value">{row.priority.toFixed(2)}</span></td
+              >
             </tr>
           {/each}
         {:else}
