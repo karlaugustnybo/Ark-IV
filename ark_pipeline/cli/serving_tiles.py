@@ -106,6 +106,7 @@ def record_prepared(args: argparse.Namespace) -> dict:
             "build_duckdb": args.build_duckdb, "metadata": args.metadata_template,
             "species": args.species, "species_systems": args.species_systems,
             "coarse_source": coarse_source,
+            "crosswalk": args.crosswalk,
         }.items()},
     }
     snapshot = json.loads(args.metadata_template.read_text()).get("coarse_snapshot")
@@ -131,6 +132,7 @@ def record_prepared(args: argparse.Namespace) -> dict:
 
 def validate_exports(report: dict) -> None:
     """Reconcile consumed metadata and optional SQL exports with the coarse build."""
+    validate_coarse_membership(report)
     exports = report.get("exports", {})
     if "species_passage_cells_res3.parquet" in exports and "species_passage" not in report["files"]:
         raise ValueError("Passage exports require a receipt-verified explicit passage supplement beside species metadata")
@@ -200,6 +202,34 @@ def validate_exports(report: dict) -> None:
             """, [path]).fetchone()[0]
             if mismatch:
                 raise ValueError(f"PostgreSQL export does not match prepared build: {name}")
+
+
+def validate_coarse_membership(report: dict) -> None:
+    """Compare source lists through the explicit source producer's ID mapping."""
+    from ark_pipeline.builders.source_database import build_h3_table, validate_crosswalk
+
+    files = report["files"]
+    if "crosswalk" not in files:
+        raise ValueError("Prepared coarse membership requires an explicit crosswalk; rerun just data-prepare")
+    crosswalk = Path(files["crosswalk"]["path"])
+    # Reuse both supported crosswalk schemas and the producer's identity/nonidentity
+    # mapping, rather than assuming source IDs equal the serving primary key.
+    with duckdb.connect() as connection:
+        configure_duckdb(connection)
+        validate_crosswalk(connection, crosswalk)
+        mapped = build_h3_table(connection, 3, Path(files["coarse_source"]["path"]),
+                                crosswalk, deep_validation=False)
+        if mapped.get("unmatched_relationships", 0) or mapped.get("unmatched_cells", 0):
+            raise ValueError("Consumed coarse membership has unmapped source IDs")
+        connection.execute(f"ATTACH {sql_path(Path(files['build_duckdb']['path']))} AS build (READ_ONLY)")
+        mismatch = connection.execute("""
+            WITH expected AS (SELECT h3_index, list_sort(gbif_ids) AS gbif_ids FROM H3Res3Species),
+            actual AS (SELECT h3_index, list_sort(gbif_ids) AS gbif_ids FROM build.H3Res3Species)
+            SELECT count(*) FROM ((SELECT * FROM expected EXCEPT ALL SELECT * FROM actual)
+            UNION ALL (SELECT * FROM actual EXCEPT ALL SELECT * FROM expected))
+        """).fetchone()[0]
+        if mismatch:
+            raise ValueError("Consumed coarse membership does not match prepared build; rerun just data-prepare")
 
 
 def read_prepared(path: Path) -> dict:
@@ -489,7 +519,7 @@ def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(description=__doc__)
     commands = root.add_subparsers(dest="command", required=True)
     record = commands.add_parser("record", help="Record a successful preparation; run through data-prepare.")
-    for name in ("h3-root", "parts-dir", "build-duckdb", "species", "species-systems", "metadata-template", "output"):
+    for name in ("h3-root", "parts-dir", "build-duckdb", "species", "species-systems", "crosswalk", "metadata-template", "output"):
         record.add_argument("--" + name, type=Path, required=True)
     record.set_defaults(run=record_prepared)
     tiles = commands.add_parser("build")

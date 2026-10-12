@@ -20,7 +20,13 @@ from ark_pipeline.builders.fine_metrics import (
     prepare_species,
     record_aggregate_receipt,
 )
-from ark_pipeline.cli.serving_tiles import build, file_record, read_prepared, record_prepared
+from ark_pipeline.cli.serving_tiles import (
+    build,
+    file_record,
+    read_prepared,
+    record_prepared,
+    validate_coarse_membership,
+)
 from tests.test_tile_export import prepared_fixture
 
 
@@ -33,7 +39,7 @@ def prepared_exports(root, *, expanded=False, empty=False):
             'Fixture family' AS family, NULL::VARCHAR AS edge_group_name,
             false AS has_ebp_criteria_evidence FROM read_parquet(?)""", [str(recorded.species)])
         connection.execute('CREATE OR REPLACE TABLE SpecSystems AS SELECT * FROM read_parquet(?)', [str(recorded.species_systems)])
-        connection.execute("""CREATE TABLE H3Res3Species AS SELECT lower(to_hex(h3_cell)) AS h3_index,
+        connection.execute("""CREATE OR REPLACE TABLE H3Res3Species AS SELECT lower(to_hex(h3_cell)) AS h3_index,
             list_transform(species_ids, value -> cast(value AS VARCHAR)) AS gbif_ids FROM read_parquet(?)""",
             [str(recorded.h3_root / 'h3_res3_species_global_merged.parquet')])
         if empty:
@@ -59,6 +65,82 @@ def regenerate_fine(recorded):
 
 
 class ServingExportCoherenceTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("tippecanoe"), "Tippecanoe required for publication preservation")
+    def test_membership_substitution_rejects_with_unchanged_dimensions_and_fresh_fine(self):
+        for sql_exports in (True, False):
+            with self.subTest(sql_exports=sql_exports), tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):
+                root = Path(temporary)
+                args, recorded, _ = prepared_exports(root)
+                species = pq.read_table(recorded.species)
+                second = {**species.to_pylist()[0], 'gbif_accepted_id': '2', 'redlist_category': 'Critically Endangered'}
+                pq.write_table(pa.Table.from_pylist(species.to_pylist() + [second], schema=species.schema), recorded.species)
+                systems = pq.read_table(recorded.species_systems)
+                pq.write_table(pa.Table.from_pylist(systems.to_pylist() + [{'gbif_accepted_id': '2', 'system': 'Terrestrial'}],
+                    schema=systems.schema), recorded.species_systems)
+                pq.write_table(pa.table({'iucn_sis_id': [1, 2]}), recorded.crosswalk)
+                with duckdb.connect(str(recorded.build_duckdb)) as connection:
+                    connection.execute("INSERT INTO SpecInfo SELECT * REPLACE ('2' AS gbif_accepted_id, '2' AS iucn_sis_id, 'Critically Endangered' AS redlist_category) FROM SpecInfo WHERE gbif_accepted_id='1'")
+                    connection.execute("INSERT INTO SpecSystems VALUES ('2', 'Terrestrial')")
+                    export_parquet(connection, root / 'exports', resolutions=(3,))
+                if not sql_exports:
+                    (root / 'exports').rename(root / 'unused-exports')
+                regenerate_fine(recorded)
+                report = record_prepared(recorded)
+                accepted = recorded.output.read_bytes()
+                args.static_fine = False
+                build(args)
+                current = (root / 'tiles/current').resolve()
+                coarse = recorded.h3_root / 'h3_res3_species_global_merged.parquet'
+                for path in (coarse, *(recorded.h3_root / 'res7_merged_parts').glob('*.parquet')):
+                    original = pq.read_table(path)
+                    pq.write_table(pa.Table.from_pylist([{**row, 'species_ids': [2]} for row in original.to_pylist()],
+                        schema=original.schema), path)
+                regenerate_fine(recorded)
+                with self.assertRaisesRegex(ValueError, 'Consumed coarse membership does not match prepared build'):
+                    record_prepared(recorded)
+                self.assertEqual(recorded.output.read_bytes(), accepted)
+                # An old intake could accept this internally consistent new source/fine
+                # generation while retaining the stale coarse build and SQL exports.
+                report['files']['coarse_source'] = file_record(coarse)
+                for records in report['parts'].values():
+                    for name in ('source', 'aggregate', 'receipt'):
+                        records[name] = file_record(Path(records[name]['path']))
+                recorded.output.write_text(json.dumps(report))
+                with self.assertRaisesRegex(ValueError, 'Consumed coarse membership does not match prepared build'):
+                    read_prepared(recorded.output)
+                for static_fine in (False, True):
+                    args.static_fine = static_fine
+                    with self.assertRaisesRegex(ValueError, 'Consumed coarse membership does not match prepared build'):
+                        build(args)
+                self.assertEqual((root / 'tiles/current').resolve(), current)
+
+    def test_explicit_nonidentity_crosswalk_matches_source_producer(self):
+        from ark_pipeline.builders.source_database import build_h3_table
+
+        for source_name, target_name in (('source_species_id', 'app_species_id'), ('iucn_sis_id', 'gbif_accepted_id')):
+            with self.subTest(source_name=source_name), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                source, crosswalk, build_path = root / 'coarse.parquet', root / 'crosswalk.parquet', root / 'build.duckdb'
+                pq.write_table(pa.Table.from_pylist([{'h3_cell': h3.str_to_int(h3.latlng_to_cell(55, 12, 3)),
+                    'species_ids': [101, 202]}]), source)
+                pq.write_table(pa.table({source_name: [101, 202], target_name: ['app-a', 'app-b']}), crosswalk)
+                with duckdb.connect(str(build_path)) as connection:
+                    build_h3_table(connection, 3, source, crosswalk)
+                    # List ordering is not membership identity.
+                    connection.execute('UPDATE H3Res3Species SET gbif_ids=list_reverse(gbif_ids)')
+                report = {'files': {name: file_record(path) for name, path in
+                    (('coarse_source', source), ('crosswalk', crosswalk), ('build_duckdb', build_path))}}
+                validate_coarse_membership(report)
+                pq.write_table(pa.table({source_name: [101, 202], target_name: ['app-a', 'app-c']}), crosswalk)
+                with self.assertRaisesRegex(ValueError, 'Consumed coarse membership does not match prepared build'):
+                    validate_coarse_membership(report)
+                pq.write_table(pa.table({source_name: [101], target_name: ['app-a']}), crosswalk)
+                with self.assertRaisesRegex(ValueError, 'unmapped source IDs'):
+                    validate_coarse_membership(report)
+                report['files'].pop('crosswalk')
+                with self.assertRaisesRegex(ValueError, 'explicit crosswalk'):
+                    validate_coarse_membership(report)
+
     @unittest.skipUnless(shutil.which("tippecanoe"), "Tippecanoe required for publication preservation")
     def test_consumed_metadata_changes_reject_with_fresh_fine_receipts(self):
         for field, value in (("redlist_category", "Critically Endangered"),

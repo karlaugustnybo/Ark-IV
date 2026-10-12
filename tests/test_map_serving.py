@@ -246,7 +246,7 @@ class MapServingTests(unittest.TestCase):
                     NULL::VARCHAR AS spatial_redlist_category, true AS iucn_assessment_latest
                     FROM read_parquet(?)""", [str(recorded.species)])
                 connection.execute('CREATE OR REPLACE TABLE SpecSystems AS SELECT * FROM read_parquet(?)', [str(recorded.species_systems)])
-                connection.execute("""CREATE TABLE H3Res3Species AS SELECT lower(to_hex(h3_cell)) AS h3_index,
+                connection.execute("""CREATE OR REPLACE TABLE H3Res3Species AS SELECT lower(to_hex(h3_cell)) AS h3_index,
                     list_transform(species_ids, value -> cast(value AS VARCHAR)) AS gbif_ids
                     FROM read_parquet(?)""", [str(recorded.h3_root / 'h3_res3_species_global_merged.parquet')])
                 export_parquet(connection, root / 'exports', resolutions=(3,), include_expanded_cell_species=False)

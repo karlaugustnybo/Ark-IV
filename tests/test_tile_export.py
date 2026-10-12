@@ -83,6 +83,8 @@ def prepared_fixture(root: Path):
         "family_has_dna": True, "goat_data_deficient": False,
     }]), species)
     pq.write_table(pa.table({"gbif_accepted_id": ["1"], "system": ["Terrestrial"]}), systems)
+    crosswalk = root / "crosswalk.parquet"
+    pq.write_table(pa.table({"iucn_sis_id": [1]}), crosswalk)
     # Different H3 base cells in the same web tile exercise merging shards.
     cells = ["873e9a68affffff", "875869a48ffffff"]
     coarse = sorted({h3.cell_to_parent(cell, 3) for cell in cells})
@@ -94,6 +96,9 @@ def prepared_fixture(root: Path):
     with duckdb.connect(str(root / "build.duckdb")) as connection:
         connection.execute("CREATE TABLE SpecInfo AS SELECT * FROM read_parquet(?)", [str(species)])
         connection.execute("CREATE TABLE SpecSystems AS SELECT * FROM read_parquet(?)", [str(systems)])
+        connection.execute("""CREATE TABLE H3Res3Species AS SELECT lower(to_hex(h3_cell)) AS h3_index,
+            list_transform(species_ids, value -> cast(value AS VARCHAR)) AS gbif_ids FROM read_parquet(?)""",
+            [str(coarse_source)])
         prepare_species(connection, species, systems)
         for cell in cells:
             name = f"base_{h3.get_base_cell_number(cell)}.parquet"
@@ -111,7 +116,7 @@ def prepared_fixture(root: Path):
     template.write_text(json.dumps({key: {system.lower(): {"min": 0, "max": 1} for system in SYSTEMS}
                                     for key in ("score_domains", "species_normalized_score_domains")}))
     record_args = SimpleNamespace(h3_root=h3_root, parts_dir=parts, species=species,
-                                  species_systems=systems, build_duckdb=root / "build.duckdb",
+                                  species_systems=systems, crosswalk=crosswalk, build_duckdb=root / "build.duckdb",
                                   metadata_template=template, output=root / "prepared.json")
     record_prepared(record_args)
     boundaries = root / "boundaries.json"

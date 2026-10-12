@@ -248,6 +248,7 @@ global-prepare: global-build-preview global-res7-aggregate
       --build-duckdb data/global/build.duckdb \
       --species data/global/species/species.parquet \
       --species-systems data/global/species/species_systems.parquet \
+      --crosswalk "{{ global_crosswalk_path }}" \
       --metadata-template data/global/tiles/map-metadata.json \
       --output "{{ global_preview_root }}/prepared-inputs.json"
 

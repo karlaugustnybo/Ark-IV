@@ -34,6 +34,14 @@ identity/evidence metadata) and distinct canonical ecosystem relations must matc
 the coarse build's species dimensions. Fresh fine receipts alone do not establish
 that connection. This check also applies when SQL exports are deliberately absent;
 metadata-only changes require rebuilding the matching coarse preparation.
+The raw coarse lists must also match the build's actual membership through the
+explicit source-to-serving ID crosswalk used by the source builder. Recording
+requires `--crosswalk`; `global-prepare` supplies its selected crosswalk. Its
+checksum is recorded and checked again on consumption. Old prepared reports
+without this input require preparation again; old species metadata schemas can
+still omit optional identity/evidence columns. A same-count species substitution
+requires rebuilding the coarse preparation even with fresh fine receipts and
+unchanged species dimensions, and even when SQL exports are absent.
 
 ## Whole-map selection
 
