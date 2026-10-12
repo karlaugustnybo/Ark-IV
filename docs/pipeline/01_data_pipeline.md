@@ -161,9 +161,10 @@ Successful preparation also writes `GLOBAL_PREVIEW_ROOT/prepared-inputs.json`,
 binding coarse and fine products to the verified source generation. Use
 `just data-tiles` to build or reuse the full static archive from that record.
 `just global-res7-tiles` is an alias. The final archive and metadata are published
-together under `GLOBAL_PREVIEW_ROOT/tiles/current/`. The default uses a single
-streamed compilation; `just data-tiles --checkpoint-shards` adds resumable
-per-base-cell tiles at the cost of a merge pass and extra disk space. See the
+together under `GLOBAL_PREVIEW_ROOT/tiles/current/`. The default caches separately
+compiled coarse and fine resolution groups, then joins them into the final archive.
+`just data-tiles --checkpoint-shards` provides resumable per-base-cell tiles at the
+cost of extra disk space; both modes require the final join. See the
 [tile profiling and publication guide](../performance/tile_export_performance.md).
 
 The spatial workflow now exports the format consumed by the existing serving

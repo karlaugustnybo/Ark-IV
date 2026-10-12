@@ -61,7 +61,11 @@ Commands: `just data-prepare`, `just data-boundaries`, `just global-prepare`.
 ## 05 — Export tiles
 
 `cli/serving_tiles.py` records prepared inputs and publishes validated tile
-generations. `tiles.py` streams batched tile features.
+generations. `tiles.py` encodes bounded dense/sparse feature batches,
+`tile_spatial.py` shares exact boundary proofs, and `tile_stream_worker.py` with
+`tile_worker_state.py` isolates ordered binary producers before native compilation.
+See [static tile export](../docs/performance/tile_export_performance.md) for encoding,
+compiler grouping and recovery contracts.
 
 Command: `just data-tiles` (also included in `just data-build`).
 
