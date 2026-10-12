@@ -130,16 +130,40 @@ def record_prepared(args: argparse.Namespace) -> dict:
 
 
 def validate_exports(report: dict) -> None:
-    """Check recorded SQL exports against the build that supplies coarse metrics."""
+    """Reconcile consumed metadata and optional SQL exports with the coarse build."""
     exports = report.get("exports", {})
     if "species_passage_cells_res3.parquet" in exports and "species_passage" not in report["files"]:
         raise ValueError("Passage exports require a receipt-verified explicit passage supplement beside species metadata")
-    if not exports:
-        return  # Fixture/legacy preparation can serve maps without a SQL export set.
     required = {"species.parquet", "species_systems.parquet", "cell_species_lists.parquet"}
-    if not required <= exports.keys():
+    if exports and not required <= exports.keys():
         raise ValueError("Incomplete PostgreSQL export set")
     with duckdb.connect(report["files"]["build_duckdb"]["path"], read_only=True) as connection:
+        # Source/build producers copy the supplied species dimension verbatim.
+        # Compare all supplied fields, including optional identity/evidence fields;
+        # an older schema can omit them, but supplied values must not be stale.
+        species_path = report["files"]["species"]["path"]
+        names = pq.ParquetFile(species_path).schema_arrow.names
+        build_names = {row[0] for row in connection.execute("DESCRIBE SpecInfo").fetchall()}
+        if not set(names) <= build_names:
+            raise ValueError("Consumed species metadata does not match prepared build: missing fields")
+        columns = ", ".join('"' + name.replace('"', '""') + '"' for name in names)
+        metadata_queries = {
+            "species": (f"SELECT {columns} FROM SpecInfo", f"SELECT {columns} FROM read_parquet(?)"),
+            "species_systems": (
+                "SELECT DISTINCT gbif_accepted_id, system FROM SpecSystems WHERE system IN ('Terrestrial','Freshwater','Marine')",
+                "SELECT DISTINCT gbif_accepted_id, system FROM read_parquet(?) WHERE system IN ('Terrestrial','Freshwater','Marine')",
+            ),
+        }
+        for name, (expected, actual) in metadata_queries.items():
+            mismatch = connection.execute(f"""
+                WITH expected AS ({expected}), actual AS ({actual})
+                SELECT count(*) FROM ((SELECT * FROM expected EXCEPT ALL SELECT * FROM actual)
+                UNION ALL (SELECT * FROM actual EXCEPT ALL SELECT * FROM expected))
+            """, [report["files"][name]["path"]]).fetchone()[0]
+            if mismatch:
+                raise ValueError(f"Consumed {name} metadata does not match prepared build")
+        if not exports:
+            return  # Maps without SQL still require matching coarse/fine metadata.
         queries = {
             "species.parquet": "SELECT {columns} FROM SpecInfo",
             "species_systems.parquet": "SELECT DISTINCT gbif_accepted_id, system FROM SpecSystems WHERE system IN ('Terrestrial','Freshwater','Marine')",

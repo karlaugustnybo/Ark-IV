@@ -238,14 +238,14 @@ class MapServingTests(unittest.TestCase):
             root = Path(tmp)
             args, recorded, _ = prepared_fixture(root)
             with duckdb.connect(str(recorded.build_duckdb)) as connection:
-                connection.execute("""CREATE TABLE SpecInfo AS SELECT *, gbif_accepted_id AS iucn_sis_id,
+                connection.execute("""CREATE OR REPLACE TABLE SpecInfo AS SELECT *, gbif_accepted_id AS iucn_sis_id,
                     NULL::VARCHAR AS iucn_assessment_id, NULL::VARCHAR AS gbif_taxon_id,
                     NULL::VARCHAR AS goat_taxon_id, 'Synthetic species' AS species_name,
                     'Fixture family' AS family, NULL::VARCHAR AS edge_group_name,
                     false AS has_ebp_criteria_evidence, 'assessed' AS metadata_status,
                     NULL::VARCHAR AS spatial_redlist_category, true AS iucn_assessment_latest
                     FROM read_parquet(?)""", [str(recorded.species)])
-                connection.execute('CREATE TABLE SpecSystems AS SELECT * FROM read_parquet(?)', [str(recorded.species_systems)])
+                connection.execute('CREATE OR REPLACE TABLE SpecSystems AS SELECT * FROM read_parquet(?)', [str(recorded.species_systems)])
                 connection.execute("""CREATE TABLE H3Res3Species AS SELECT lower(to_hex(h3_cell)) AS h3_index,
                     list_transform(species_ids, value -> cast(value AS VARCHAR)) AS gbif_ids
                     FROM read_parquet(?)""", [str(recorded.h3_root / 'h3_res3_species_global_merged.parquet')])

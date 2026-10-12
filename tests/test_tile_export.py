@@ -92,6 +92,8 @@ def prepared_fixture(root: Path):
     ], schema=LIST_SCHEMA), coarse_source)
     metric_args = SimpleNamespace(species=species, species_systems=systems)
     with duckdb.connect(str(root / "build.duckdb")) as connection:
+        connection.execute("CREATE TABLE SpecInfo AS SELECT * FROM read_parquet(?)", [str(species)])
+        connection.execute("CREATE TABLE SpecSystems AS SELECT * FROM read_parquet(?)", [str(systems)])
         prepare_species(connection, species, systems)
         for cell in cells:
             name = f"base_{h3.get_base_cell_number(cell)}.parquet"

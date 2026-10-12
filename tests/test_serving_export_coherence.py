@@ -7,6 +7,7 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 import duckdb
 import h3
@@ -14,6 +15,11 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from ark_pipeline.builders.coarse_cache import export_parquet
+from ark_pipeline.builders.fine_metrics import (
+    aggregate_part,
+    prepare_species,
+    record_aggregate_receipt,
+)
 from ark_pipeline.cli.serving_tiles import build, file_record, read_prepared, record_prepared
 from tests.test_tile_export import prepared_fixture
 
@@ -21,12 +27,12 @@ from tests.test_tile_export import prepared_fixture
 def prepared_exports(root, *, expanded=False, empty=False):
     args, recorded, cells = prepared_fixture(root)
     with duckdb.connect(str(recorded.build_duckdb)) as connection:
-        connection.execute("""CREATE TABLE SpecInfo AS SELECT *, gbif_accepted_id AS iucn_sis_id,
+        connection.execute("""CREATE OR REPLACE TABLE SpecInfo AS SELECT *, gbif_accepted_id AS iucn_sis_id,
             NULL::VARCHAR AS iucn_assessment_id, NULL::VARCHAR AS gbif_taxon_id,
             NULL::VARCHAR AS goat_taxon_id, 'Synthetic species' AS species_name,
             'Fixture family' AS family, NULL::VARCHAR AS edge_group_name,
             false AS has_ebp_criteria_evidence FROM read_parquet(?)""", [str(recorded.species)])
-        connection.execute('CREATE TABLE SpecSystems AS SELECT * FROM read_parquet(?)', [str(recorded.species_systems)])
+        connection.execute('CREATE OR REPLACE TABLE SpecSystems AS SELECT * FROM read_parquet(?)', [str(recorded.species_systems)])
         connection.execute("""CREATE TABLE H3Res3Species AS SELECT lower(to_hex(h3_cell)) AS h3_index,
             list_transform(species_ids, value -> cast(value AS VARCHAR)) AS gbif_ids FROM read_parquet(?)""",
             [str(recorded.h3_root / 'h3_res3_species_global_merged.parquet')])
@@ -41,7 +47,76 @@ def prepared_exports(root, *, expanded=False, empty=False):
     return args, recorded, cells
 
 
+def regenerate_fine(recorded):
+    metric_args = SimpleNamespace(species=recorded.species, species_systems=recorded.species_systems)
+    with duckdb.connect() as connection:
+        prepare_species(connection, recorded.species, recorded.species_systems)
+        for source in (recorded.h3_root / 'res7_merged_parts').glob('base_*.parquet'):
+            target = recorded.parts_dir / source.name
+            aggregate_part(connection, source, target)
+            record_aggregate_receipt(metric_args, source, target)
+    return metric_args
+
+
 class ServingExportCoherenceTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("tippecanoe"), "Tippecanoe required for publication preservation")
+    def test_consumed_metadata_changes_reject_with_fresh_fine_receipts(self):
+        for field, value in (("redlist_category", "Critically Endangered"),
+                             ("has_dna_species_level", True), ("system", "Marine"),
+                             ("species_name", "Changed synthetic name"), ("metadata_status", "spatial-only")):
+            for sql_exports in (True, False):
+                with self.subTest(field=field, sql_exports=sql_exports), tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):
+                    root = Path(temporary)
+                    args, recorded, _ = prepared_exports(root)
+                    if field in ("metadata_status", "species_name"):
+                        initial = "matched" if field == "metadata_status" else "Synthetic species"
+                        species = pq.read_table(recorded.species).append_column(field, pa.array([initial]))
+                        pq.write_table(species, recorded.species)
+                        with duckdb.connect(str(recorded.build_duckdb)) as connection:
+                            if field == "metadata_status":
+                                connection.execute("ALTER TABLE SpecInfo ADD COLUMN metadata_status VARCHAR DEFAULT 'matched'")
+                            export_parquet(connection, root / 'exports', resolutions=(3,))
+                        regenerate_fine(recorded)
+                    if not sql_exports:
+                        (root / 'exports').rename(root / 'unused-exports')
+                    report = record_prepared(recorded)
+                    accepted = recorded.output.read_bytes()
+                    args.static_fine = False
+                    build(args)
+                    current = (root / 'tiles/current').resolve()
+                    path = recorded.species_systems if field == "system" else recorded.species
+                    original = pq.read_table(path)
+                    pq.write_table(pa.Table.from_pylist([{**row, field: value} for row in original.to_pylist()],
+                        schema=original.schema), path)
+                    metric_args = regenerate_fine(recorded)
+                    with self.assertRaisesRegex(ValueError, 'Consumed .*metadata does not match prepared build'):
+                        record_prepared(recorded)
+                    self.assertEqual(recorded.output.read_bytes(), accepted)
+                    # Simulate an inconsistent report accepted before this validation existed;
+                    # identities come from the real newly produced inputs and receipts.
+                    report['files']['species'] = file_record(recorded.species)
+                    report['files']['species_systems'] = file_record(recorded.species_systems)
+                    report['metric_identity'] = metric_args._aggregate_metadata_identity
+                    for records in report['parts'].values():
+                        for name in ('aggregate', 'receipt'):
+                            records[name] = file_record(Path(records[name]['path']))
+                    recorded.output.write_text(json.dumps(report))
+                    with self.assertRaisesRegex(ValueError, 'Consumed .*metadata does not match prepared build'):
+                        read_prepared(recorded.output)
+                    with self.assertRaisesRegex(ValueError, 'Consumed .*metadata does not match prepared build'):
+                        build(args)
+                    self.assertEqual((root / 'tiles/current').resolve(), current)
+
+    def test_canonical_system_relation_accepts_duplicate_and_unknown_rows(self):
+        with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):
+            _, recorded, _ = prepared_exports(Path(temporary))
+            original = pq.read_table(recorded.species_systems)
+            rows = original.to_pylist()
+            pq.write_table(pa.Table.from_pylist(rows + rows + [{"gbif_accepted_id": "1", "system": "Unknown"}],
+                schema=original.schema), recorded.species_systems)
+            regenerate_fine(recorded)
+            self.assertEqual(record_prepared(recorded)['status'], 'passed')
+
     @unittest.skipUnless(shutil.which("tippecanoe"), "Tippecanoe required for publication preservation")
     def test_unbound_passage_export_rejects_record_and_old_report_publication(self):
         with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):

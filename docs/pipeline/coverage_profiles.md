@@ -29,6 +29,11 @@ validation checks, not a guarantee of crash atomicity or arbitrary reader safety
 A preparation without SQL exports can serve a map but cannot be loaded into SQL.
 Recorded SQL lists and optional inverse/expanded membership exports are compared
 with the prepared coarse membership, including species IDs and resolutions.
+At both recording and consumption, the supplied species fields (including optional
+identity/evidence metadata) and distinct canonical ecosystem relations must match
+the coarse build's species dimensions. Fresh fine receipts alone do not establish
+that connection. This check also applies when SQL exports are deliberately absent;
+metadata-only changes require rebuilding the matching coarse preparation.
 
 ## Whole-map selection
 
