@@ -65,6 +65,60 @@ class MapServingTests(unittest.TestCase):
                 self.assertEqual((root / 'tiles/static/current').resolve(), static)
                 validate_config(dynamic / 'serving.json')
 
+    @unittest.skipUnless(shutil.which("tippecanoe"), "Tippecanoe required for static dependencies")
+    def test_static_snapshot_is_published_verified_and_preserves_current_on_failure(self):
+        for has_snapshot in (False, True):
+            with self.subTest(snapshot=has_snapshot), tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()):
+                root = Path(tmp)
+                args, recorded, _ = prepared_fixture(root)
+                name = 'res3-priorities-0123456789abcdef.arrow'
+                snapshot = recorded.metadata_template.parent / name
+                if has_snapshot:
+                    snapshot.write_bytes(b'synthetic dependency bytes')
+                    metadata = json.loads(recorded.metadata_template.read_text())
+                    metadata['coarse_snapshot'] = {'url': '/tiles/' + name}
+                    recorded.metadata_template.write_text(json.dumps(metadata))
+                    record_prepared(recorded)
+                args.static_fine = False
+                build(args)
+                dynamic = (root / 'tiles/current').resolve()
+                args.static_fine = True
+                self.assertEqual(build(args)['status'], 'passed')
+                static = (root / 'tiles/static/current').resolve()
+                metadata = json.loads((static / 'map-metadata.json').read_text())
+                self.assertEqual('coarse_snapshot' in metadata, has_snapshot)
+                if has_snapshot:
+                    self.assertEqual((static / name).read_bytes(), snapshot.read_bytes())
+                    receipt = json.loads((static / 'receipt.json').read_text())
+                    self.assertIn(name, receipt['outputs'])
+                    from litestar import Litestar
+                    from litestar.testing import TestClient
+
+                    from backend.app import tiles
+                    from backend.config import Settings
+
+                    settings = Settings(_env_file=None, tile_dir=static,
+                        pmtiles_path=static / 'priorities.pmtiles',
+                        map_metadata_path=static / 'map-metadata.json')
+                    with patch('backend.app.settings', settings), TestClient(Litestar([tiles])) as client:
+                        response = client.get(metadata['coarse_snapshot']['url'])
+                    self.assertEqual(response.status_code, 200)
+                    self.assertEqual(response.content, snapshot.read_bytes())
+                self.assertTrue(build(args)['reused'])
+                self.assertEqual((root / 'tiles/current').resolve(), dynamic)
+                if has_snapshot:
+                    # A damaged published dependency requires a new static generation.
+                    (static / name).write_bytes(b'corrupt published copy')
+                    self.assertFalse(build(args)['reused'])
+                    static = (root / 'tiles/static/current').resolve()
+                    self.assertEqual((static / name).read_bytes(), snapshot.read_bytes())
+                    snapshot.rename(snapshot.with_suffix('.absent'))
+                    with self.assertRaisesRegex(ValueError, 'Prepared input changed'):
+                        build(args)
+                    self.assertEqual((root / 'tiles/static/current').resolve(), static)
+                    self.assertEqual((root / 'tiles/current').resolve(), dynamic)
+                    validate_config(dynamic / 'serving.json')
+
     def test_global_preview_prefers_published_build_and_rejects_benchmarks(self):
         from ark_pipeline.cli.map_serving import global_preview_config, reject_benchmark_bundle
         with tempfile.TemporaryDirectory() as tmp:
@@ -203,6 +257,10 @@ class MapServingTests(unittest.TestCase):
             passage = root / 'species_passage_cells_res3.parquet'
             pq.write_table(pa.table({'gbif_accepted_id':['1'], 'resolution':[3], 'h3_indexes':[[h3.str_to_int(h3.latlng_to_cell(55,12,3))]]}), passage)
             passage.with_suffix('.report.json').write_text(json.dumps({'status':'passed', 'scope':'species-range-overlay', 'resolution':3, 'output_sha256':sha256(passage), 'species_sha256':sha256(recorded.species)}))
+            # An unrelated export copy must never override the producer-bound supplement.
+            pq.write_table(pa.table({'gbif_accepted_id':['unknown'], 'resolution':[3],
+                'h3_indexes':[[h3.str_to_int(h3.latlng_to_cell(-50,120,7))]]}),
+                root / 'exports/species_passage_cells_res3.parquet')
             report = record_prepared(recorded)
             self.assertIn('species.parquet', report['exports'])
             args.static_fine = False
@@ -211,7 +269,7 @@ class MapServingTests(unittest.TestCase):
             config = validate_config(current / 'serving.json')
             exported = Path(config['environment']['EXPORT_DIR']) / 'species.parquet'
             self.assertTrue(exported.is_file())
-            self.assertTrue((exported.parent / 'species_passage_cells_res3.parquet').is_file())
+            self.assertEqual((exported.parent / 'species_passage_cells_res3.parquet').read_bytes(), passage.read_bytes())
             self.assertTrue((exported.parent / 'species_passage_cells_res3.report.json').is_file())
             self.assertTrue((current / 'boundaries/admin0.geojson').is_file())
             original = root / 'exports/species.parquet'

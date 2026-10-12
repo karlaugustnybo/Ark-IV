@@ -10,7 +10,9 @@ writer lock are separate from the default dynamic `tiles/current/` publication.
 Static builds never select or replace the managed dynamic startup bundle; a
 standalone static build still requires `data-tiles` before managed startup/load.
 Static archives can be consumed directly through their published PMTiles and
-metadata paths. Both modes can be built first, refreshed, and reused independently.
+metadata paths. A recorded coarse Arrow snapshot is copied into the static
+generation and verified during reuse alongside its archive and metadata. Both
+modes can be built first, refreshed, and reused independently.
 `global-start`
 selects a validated published bundle, or the compatible legacy preview;
 `GLOBAL_SERVING_CONFIG` selects an explicit configuration. `global-db-load` loads
@@ -82,7 +84,10 @@ profile, species metadata and output paths. Eligible passage rows use season 4,
 the selected presence/origin codes, and direct unsimplified resolution-3 any-touch
 coverage. Explicit `iucn_sis_id` metadata maps source IDs to serving IDs; names and
 numeric equality do not establish that relationship. Ambiguous mappings reject
-the build. Prepared inputs record and pin the optional artifact; the loader
+the build. Preparation accepts the optional supplement beside species metadata
+only with its matching producer receipt. A passage Parquet found only in the SQL
+export directory is rejected; an explicit verified supplement takes precedence
+over any export copy. Prepared inputs record and pin that artifact; the loader
 replaces its SQL table transactionally alongside the ordinary exports.
 The passage receipt binds the profile and species mapping observed around intake.
 Their checksums and file identities are checked again before replacing output;

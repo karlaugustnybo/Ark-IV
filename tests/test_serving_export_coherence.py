@@ -2,6 +2,8 @@
 
 import contextlib
 import io
+import json
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,7 +14,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from ark_pipeline.builders.coarse_cache import export_parquet
-from ark_pipeline.cli.serving_tiles import record_prepared
+from ark_pipeline.cli.serving_tiles import build, file_record, read_prepared, record_prepared
 from tests.test_tile_export import prepared_fixture
 
 
@@ -40,6 +42,32 @@ def prepared_exports(root, *, expanded=False, empty=False):
 
 
 class ServingExportCoherenceTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("tippecanoe"), "Tippecanoe required for publication preservation")
+    def test_unbound_passage_export_rejects_record_and_old_report_publication(self):
+        with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):
+            root = Path(temporary)
+            args, recorded, _ = prepared_exports(root)
+            args.static_fine = False
+            report = record_prepared(recorded)
+            accepted = recorded.output.read_bytes()
+            build(args)
+            current = (root / 'tiles/current').resolve()
+            passage = root / 'exports/species_passage_cells_res3.parquet'
+            pq.write_table(pa.table({'gbif_accepted_id': ['1'], 'resolution': [3],
+                'h3_indexes': [[h3.str_to_int(h3.latlng_to_cell(-50, 120, 7))]]}), passage)
+            with self.assertRaisesRegex(ValueError, 'receipt-verified explicit passage'):
+                record_prepared(recorded)
+            self.assertEqual(recorded.output.read_bytes(), accepted)
+            # Reports accepted by the former intake must also fail on consumption.
+            report['exports'][passage.name] = file_record(passage)
+            recorded.output.write_text(json.dumps(report))
+            with self.assertRaisesRegex(ValueError, 'receipt-verified explicit passage'):
+                read_prepared(recorded.output)
+            with self.assertRaisesRegex(ValueError, 'receipt-verified explicit passage'):
+                build(args)
+            self.assertEqual((root / 'tiles/current').resolve(), current)
+            self.assertFalse((current / 'exports' / passage.name).exists())
+
     def test_invalid_inverse_rejects_preparation_without_overwriting_report(self):
         with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):
             root = Path(temporary)

@@ -165,7 +165,7 @@ def prepare_map(args):
             if not required <= exports.keys():
                 raise ValueError("Incomplete PostgreSQL export set")
             for name, record in exports.items():
-                if name == "species_passage_cells_res3.parquet" and "species_passage" in prepared["files"]:
+                if name == "species_passage_cells_res3.parquet":
                     continue  # The receipt-verified explicit supplement is authoritative.
                 pin(Path(record["path"]), generation / "exports" / name)
             if "species_passage" in prepared["files"]:

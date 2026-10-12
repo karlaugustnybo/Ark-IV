@@ -132,6 +132,8 @@ def record_prepared(args: argparse.Namespace) -> dict:
 def validate_exports(report: dict) -> None:
     """Check recorded SQL exports against the build that supplies coarse metrics."""
     exports = report.get("exports", {})
+    if "species_passage_cells_res3.parquet" in exports and "species_passage" not in report["files"]:
+        raise ValueError("Passage exports require a receipt-verified explicit passage supplement beside species metadata")
     if not exports:
         return  # Fixture/legacy preparation can serve maps without a SQL export set.
     required = {"species.parquet", "species_systems.parquet", "cell_species_lists.parquet"}
@@ -360,6 +362,9 @@ def build_locked(args: argparse.Namespace) -> dict:
                 "checkpoint_shards": args.checkpoint_shards}
     generation = args.output_dir / "generations" / identity_digest(identity)
     outputs = ("priorities.pmtiles", "map-metadata.json")
+    snapshot_record = prepared["files"].get("coarse_snapshot")
+    if snapshot_record:
+        outputs += (Path(snapshot_record["path"]).name,)
     current = args.output_dir / "current"
     if current.is_symlink() and reusable(current.resolve(), identity, outputs):
         return {"status": "passed", "reused": True, "current": str(current),
@@ -437,6 +442,8 @@ def build_locked(args: argparse.Namespace) -> dict:
                                template=Path(prepared["files"]["metadata"]["path"]),
                                target=generation / "map-metadata.json", parts=parts,
                                source_parts_dir=Path(prepared["h3_root"]) / "res7_merged_parts")
+        if snapshot_record:
+            shutil.copyfile(verify_record(snapshot_record), generation / Path(snapshot_record["path"]).name)
         report.update(status="passed", reused=False, seconds=time.perf_counter() - started,
                       features=sum(item["features"] for item in report["shards"].values()))
         after = {str(path): (path.stat().st_ino, path.stat().st_size, path.stat().st_mtime_ns) for path in watched}

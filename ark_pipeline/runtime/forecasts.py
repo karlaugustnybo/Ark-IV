@@ -64,7 +64,8 @@ class Forecast:
                               "lists": "duckdb_threads", "coarse_db": "duckdb_threads", "coarse_cache": "duckdb_threads"}.items():
                 if self.base.get(name) is not None:
                     self.base[name] *= prior["resources"][key] / resources[key]
-        if not prior or prior.get("serving_contract") != "dynamic-h3-v1":
+        if (not prior or prior.get("serving_contract") != "dynamic-h3-v1"
+                or (mode == "full" and prior.get("estimate", {}).get("serving_contract") != "dynamic-h3-v1")):
             self.base.pop("tiles", None)
         self.reference_base = self.base.copy()
         self.initial_counts = self.counts.copy()

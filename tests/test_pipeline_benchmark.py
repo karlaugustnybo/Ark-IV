@@ -100,6 +100,36 @@ class BenchmarkModelTests(unittest.TestCase):
         self.assertEqual(result["missing_size_bins"], [1])
         self.assertEqual(result["stages"][1]["estimated_seconds"], 5)
 
+    def test_dynamic_tiles_ignore_fine_counts_and_saved_full_prior_is_coarse_only(self):
+        from ark_pipeline.runtime.forecasts import Forecast
+        from tests.test_pipeline_dashboard import RESOURCES
+
+        pairs = {'pair_rows': 1000, 'write_seconds': 1, 'observations': [
+            {'size_bin': 0, 'kernel_seconds': 1, 'output_pairs': 1000, 'forced_extreme': False}]}
+        population = {'size_bin_counts': [100000]}
+        stages = [{'name': 'tiles', 'wall_seconds': 10, 'serving_contract': 'dynamic-h3-v1'}]
+        projections = []
+        for fine in (1000, 100000):
+            lists = {'res3_cells': 1000, 'res3_relationships': 1000,
+                     'res7_cells': fine, 'res7_relationships': fine}
+            result = estimate(stages, population, pairs, lists)
+            self.assertEqual(result['projected_workload']['res3_cells'], h3.get_num_cells(3))
+            tile = result['stages'][0]
+            self.assertAlmostEqual(tile['estimated_seconds'], 10 * h3.get_num_cells(3) / 1000)
+            projections.append(tile['scenario_seconds'])
+            provisional = estimate([{'name': 'tiles', 'wall_seconds': 10}], population, pairs, lists,
+                                   serving_contract='dynamic-h3-v1')
+            self.assertEqual(provisional['stages'][0], tile)
+            prior = {'serving_contract': 'dynamic-h3-v1', 'estimate': result,
+                     'resources': RESOURCES, 'stages': stages}
+            self.assertEqual(Forecast(prior, RESOURCES, 'full').base['tiles'], tile['estimated_seconds'])
+            # Pre-fix estimates carried only the report tag and must not seed full ETA.
+            old_estimate = {key: value for key, value in result.items() if key != 'serving_contract'}
+            self.assertNotIn('tiles', Forecast({**prior, 'estimate': old_estimate}, RESOURCES, 'full').base)
+            static = estimate([{'name': 'tiles', 'wall_seconds': 10}], population, pairs, lists)
+            self.assertGreater(static['stages'][0]['estimated_seconds'], tile['estimated_seconds'])
+        self.assertEqual(projections[0], projections[1])
+
     def test_census_includes_extremes_and_h3_projection_is_capped(self):
         pairs = self.observations()
         lists = {"res3_cells": 1, "res3_relationships": 3, "res7_cells": 10, "res7_relationships": 100}
@@ -195,6 +225,8 @@ class BenchmarkRunnerTests(unittest.TestCase):
             self.assertEqual(before, snapshot())
             self.assertEqual(report["estimate"]["status"], "planning-estimate")
             self.assertGreater(report["estimate"]["total_seconds"], 0)
+            self.assertEqual(report["estimate"]["serving_contract"], "dynamic-h3-v1")
+            self.assertEqual(report["live_projection"]["serving_contract"], "dynamic-h3-v1")
             self.assertEqual(len(report["stages"]), 11)
             self.assertEqual(report["stages"][:2], interrupted["stages"])
             self.assertTrue(any("Resumed after interruption" in warning for warning in report["warnings"]))

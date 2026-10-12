@@ -436,7 +436,8 @@ def run(args) -> dict:
                     elif dashboard.forecast.base.get(planned["name"]) is not None:
                         projected_stages.append({"name": planned["name"], "wall_seconds": dashboard.forecast.base[planned["name"]]})
                 projection = estimate(projected_stages, json.loads((output / "population.json").read_text()),
-                                      json.loads((output / "pairs-report.json").read_text()), json.loads((output / "lists-report.json").read_text()))
+                                      json.loads((output / "pairs-report.json").read_text()), json.loads((output / "lists-report.json").read_text()),
+                                      serving_contract=config["serving_contract"])
                 if len(projected_stages) == len(stages):
                     dashboard.global_estimate = projection["total_seconds"]
                 report["live_projection"] = projection
@@ -449,7 +450,7 @@ def run(args) -> dict:
         lists = json.loads((output / "lists-report.json").read_text())
         report["workload"] = {"raw_pairs": pairs["pair_rows"], "eligible_polygons": population["eligible_polygons"],
                               **{key: lists[key] for key in ("res3_cells", "res3_relationships", "res7_cells", "res7_relationships")}}
-        report["estimate"] = estimate(report["stages"], population, pairs, lists)
+        report["estimate"] = estimate(report["stages"], population, pairs, lists, serving_contract=config["serving_contract"])
         report["status"] = "passed"
     except (Exception, KeyboardInterrupt) as error:
         report.update(status="interrupted" if isinstance(error, KeyboardInterrupt) else "failed", error=str(error) or "Interrupted")
