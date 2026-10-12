@@ -34,15 +34,20 @@ describe('fineTileIndices', () => {
 
   test('uses renderer bounds for pitched and rotated viewports', () => {
     const flat = fineTileIndices(camera, 9, 9, 0);
-    const pitched = fineTileIndices({
-      ...camera,
-      corners: [
-        { longitude: 175, latitude: 12 },
-        { longitude: 184, latitude: 12 },
-        { longitude: 182, latitude: -5 },
-        { longitude: 177, latitude: -5 }
-      ]
-    }, 9, 9, 0);
+    const pitched = fineTileIndices(
+      {
+        ...camera,
+        corners: [
+          { longitude: 175, latitude: 12 },
+          { longitude: 184, latitude: 12 },
+          { longitude: 182, latitude: -5 },
+          { longitude: 177, latitude: -5 }
+        ]
+      },
+      9,
+      9,
+      0
+    );
     expect(pitched.length).toBeGreaterThan(flat.length);
     expect(pitched.some(({ x }) => x === 0)).toBe(true);
     expect(pitched.some(({ x }) => x === 511)).toBe(true);
@@ -58,14 +63,18 @@ describe('FineTileCoordinator', () => {
       debounceMs: 0,
       onCommit: ({ tileCount }) => commits.push(tileCount)
     });
-    coordinator.schedule({ ...camera, width: 256, height: 256 }, {
-      key: 'test',
-      minZoom: 9,
-      maxZoom: 9,
-      load: (index: FineTileIndex) => new Promise((resolve) => {
-        resolvers.push(() => resolve({ cells: [[`${index.z}-${index.x}-${index.y}`, 1]] }));
-      })
-    });
+    coordinator.schedule(
+      { ...camera, width: 256, height: 256 },
+      {
+        key: 'test',
+        minZoom: 9,
+        maxZoom: 9,
+        load: (index: FineTileIndex) =>
+          new Promise((resolve) => {
+            resolvers.push(() => resolve({ cells: [[`${index.z}-${index.x}-${index.y}`, 1]] }));
+          })
+      }
+    );
     await new Promise((resolve) => setTimeout(resolve, 5));
     expect(resolvers.length).toBeGreaterThan(1);
     resolvers.slice(0, -1).forEach((resolve) => resolve());
@@ -92,10 +101,11 @@ describe('FineTileCoordinator', () => {
       key: 'visible-first',
       minZoom: 9,
       maxZoom: 9,
-      load: (index: FineTileIndex) => new Promise((resolve) => {
-        const key = `${index.z}/${index.x}/${index.y}`;
-        resolvers.set(key, () => resolve({ cells: [[key, 1]] }));
-      })
+      load: (index: FineTileIndex) =>
+        new Promise((resolve) => {
+          const key = `${index.z}/${index.x}/${index.y}`;
+          resolvers.set(key, () => resolve({ cells: [[key, 1]] }));
+        })
     });
     await new Promise((resolve) => setTimeout(resolve, 5));
     for (const index of visible) {
@@ -113,24 +123,28 @@ describe('FineTileCoordinator', () => {
   test('never lets an obsolete guard replace a newer camera generation', async () => {
     const firstCamera = { ...camera, longitude: 10, width: 256, height: 256 };
     const secondCamera = { ...firstCamera, longitude: 40 };
-    const firstVisibleKeys = new Set(fineTileIndices(firstCamera, 9, 9, 0)
-      .map(({ z, x, y }) => `${z}/${x}/${y}`));
-    const firstGuardKeys = new Set(fineTileIndices(firstCamera, 9, 9, 1)
-      .map(({ z, x, y }) => `${z}/${x}/${y}`));
-    const secondGuardKeys = new Set(fineTileIndices(secondCamera, 9, 9, 1)
-      .map(({ z, x, y }) => `${z}/${x}/${y}`));
+    const firstVisibleKeys = new Set(
+      fineTileIndices(firstCamera, 9, 9, 0).map(({ z, x, y }) => `${z}/${x}/${y}`)
+    );
+    const firstGuardKeys = new Set(
+      fineTileIndices(firstCamera, 9, 9, 1).map(({ z, x, y }) => `${z}/${x}/${y}`)
+    );
+    const secondGuardKeys = new Set(
+      fineTileIndices(secondCamera, 9, 9, 1).map(({ z, x, y }) => `${z}/${x}/${y}`)
+    );
     const pending = new Map<string, Array<() => void>>();
     const commits: Array<ReadonlySet<string>> = [];
     const source = {
       key: 'stale-guard',
       minZoom: 9,
       maxZoom: 9,
-      load: (index: FineTileIndex) => new Promise<{ cells: [[string, number]] }>((resolve) => {
-        const key = `${index.z}/${index.x}/${index.y}`;
-        const resolvers = pending.get(key) ?? [];
-        resolvers.push(() => resolve({ cells: [[key, 1]] }));
-        pending.set(key, resolvers);
-      })
+      load: (index: FineTileIndex) =>
+        new Promise<{ cells: [[string, number]] }>((resolve) => {
+          const key = `${index.z}/${index.x}/${index.y}`;
+          const resolvers = pending.get(key) ?? [];
+          resolvers.push(() => resolve({ cells: [[key, 1]] }));
+          pending.set(key, resolvers);
+        })
     };
     const coordinator = new FineTileCoordinator({
       guardTiles: 1,
@@ -146,8 +160,9 @@ describe('FineTileCoordinator', () => {
 
     coordinator.schedule(secondCamera, source);
     await new Promise((resolve) => setTimeout(resolve, 5));
-    const secondVisibleKeys = new Set(fineTileIndices(secondCamera, 9, 9, 0)
-      .map(({ z, x, y }) => `${z}/${x}/${y}`));
+    const secondVisibleKeys = new Set(
+      fineTileIndices(secondCamera, 9, 9, 0).map(({ z, x, y }) => `${z}/${x}/${y}`)
+    );
     for (const key of secondVisibleKeys) pending.get(key)?.forEach((resolve) => resolve());
     await new Promise((resolve) => setTimeout(resolve, 0));
     for (const key of secondGuardKeys) pending.get(key)?.forEach((resolve) => resolve());

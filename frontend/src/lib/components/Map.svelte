@@ -15,11 +15,20 @@
   import { config } from '$lib/config';
   import SpeciesHighlight from '$lib/components/SpeciesHighlight.svelte';
   import {
-    colourPalette, habitatSystem, normalizeColoursBySpecies, resolution, selectedH3,
+    colourPalette,
+    habitatSystem,
+    normalizeColoursBySpecies,
+    resolution,
+    selectedH3,
     selectedH3Resolution
   } from '$lib/stores/map';
   import { colourPaletteLuts, type ColourPaletteId } from '$lib/map/colourPalettes';
-  import { selectedSpecies, speciesHighlight, speciesHighlightGradient, type SelectedSpecies } from '$lib/stores/species';
+  import {
+    selectedSpecies,
+    speciesHighlight,
+    speciesHighlightGradient,
+    type SelectedSpecies
+  } from '$lib/stores/species';
   import { api } from '$lib/api/client';
   import { weights } from '$lib/stores/weights';
   import {
@@ -35,10 +44,7 @@
     type FineTileIndex,
     type FineTileSource
   } from '$lib/map/fineTileCoordinator';
-  import type {
-    MapPerformanceMonitor,
-    MapPerformanceResult
-  } from '$lib/map/mapPerformance';
+  import type { MapPerformanceMonitor, MapPerformanceResult } from '$lib/map/mapPerformance';
   import type { MapPerformanceTraceSummary } from '$lib/map/mapPerformanceTrace';
   import {
     preloadMapBundle,
@@ -49,7 +55,9 @@
   } from '$lib/map/mapBundle';
   import { resolveMapPick } from '$lib/map/mapPicking';
   import {
-    hasActiveSpatialFilters, scoreDomainForItems, selectScoreDomain
+    hasActiveSpatialFilters,
+    scoreDomainForItems,
+    selectScoreDomain
   } from '$lib/map/mapDomains';
   import {
     boundaryCollections,
@@ -60,13 +68,25 @@
   } from '$lib/stores/boundaries';
 
   type MetricValues = {
-    total: number; cr: number; en: number; vu: number; nt: number;
-    dd: number; lc: number; ms: number; mg: number; mf: number; gdd: number;
+    total: number;
+    cr: number;
+    en: number;
+    vu: number;
+    nt: number;
+    dd: number;
+    lc: number;
+    ms: number;
+    mg: number;
+    mf: number;
+    gdd: number;
   };
   const threatWeightKeys = ['cr', 'en', 'vu', 'nt', 'dd', 'lc'] as const;
   const dnaWeightKeys = ['gdd', 'fam', 'gen', 'sp', 'samp'] as const;
   type TileProperties = Record<string, string | number> & {
-    h3_index: string; resolution: number; j?: string; a1?: string;
+    h3_index: string;
+    resolution: number;
+    j?: string;
+    a1?: string;
   };
   type Feature = { properties: TileProperties };
   type MapCamera = { longitude: number; latitude: number; zoom: number };
@@ -118,11 +138,18 @@
   let scoreDomains: Record<string, ScoreDomain> = {};
   let normalizedScoreDomains: Record<string, ScoreDomain> = {};
   let boundaryScoreDomains: Record<string, Record<string, Record<string, ScoreDomain>>> = {};
-  let normalizedBoundaryScoreDomains: Record<string, Record<string, Record<string, ScoreDomain>>> = {};
+  let normalizedBoundaryScoreDomains: Record<
+    string,
+    Record<string, Record<string, ScoreDomain>>
+  > = {};
   let currentBoundaryFilters: Record<string, string[]> = {};
   let currentBoundaryCollections: Record<string, BoundaryCollection> = {};
   let boundaryTileProperties: Record<string, string> = {
-    admin0: 'j', admin1: 'a1', municipality: 'mun', eez: 'eez', conservation_framework: 'eco'
+    admin0: 'j',
+    admin1: 'a1',
+    municipality: 'mun',
+    eez: 'eez',
+    conservation_framework: 'eco'
   };
   let availableResolutions: Array<3 | 7> = [3, 7];
   let resolutionTileRanges: Record<3 | 7, TileZoomRange> = {
@@ -159,7 +186,10 @@
   let mapError = '';
   let basemapReady = false;
   let subscriptions: Array<() => void> = [];
-  const speciesDistributionCache = new Map<string, { resolution: 3 | 7; cells: readonly string[] }>();
+  const speciesDistributionCache = new Map<
+    string,
+    { resolution: 3 | 7; cells: readonly string[] }
+  >();
   let matchingSpeciesCells = new Set<string>();
   let speciesHighlightResolution: 3 | 7 = 3;
   let speciesHighlightReady = false;
@@ -203,7 +233,13 @@
   }
 
   function metricPrefix(system: string): string {
-    return system === 'Terrestrial' ? 't' : system === 'Freshwater' ? 'f' : system === 'Marine' ? 'm' : 'a';
+    return system === 'Terrestrial'
+      ? 't'
+      : system === 'Freshwater'
+        ? 'f'
+        : system === 'Marine'
+          ? 'm'
+          : 'a';
   }
 
   type WeightedMetric = {
@@ -239,7 +275,9 @@
   function boundaryCodes(properties: TileProperties, framework: string): string[] {
     const propertyName = boundaryTileProperties[framework];
     if (!propertyName) return [];
-    return String(properties[propertyName] ?? '').split('|').filter(Boolean);
+    return String(properties[propertyName] ?? '')
+      .split('|')
+      .filter(Boolean);
   }
 
   function boundaryName(framework: string, code: string): string {
@@ -247,9 +285,17 @@
   }
 
   function escapeTooltipText(value: unknown): string {
-    return String(value ?? '').replace(/[&<>"']/g, (character) => ({
-      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
-    })[character] ?? character);
+    return String(value ?? '').replace(
+      /[&<>"']/g,
+      (character) =>
+        ({
+          '&': '&amp;',
+          '<': '&lt;',
+          '>': '&gt;',
+          '"': '&quot;',
+          "'": '&#39;'
+        })[character] ?? character
+    );
   }
 
   function isIncluded(properties: TileProperties): boolean {
@@ -263,19 +309,32 @@
   function metrics(properties: TileProperties): MetricValues {
     const value = (name: string) => Number(properties[`${currentMetricPrefix}_${name}`] ?? 0);
     return {
-      total: value('total'), cr: value('cr'), en: value('en'), vu: value('vu'),
-      nt: value('nt'), dd: value('dd'), lc: value('lc'), ms: value('ms'),
-      mg: value('mg'), mf: value('mf'), gdd: value('gdd')
+      total: value('total'),
+      cr: value('cr'),
+      en: value('en'),
+      vu: value('vu'),
+      nt: value('nt'),
+      dd: value('dd'),
+      lc: value('lc'),
+      ms: value('ms'),
+      mg: value('mg'),
+      mf: value('mf'),
+      gdd: value('gdd')
     };
   }
 
   function compactMetrics(cell: CompactCell): MetricValues {
     return {
-      total: compactMetric(cell, 'total'), cr: compactMetric(cell, 'cr'),
-      en: compactMetric(cell, 'en'), vu: compactMetric(cell, 'vu'),
-      nt: compactMetric(cell, 'nt'), dd: compactMetric(cell, 'dd'),
-      lc: compactMetric(cell, 'lc'), ms: compactMetric(cell, 'ms'),
-      mg: compactMetric(cell, 'mg'), mf: compactMetric(cell, 'mf'),
+      total: compactMetric(cell, 'total'),
+      cr: compactMetric(cell, 'cr'),
+      en: compactMetric(cell, 'en'),
+      vu: compactMetric(cell, 'vu'),
+      nt: compactMetric(cell, 'nt'),
+      dd: compactMetric(cell, 'dd'),
+      lc: compactMetric(cell, 'lc'),
+      ms: compactMetric(cell, 'ms'),
+      mg: compactMetric(cell, 'mg'),
+      mf: compactMetric(cell, 'mf'),
       gdd: compactMetric(cell, 'gdd')
     };
   }
@@ -302,11 +361,16 @@
 
   function coarseMetrics(index: number): MetricValues {
     return {
-      total: coarseMetric(index, 'total'), cr: coarseMetric(index, 'cr'),
-      en: coarseMetric(index, 'en'), vu: coarseMetric(index, 'vu'),
-      nt: coarseMetric(index, 'nt'), dd: coarseMetric(index, 'dd'),
-      lc: coarseMetric(index, 'lc'), ms: coarseMetric(index, 'ms'),
-      mg: coarseMetric(index, 'mg'), mf: coarseMetric(index, 'mf'),
+      total: coarseMetric(index, 'total'),
+      cr: coarseMetric(index, 'cr'),
+      en: coarseMetric(index, 'en'),
+      vu: coarseMetric(index, 'vu'),
+      nt: coarseMetric(index, 'nt'),
+      dd: coarseMetric(index, 'dd'),
+      lc: coarseMetric(index, 'lc'),
+      ms: coarseMetric(index, 'ms'),
+      mg: coarseMetric(index, 'mg'),
+      mf: coarseMetric(index, 'mf'),
       gdd: coarseMetric(index, 'gdd')
     };
   }
@@ -357,8 +421,11 @@
     const h3Index = String(properties.h3_index);
     if (cellResolution === speciesHighlightResolution) return matchingSpeciesCells.has(h3Index);
     if (cellResolution > speciesHighlightResolution) {
-      try { return matchingSpeciesCells.has(cellToParent(h3Index, speciesHighlightResolution)); }
-      catch { return false; }
+      try {
+        return matchingSpeciesCells.has(cellToParent(h3Index, speciesHighlightResolution));
+      } catch {
+        return false;
+      }
     }
     return false;
   }
@@ -367,7 +434,8 @@
     if (!isIncluded(properties)) return [0, 0, 0, 0];
     const value = colourScore(properties);
     recordStaticDomainValue(properties, value);
-    const normalized = domainMax > domainMin ? (value - domainMin) / (domainMax - domainMin) : value > 0 ? 1 : 0;
+    const normalized =
+      domainMax > domainMin ? (value - domainMin) / (domainMax - domainMin) : value > 0 ? 1 : 0;
     const normal = paletteColour(normalized);
     if (!currentSpecies || !speciesHighlightReady) return normal;
     if (!isSpeciesMatch(properties)) return [normal[0], normal[1], normal[2], 14];
@@ -377,13 +445,17 @@
   function isCompactSpeciesMatch(cell: CompactCell): boolean {
     if (!currentSpecies || !speciesHighlightReady) return false;
     if (speciesHighlightResolution === 7) return matchingSpeciesCells.has(cell[0]);
-    try { return matchingSpeciesCells.has(cellToParent(cell[0], speciesHighlightResolution)); }
-    catch { return false; }
+    try {
+      return matchingSpeciesCells.has(cellToParent(cell[0], speciesHighlightResolution));
+    } catch {
+      return false;
+    }
   }
 
   function compactFillColor(cell: CompactCell): [number, number, number, number] {
     const value = compactColourScore(cell);
-    const normalized = domainMax > domainMin ? (value - domainMin) / (domainMax - domainMin) : value > 0 ? 1 : 0;
+    const normalized =
+      domainMax > domainMin ? (value - domainMin) / (domainMax - domainMin) : value > 0 ? 1 : 0;
     const normal = paletteColour(normalized);
     if (!currentSpecies || !speciesHighlightReady) return normal;
     if (!isCompactSpeciesMatch(cell)) return [normal[0], normal[1], normal[2], 14];
@@ -398,7 +470,8 @@
   function coarseFillColor(index: number): [number, number, number, number] {
     if (!coarseIncluded(index)) return [0, 0, 0, 0];
     const value = coarseColourScore(index);
-    const normalized = domainMax > domainMin ? (value - domainMin) / (domainMax - domainMin) : value > 0 ? 1 : 0;
+    const normalized =
+      domainMax > domainMin ? (value - domainMin) / (domainMax - domainMin) : value > 0 ? 1 : 0;
     const normal = paletteColour(normalized);
     if (!currentSpecies || !speciesHighlightReady) return normal;
     if (!coarseSpeciesMatch(index)) return [normal[0], normal[1], normal[2], 14];
@@ -422,14 +495,14 @@
 
   function renderedScoreDomain(): ScoreDomain | undefined {
     if (currentResolution === 3 && coarseSnapshot) {
-      return scoreDomainForItems(
-        coarseSnapshot.indices,
-        coarseColourScore,
-        coarseIncluded
-      );
+      return scoreDomainForItems(coarseSnapshot.indices, coarseColourScore, coarseIncluded);
     }
-    if (currentResolution === 7 && dynamicResolution7 &&
-      hasActiveSpatialFilters(currentBoundaryFilters) && hasFineDisplayCommit()) {
+    if (
+      currentResolution === 7 &&
+      dynamicResolution7 &&
+      hasActiveSpatialFilters(currentBoundaryFilters) &&
+      hasFineDisplayCommit()
+    ) {
       return scoreDomainForItems(fineCells(), compactColourScore);
     }
     return undefined;
@@ -443,8 +516,11 @@
   }
 
   function usesStaticScoreCollection(): boolean {
-    return hasActiveSpatialFilters(currentBoundaryFilters) &&
-      !dynamicResolution7 && !(currentResolution === 3 && coarseSnapshot);
+    return (
+      hasActiveSpatialFilters(currentBoundaryFilters) &&
+      !dynamicResolution7 &&
+      !(currentResolution === 3 && coarseSnapshot)
+    );
   }
 
   function recordStaticDomainValue(properties: TileProperties, value: number) {
@@ -485,17 +561,28 @@
     const match = url.match(/\/(\d+)\/(\d+)\/(\d+)\.mvt$/);
     if (!match) return fetch(url, options);
     const tile = await archive.getZxy(
-      Number(match[1]), Number(match[2]), Number(match[3]), options?.signal ?? undefined
+      Number(match[1]),
+      Number(match[2]),
+      Number(match[3]),
+      options?.signal ?? undefined
     );
     const data = tile ? new Uint8Array(tile.data) : new Uint8Array();
-    const body = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength) as ArrayBuffer;
-    return new Response(body, { status: 200, headers: { 'Content-Type': 'application/vnd.mapbox-vector-tile' } });
+    const body = data.buffer.slice(
+      data.byteOffset,
+      data.byteOffset + data.byteLength
+    ) as ArrayBuffer;
+    return new Response(body, {
+      status: 200,
+      headers: { 'Content-Type': 'application/vnd.mapbox-vector-tile' }
+    });
   }
 
   function priorityLayer(cellResolution: 3 | 7, selected: string | null) {
     const layerName = `res${cellResolution}`;
     const tileRange = resolutionTileRanges[cellResolution];
-    const isCoarseFallback = cellResolution === 3 && currentResolution === 7 &&
+    const isCoarseFallback =
+      cellResolution === 3 &&
+      currentResolution === 7 &&
       (partialResolution7 || !(dynamicResolution7 ? hasCurrentFineCommit() : fineViewportReady));
     const isFinePreload = cellResolution === 7 && currentResolution === 3;
     const visible = cellResolution === currentResolution || isCoarseFallback || isFinePreload;
@@ -508,8 +595,10 @@
       // boundary. It warms z8 parents behind the coarse layer, then swaps in
       // atomically once every visible tile is ready.
       visible,
-      visibleMaxZoom: cellResolution === 3 && !partialResolution7 && !isCoarseFallback
-        ? RESOLUTION_SWITCH_ZOOM + 1 : null,
+      visibleMaxZoom:
+        cellResolution === 3 && !partialResolution7 && !isCoarseFallback
+          ? RESOLUTION_SWITCH_ZOOM + 1
+          : null,
       visibleMinZoom: cellResolution === 7 ? RESOLUTION_PRELOAD_ZOOM : null,
       zoomOffset: cellResolution === 7 ? 1 : 0,
       maxCacheSize: PRIORITY_TILE_CACHE_SIZE,
@@ -517,19 +606,31 @@
       debounceTime: cellResolution === 7 && currentResolution === 7 ? 80 : 0,
       // The polygons are translucent, so fallback parent and child tiles must
       // not overlap while a new zoom level is loading.
-      refinementStrategy: 'no-overlap', binary: true,
+      refinementStrategy: 'no-overlap',
+      binary: true,
       pickable: cellResolution !== 7 || (currentResolution === 7 && fineViewportReady),
       autoHighlight: Object.keys(currentBoundaryFilters).length === 0,
       highlightColor: [255, 255, 255, 50],
-      uniqueIdProperty: 'h3_index', highlightedFeatureId: selected,
+      uniqueIdProperty: 'h3_index',
+      highlightedFeatureId: selected,
       loadOptions: { fetch: pmtilesFetch as any, mvt: { layers: [layerName] } },
-      filled: true, stroked: false, extruded: true,
+      filled: true,
+      stroked: false,
+      extruded: true,
       getElevation: cellResolution === 3 ? COARSE_CELL_ELEVATION : FINE_CELL_ELEVATION,
       getFillColor: (feature: Feature) => fillColor(feature.properties),
       updateTriggers: {
-        getFillColor: [domainMin, domainMax, currentSystem, currentNormalizeBySpecies, currentColourPalette,
-          speciesHighlightRevision, staticDomainGeneration,
-          JSON.stringify(currentWeights), JSON.stringify(currentBoundaryFilters)]
+        getFillColor: [
+          domainMin,
+          domainMax,
+          currentSystem,
+          currentNormalizeBySpecies,
+          currentColourPalette,
+          speciesHighlightRevision,
+          staticDomainGeneration,
+          JSON.stringify(currentWeights),
+          JSON.stringify(currentBoundaryFilters)
+        ]
       },
       onViewportLoad: cellResolution === 7 ? markStaticFineViewportReady : undefined,
       onTileError: cellResolution === 7 ? handleFineTileError : () => {},
@@ -562,7 +663,8 @@
       system,
       jurisdictionQuery,
       key: `${dynamicTileVersion}:${system}:${boundaryEntries
-        .map(([framework, codes]) => `${framework}=${codes.join(',')}`).join('&')}`
+        .map(([framework, codes]) => `${framework}=${codes.join(',')}`)
+        .join('&')}`
     };
   }
 
@@ -597,7 +699,8 @@
       maxZoom: deliveryZoom,
       load: async (index: FineTileIndex) => {
         fineRequestCount += 1;
-        const url = `${config.apiBaseUrl}/api/tiles/res7/${index.z}/${index.x}/${index.y}` +
+        const url =
+          `${config.apiBaseUrl}/api/tiles/res7/${index.z}/${index.x}/${index.y}` +
           `?system=${system}&v=${dynamicTileVersion}${jurisdictionQuery}`;
         const response = await fetch(url);
         if (!response.ok) {
@@ -616,27 +719,35 @@
     const geographicBounds = useProjectedFootprint ? map?.getBounds() : undefined;
     const width = container?.clientWidth ?? 0;
     const height = container?.clientHeight ?? 0;
-    const corners = useProjectedFootprint && map && width > 0 && height > 0
-      ? [[0, 0], [width, 0], [width, height], [0, height]].map(([x, y]) => {
-          const point = map?.unproject([x, y]);
-          return {
-            longitude: point?.lng ?? camera.longitude,
-            latitude: point?.lat ?? camera.latitude
-          };
-        })
-      : undefined;
+    const corners =
+      useProjectedFootprint && map && width > 0 && height > 0
+        ? [
+            [0, 0],
+            [width, 0],
+            [width, height],
+            [0, height]
+          ].map(([x, y]) => {
+            const point = map?.unproject([x, y]);
+            return {
+              longitude: point?.lng ?? camera.longitude,
+              latitude: point?.lat ?? camera.latitude
+            };
+          })
+        : undefined;
     return {
       ...camera,
       width,
       height,
       corners,
       footprintZoom: useProjectedFootprint ? liveZoom : camera.zoom,
-      bounds: geographicBounds ? {
-        west: geographicBounds.getWest(),
-        south: geographicBounds.getSouth(),
-        east: geographicBounds.getEast(),
-        north: geographicBounds.getNorth()
-      } : undefined
+      bounds: geographicBounds
+        ? {
+            west: geographicBounds.getWest(),
+            south: geographicBounds.getSouth(),
+            east: geographicBounds.getEast(),
+            north: geographicBounds.getNorth()
+          }
+        : undefined
     };
   }
 
@@ -698,12 +809,22 @@
       pickable: true,
       autoHighlight: Object.keys(currentBoundaryFilters).length === 0,
       highlightColor: [255, 255, 255, 50],
-      getFillColor: (index) => coarseSnapshot?.h3Indexes[index] === selected
-        ? [255, 255, 255, 110]
-        : coarseFillColor(index),
+      getFillColor: (index) =>
+        coarseSnapshot?.h3Indexes[index] === selected
+          ? [255, 255, 255, 110]
+          : coarseFillColor(index),
       updateTriggers: {
-        getFillColor: [domainMin, domainMax, currentSystem, currentNormalizeBySpecies, currentColourPalette,
-          selected, speciesHighlightRevision, JSON.stringify(currentWeights), JSON.stringify(currentBoundaryFilters)]
+        getFillColor: [
+          domainMin,
+          domainMax,
+          currentSystem,
+          currentNormalizeBySpecies,
+          currentColourPalette,
+          selected,
+          speciesHighlightRevision,
+          JSON.stringify(currentWeights),
+          JSON.stringify(currentBoundaryFilters)
+        ]
       },
       onClick: (info: any) => {
         const picked = resolveMapPick(info, coarseSnapshot?.length ?? 0);
@@ -712,10 +833,7 @@
     });
   }
 
-  function dynamicResolution7Layer(
-    selected: string | null,
-    chunk: FineTileChunk
-  ) {
+  function dynamicResolution7Layer(selected: string | null, chunk: FineTileChunk) {
     return new H3HexagonLayer<CompactCell>({
       id: `priorities-res7-dynamic-${chunk.key.replaceAll('/', '-')}`,
       data: chunk.cells,
@@ -727,12 +845,21 @@
       stroked: false,
       extruded: true,
       getElevation: FINE_CELL_ELEVATION,
-      getFillColor: (cell: CompactCell) => cell[0] === selected
-        ? [255, 255, 255, 110] as [number, number, number, number]
-        : compactFillColor(cell),
+      getFillColor: (cell: CompactCell) =>
+        cell[0] === selected
+          ? ([255, 255, 255, 110] as [number, number, number, number])
+          : compactFillColor(cell),
       updateTriggers: {
-        getFillColor: [domainMin, domainMax, currentSystem, currentNormalizeBySpecies, currentColourPalette,
-          selected, speciesHighlightRevision, JSON.stringify(currentWeights)]
+        getFillColor: [
+          domainMin,
+          domainMax,
+          currentSystem,
+          currentNormalizeBySpecies,
+          currentColourPalette,
+          selected,
+          speciesHighlightRevision,
+          JSON.stringify(currentWeights)
+        ]
       },
       onClick: ({ object }: any) => selectFeature(object),
       getHexagon: (cell) => cell[0],
@@ -742,7 +869,7 @@
       // the dateline. Wrap point instances so cells stored at -179.x are
       // projected into the visible +180.x world copy (and vice versa).
       wrapLongitude: true,
-      coverage: 1,
+      coverage: 1
     });
   }
 
@@ -803,13 +930,17 @@
     const priorities = availableResolutions
       .filter((cellResolution) => cellResolution !== 3 || !coarseSnapshot)
       .filter((cellResolution) => cellResolution === 3 || !dynamicResolution7)
-      .map((cellResolution) => priorityLayer(cellResolution, selectedForResolution(cellResolution)));
+      .map((cellResolution) =>
+        priorityLayer(cellResolution, selectedForResolution(cellResolution))
+      );
     const coarse = coarseResolution3Layer(selectedForResolution(3));
     if (coarse) priorities.unshift(coarse as any);
     if (dynamicResolution7 && availableResolutions.includes(7)) {
-      priorities.push(...committedFineChunks
-        .filter((chunk) => chunk.cells.length > 0)
-        .map((chunk) => dynamicResolution7Layer(selectedForResolution(7), chunk) as any));
+      priorities.push(
+        ...committedFineChunks
+          .filter((chunk) => chunk.cells.length > 0)
+          .map((chunk) => dynamicResolution7Layer(selectedForResolution(7), chunk) as any)
+      );
     }
     return priorities;
   }
@@ -842,7 +973,8 @@
     speciesHighlightReady = true;
     speciesHighlightRevision += 1;
     speciesHighlight.set({
-      status: 'ready', count: distribution.cells.length,
+      status: 'ready',
+      count: distribution.cells.length,
       resolution: distribution.resolution
     });
     refresh();
@@ -888,7 +1020,9 @@
       if (requestId !== speciesRequestId) return;
       if (reason instanceof DOMException && reason.name === 'AbortError') return;
       speciesHighlight.set({
-        status: 'error', count: 0, resolution: 3,
+        status: 'error',
+        count: 0,
+        resolution: 3,
         message: reason instanceof Error ? reason.message : 'Distribution unavailable'
       });
       refresh();
@@ -898,7 +1032,8 @@
   }
 
   function keydown(event: KeyboardEvent) {
-    if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) return;
+    if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement)
+      return;
     if (event.key.toLowerCase() === 'p' && performanceEnabled) {
       event.preventDefault();
       if (performanceTraceActive) return;
@@ -926,11 +1061,16 @@
         }),
         preloadMapBundle()
       ]);
-      await Promise.all(frameworks
-        .filter((framework) => framework.status === 'ready' &&
-          Boolean(framework.catalog_url ?? framework.data_url))
-        .map((framework) => loadBoundaryCollection(framework.id)
-          .catch((reason) => console.error(reason))));
+      await Promise.all(
+        frameworks
+          .filter(
+            (framework) =>
+              framework.status === 'ready' && Boolean(framework.catalog_url ?? framework.data_url)
+          )
+          .map((framework) =>
+            loadBoundaryCollection(framework.id).catch((reason) => console.error(reason))
+          )
+      );
       const metadata: MapMetadata = bundle.metadata;
       coarseSnapshot = bundle.coarseSnapshot;
       staticBasemap = bundle.staticBasemap;
@@ -949,23 +1089,29 @@
       }
       for (const cellResolution of availableResolutions) {
         const range = metadata.resolution_tile_ranges?.[String(cellResolution)];
-        if (range && Number.isFinite(range.min) && Number.isFinite(range.max) && range.max >= range.min) {
+        if (
+          range &&
+          Number.isFinite(range.min) &&
+          Number.isFinite(range.max) &&
+          range.max >= range.min
+        ) {
           resolutionTileRanges[cellResolution] = range;
         }
       }
       if (metadata.tile_layout !== 'wide-v2-joint-priority') {
         throw new Error('Map tiles are out of date; rebuild the map artifacts');
       }
-      if (metadata.boundary_assignment !== 'cell-intersection' && metadata.jurisdiction_assignment !== 'cell-intersection') {
+      if (
+        metadata.boundary_assignment !== 'cell-intersection' &&
+        metadata.jurisdiction_assignment !== 'cell-intersection'
+      ) {
         throw new Error('Map tiles do not contain boundary assignments; rebuild the map artifacts');
       }
-      partialResolution7 = availableResolutions.includes(7) &&
-        !(metadata.complete_resolutions ?? []).includes(7);
+      partialResolution7 =
+        availableResolutions.includes(7) && !(metadata.complete_resolutions ?? []).includes(7);
       dynamicResolution7 = metadata.res7_delivery === 'dynamic-h3-v1';
       dynamicTileVersion = metadata.res7_coverage_version ?? metadata.tile_schema_version ?? 0;
-      currentResolution = availableResolutions.includes(3)
-        ? 3
-        : availableResolutions[0];
+      currentResolution = availableResolutions.includes(3) ? 3 : availableResolutions[0];
       resolution.set(currentResolution);
       useSystemDomain(currentSystem);
       if (disposed) return;
@@ -1029,8 +1175,10 @@
         useDevicePixels: RENDER_PIXEL_RATIO,
         layers: layers(),
         layerFilter: ({ layer, isPicking }) => {
-          if (performanceTraceRequested &&
-            (performanceRenderer === 'basemap-only' || performanceRenderer === 'empty')) {
+          if (
+            performanceTraceRequested &&
+            (performanceRenderer === 'basemap-only' || performanceRenderer === 'empty')
+          ) {
             return false;
           }
           if (isPicking && isInteracting) return false;
@@ -1043,40 +1191,87 @@
           const picked = resolveMapPick(info, coarseSnapshot?.length ?? 0);
           if (!picked) return null;
           const coarseIndex = picked.kind === 'coarse' ? picked.index : null;
-          const object = picked.kind === 'object' ? picked.object as any : null;
-          const compact = Array.isArray(object) ? object as CompactCell : null;
+          const object = picked.kind === 'object' ? (picked.object as any) : null;
+          const compact = Array.isArray(object) ? (object as CompactCell) : null;
           if (coarseIndex !== null && !coarseIncluded(coarseIndex)) return null;
-          if (coarseIndex === null && !compact && (!object.properties || !isIncluded(object.properties))) return null;
-          const values = coarseIndex !== null ? coarseMetrics(coarseIndex)
-            : compact ? compactMetrics(compact) : metrics(object.properties);
-          const objectBoundaryNames = coarseIndex !== null
-            ? Object.keys(boundaryTileProperties).flatMap((framework) =>
-                (coarseSnapshot?.boundaryCodes(framework, coarseIndex) ?? [])
-                  .map((code) => boundaryName(framework, code)))
-            : compact ? [] : Object.keys(boundaryTileProperties).flatMap((framework) =>
-                boundaryCodes(object.properties, framework).map((code) => boundaryName(framework, code))
-              ).filter(Boolean);
+          if (
+            coarseIndex === null &&
+            !compact &&
+            (!object.properties || !isIncluded(object.properties))
+          )
+            return null;
+          const values =
+            coarseIndex !== null
+              ? coarseMetrics(coarseIndex)
+              : compact
+                ? compactMetrics(compact)
+                : metrics(object.properties);
+          const objectBoundaryNames =
+            coarseIndex !== null
+              ? Object.keys(boundaryTileProperties).flatMap((framework) =>
+                  (coarseSnapshot?.boundaryCodes(framework, coarseIndex) ?? []).map((code) =>
+                    boundaryName(framework, code)
+                  )
+                )
+              : compact
+                ? []
+                : Object.keys(boundaryTileProperties)
+                    .flatMap((framework) =>
+                      boundaryCodes(object.properties, framework).map((code) =>
+                        boundaryName(framework, code)
+                      )
+                    )
+                    .filter(Boolean);
           const visibleBoundaryNames = objectBoundaryNames.slice(0, 3).map(escapeTooltipText);
-          const hiddenBoundaryCount = Math.max(0, objectBoundaryNames.length - visibleBoundaryNames.length);
-          const h3Index = escapeTooltipText(coarseIndex !== null
-            ? coarseSnapshot?.h3Indexes[coarseIndex] : compact ? compact[0] : object.properties.h3_index);
-          const displayedScore = coarseIndex !== null ? coarseColourScore(coarseIndex)
-            : compact ? compactColourScore(compact) : colourScore(object.properties);
-          const rawScore = coarseIndex !== null ? coarseScore(coarseIndex)
-            : compact ? compactScore(compact) : score(object.properties);
+          const hiddenBoundaryCount = Math.max(
+            0,
+            objectBoundaryNames.length - visibleBoundaryNames.length
+          );
+          const h3Index = escapeTooltipText(
+            coarseIndex !== null
+              ? coarseSnapshot?.h3Indexes[coarseIndex]
+              : compact
+                ? compact[0]
+                : object.properties.h3_index
+          );
+          const displayedScore =
+            coarseIndex !== null
+              ? coarseColourScore(coarseIndex)
+              : compact
+                ? compactColourScore(compact)
+                : colourScore(object.properties);
+          const rawScore =
+            coarseIndex !== null
+              ? coarseScore(coarseIndex)
+              : compact
+                ? compactScore(compact)
+                : score(object.properties);
           return {
-            html: `<div style="display:flex;align-items:baseline;justify-content:space-between;gap:.65rem;">` +
+            html:
+              `<div style="display:flex;align-items:baseline;justify-content:space-between;gap:.65rem;">` +
               `<strong style="color:var(--color-black);font-size:.72rem;">${currentNormalizeBySpecies ? 'Score per species' : 'Score'} ${displayedScore.toFixed(2)}</strong>` +
               `<code style="color:var(--color-gray-500);font-size:.56rem;">${h3Index}</code></div>` +
-              (visibleBoundaryNames.length ? `<div style="margin-top:.2rem;color:var(--color-gray-600);font-size:.6rem;line-height:.82rem;">${visibleBoundaryNames.join(' · ')}${hiddenBoundaryCount ? ` · +${hiddenBoundaryCount}` : ''}</div>` : '') +
+              (visibleBoundaryNames.length
+                ? `<div style="margin-top:.2rem;color:var(--color-gray-600);font-size:.6rem;line-height:.82rem;">${visibleBoundaryNames.join(' · ')}${hiddenBoundaryCount ? ` · +${hiddenBoundaryCount}` : ''}</div>`
+                : '') +
               `<div style="margin-top:.32rem;padding-top:.28rem;border-top:1px solid rgba(100,100,100,.16);color:var(--color-gray-600);font-size:.61rem;line-height:.88rem;">` +
               `<span style="color:var(--color-gray-500);">Threat</span> · CR ${values.cr} · EN ${values.en} · VU ${values.vu} · NT ${values.nt} · DD ${values.dd} · LC ${values.lc}<br>` +
               `<span style="color:var(--color-gray-500);">DNA gaps</span> · GoaT deficient ${values.gdd} · species ${values.ms} · genus ${values.mg} · family ${values.mf}` +
-              (currentNormalizeBySpecies ? `<br><span style="color:var(--color-gray-500);">Raw score</span> · ${rawScore.toFixed(2)} · ${values.total} species` : '') + `</div>`,
+              (currentNormalizeBySpecies
+                ? `<br><span style="color:var(--color-gray-500);">Raw score</span> · ${rawScore.toFixed(2)} · ${values.total} species`
+                : '') +
+              `</div>`,
             style: {
-              minWidth: '176px', maxWidth: '240px', fontFamily: 'var(--font-sans)', backgroundColor: 'rgba(252,251,247,.97)',
-              color: 'var(--color-black)', padding: '.48rem .62rem', borderRadius: 'var(--border-radius-base)',
-              fontSize: '.68rem', lineHeight: '1rem', boxShadow: 'var(--box-shadow-sm)',
+              minWidth: '176px',
+              maxWidth: '240px',
+              fontFamily: 'var(--font-sans)',
+              backgroundColor: 'rgba(252,251,247,.97)',
+              color: 'var(--color-black)',
+              padding: '.48rem .62rem',
+              borderRadius: 'var(--border-radius-base)',
+              fontSize: '.68rem',
+              lineHeight: '1rem',
+              boxShadow: 'var(--box-shadow-sm)',
               border: '1px solid var(--color-tinted-cream)'
             }
           };
@@ -1096,26 +1291,36 @@
         }
       };
       requestAnimationFrame(ensureOverlayNonInteractive);
-      map.addControl(new FullscreenControl({
-        container: fsWrap
-      }), 'top-right');
-      map.addControl(new NavigationControl({
-        showCompass: true,
-        showZoom: true,
-        visualizePitch: true
-      }), 'top-right');
+      map.addControl(
+        new FullscreenControl({
+          container: fsWrap
+        }),
+        'top-right'
+      );
+      map.addControl(
+        new NavigationControl({
+          showCompass: true,
+          showZoom: true,
+          visualizePitch: true
+        }),
+        'top-right'
+      );
 
       const performanceParameters = new URLSearchParams(window.location.search);
       performanceEnabled = performanceParameters.get('mapPerf') === '1';
-      performanceTraceRequested = performanceEnabled &&
-        performanceParameters.get('mapPerfTrace') === '1';
+      performanceTraceRequested =
+        performanceEnabled && performanceParameters.get('mapPerfTrace') === '1';
       const requestedRenderer = performanceParameters.get('mapPerfRenderer');
-      performanceRenderer = requestedRenderer === 'basemap-only' ||
-        requestedRenderer === 'cells-only' || requestedRenderer === 'empty'
-        ? requestedRenderer
-        : 'full';
-      if (performanceTraceRequested &&
-        (performanceRenderer === 'cells-only' || performanceRenderer === 'empty')) {
+      performanceRenderer =
+        requestedRenderer === 'basemap-only' ||
+        requestedRenderer === 'cells-only' ||
+        requestedRenderer === 'empty'
+          ? requestedRenderer
+          : 'full';
+      if (
+        performanceTraceRequested &&
+        (performanceRenderer === 'cells-only' || performanceRenderer === 'empty')
+      ) {
         const hideBasemapLayers = () => {
           for (const layer of map?.getStyle().layers ?? []) {
             if (map?.getLayer(layer.id)) map.setLayoutProperty(layer.id, 'visibility', 'none');
@@ -1129,9 +1334,8 @@
         ? Math.min(10, Math.max(1, Math.floor(requestedTraceRuns)))
         : 3;
       if (performanceEnabled) {
-        const { MapPerformanceMonitor: MapPerformanceMonitorClass } = await import(
-          '$lib/map/mapPerformance'
-        );
+        const { MapPerformanceMonitor: MapPerformanceMonitorClass } =
+          await import('$lib/map/mapPerformance');
         performanceStatus = 'idle';
         performanceMonitor = new MapPerformanceMonitorClass({
           sample: () => ({
@@ -1167,8 +1371,12 @@
           currentCamera = liveCamera;
         }
         const next = resolutionForZoom(liveZoom);
-        if (dynamicResolution7 && currentResolution === 3 && next === 3 &&
-          liveZoom >= RESOLUTION_PRELOAD_ZOOM) {
+        if (
+          dynamicResolution7 &&
+          currentResolution === 3 &&
+          next === 3 &&
+          liveZoom >= RESOLUTION_PRELOAD_ZOOM
+        ) {
           // Warm the viewport the camera will occupy at the first fine zoom,
           // not the much larger current coarse footprint. The result is a
           // small, reusable generation that normally exists before crossing.
@@ -1186,11 +1394,15 @@
         // replaces the previous generation when the visible tiles are ready.
         if (dynamicResolution7 && next === 7) {
           const now = performance.now();
-          if (scheduleSettledViewport || now - lastFineActiveScheduleAt >= FINE_ACTIVE_INTERVAL_MS) {
+          if (
+            scheduleSettledViewport ||
+            now - lastFineActiveScheduleAt >= FINE_ACTIVE_INTERVAL_MS
+          ) {
             lastFineActiveScheduleAt = now;
-            const fineCamera = liveZoom < INITIAL_FINE_ZOOM
-              ? { ...liveCamera, zoom: INITIAL_FINE_ZOOM }
-              : liveCamera;
+            const fineCamera =
+              liveZoom < INITIAL_FINE_ZOOM
+                ? { ...liveCamera, zoom: INITIAL_FINE_ZOOM }
+                : liveCamera;
             scheduleFineTiles(fineCamera, liveZoom >= INITIAL_FINE_ZOOM);
           }
         }
@@ -1230,9 +1442,7 @@
         performanceTraceError = '';
         performanceTraceResult = null;
         try {
-          const { runZoom10MapPerformanceTrace } = await import(
-            '$lib/map/mapPerformanceTrace'
-          );
+          const { runZoom10MapPerformanceTrace } = await import('$lib/map/mapPerformanceTrace');
           if (disposed || !map || !performanceMonitor) return;
           if (!dynamicResolution7) {
             throw new Error('The zoom-10 performance trace requires dynamic res7 delivery');
@@ -1241,8 +1451,8 @@
             map,
             monitor: performanceMonitor,
             runCount: performanceTraceRunCount,
-            isFineGuardReady: () => fineCoverageReady &&
-              !fineTilesLoading && committedFineTileCount > 0,
+            isFineGuardReady: () =>
+              fineCoverageReady && !fineTilesLoading && committedFineTileCount > 0,
             isDisposed: () => disposed,
             onRunStart: (runNumber) => {
               performanceTraceCurrentRun = runNumber;
@@ -1261,9 +1471,8 @@
         } catch (reason) {
           if (!disposed) {
             performanceTraceStatus = 'error';
-            performanceTraceError = reason instanceof Error
-              ? reason.message
-              : 'Unable to run the map performance trace';
+            performanceTraceError =
+              reason instanceof Error ? reason.message : 'Unable to run the map performance trace';
           }
         } finally {
           performanceTraceActive = false;
@@ -1335,10 +1544,17 @@
         }),
         boundaryCollections.subscribe((collections) => {
           currentBoundaryCollections = collections;
-          boundaryNames = Object.fromEntries(Object.entries(collections).map(([framework, collection]) => [
-            framework,
-            new Map(collection.features.map((feature) => [feature.properties.code, feature.properties.name]))
-          ]));
+          boundaryNames = Object.fromEntries(
+            Object.entries(collections).map(([framework, collection]) => [
+              framework,
+              new Map(
+                collection.features.map((feature) => [
+                  feature.properties.code,
+                  feature.properties.name
+                ])
+              )
+            ])
+          );
         }),
         selectedSpecies.subscribe((species) => {
           currentSpecies = species;
@@ -1383,60 +1599,63 @@
 <svelte:window on:keydown={keydown} />
 
 <div class="fs-wrap" bind:this={fsWrap}>
-<div id="map" class="map-shell">
-  <div
-    class="map-canvas"
-    bind:this={container}
-    aria-label="Interactive H3 conservation priority map"
-    data-resolution={currentResolution}
-    data-fine-ready={fineViewportReady}
-    data-fine-coverage-ready={fineCoverageReady}
-    data-fine-loading={fineTilesLoading}
-    data-fine-cells={committedFineCellCount}
-    data-fine-tiles={committedFineTileCount}
-    data-coarse-ready={Boolean(coarseSnapshot)}
-    data-basemap-ready={basemapReady}
-    data-longitude={currentCamera.longitude.toFixed(3)}
-    data-latitude={currentCamera.latitude.toFixed(3)}
-    data-zoom={currentCamera.zoom.toFixed(2)}
-    data-pitch={currentPitch.toFixed(1)}
-    data-cells-extruded="true"
-    data-basemap-pixel-ratio={basemapPixelRatio}
-    data-cell-pixel-ratio={cellPixelRatio}
-    data-domain-min={domainMin}
-    data-domain-max={domainMax}
-    data-basemap-retina-tiles={basemapTileUrl.includes('@2x')}
-    data-perf-enabled={performanceEnabled}
-    data-perf-status={performanceStatus}
-    data-perf-mode={performanceMode}
-    data-perf-result={performanceResult ? JSON.stringify(performanceResult) : ''}
-    data-perf-frame-count={performanceResult?.frameCount ?? ''}
-    data-perf-p95-frame-ms={performanceResult?.p95FrameMs ?? ''}
-    data-perf-worst-frame-ms={performanceResult?.worstFrameMs ?? ''}
-    data-perf-over-budget-frames={performanceResult?.overBudgetFrameCount ?? ''}
-    data-perf-long-frames={performanceResult?.longFrameCount ?? ''}
-    data-perf-long-tasks={performanceResult?.longTaskCount ?? ''}
-    data-perf-uncovered-frames={performanceResult?.uncoveredFrameCount ?? ''}
-    data-perf-resolution-flashes={performanceResult?.resolutionFlashFrameCount ?? ''}
-    data-perf-res7-requests={performanceResult?.res7RequestCount ?? ''}
-    data-perf-trace-requested={performanceTraceRequested}
-    data-perf-trace-status={performanceTraceStatus}
-    data-perf-trace-run-count={performanceTraceRunCount}
-    data-perf-renderer={performanceRenderer}
-    data-perf-trace-current-run={performanceTraceCurrentRun || ''}
-    data-perf-trace-result={performanceTraceResult ? JSON.stringify(performanceTraceResult) : ''}
-    data-perf-trace-first-p95={performanceTraceResult?.firstPathRun.p95FrameMs ?? ''}
-    data-perf-trace-repeat-median-p95={performanceTraceResult?.repeatRuns?.medianP95FrameMs ?? ''}
-    data-perf-trace-baseline-frame-ms={performanceTraceResult?.environment.baselineFrameMs ?? ''}
-    data-perf-trace-supports-60fps={performanceTraceResult?.environment.supports60FpsBudget ?? ''}
-    data-perf-trace-error={performanceTraceError}
-  ></div>
-  {#if !basemapReady}<div class="map-reveal-cover" aria-hidden="true"></div>{/if}
-  <SpeciesHighlight />
-  <aside class="map-attribution" aria-label="Basemap attribution">
-    <a href="https://carto.com/attributions" target="_blank" rel="noopener noreferrer">CARTO</a>
-    · <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap</a>
-  </aside>
-  {#if mapError}<p class="error-message">{mapError}</p>{/if}
-</div>
+  <div id="map" class="map-shell">
+    <div
+      class="map-canvas"
+      bind:this={container}
+      aria-label="Interactive H3 conservation priority map"
+      data-resolution={currentResolution}
+      data-fine-ready={fineViewportReady}
+      data-fine-coverage-ready={fineCoverageReady}
+      data-fine-loading={fineTilesLoading}
+      data-fine-cells={committedFineCellCount}
+      data-fine-tiles={committedFineTileCount}
+      data-coarse-ready={Boolean(coarseSnapshot)}
+      data-basemap-ready={basemapReady}
+      data-longitude={currentCamera.longitude.toFixed(3)}
+      data-latitude={currentCamera.latitude.toFixed(3)}
+      data-zoom={currentCamera.zoom.toFixed(2)}
+      data-pitch={currentPitch.toFixed(1)}
+      data-cells-extruded="true"
+      data-basemap-pixel-ratio={basemapPixelRatio}
+      data-cell-pixel-ratio={cellPixelRatio}
+      data-domain-min={domainMin}
+      data-domain-max={domainMax}
+      data-basemap-retina-tiles={basemapTileUrl.includes('@2x')}
+      data-perf-enabled={performanceEnabled}
+      data-perf-status={performanceStatus}
+      data-perf-mode={performanceMode}
+      data-perf-result={performanceResult ? JSON.stringify(performanceResult) : ''}
+      data-perf-frame-count={performanceResult?.frameCount ?? ''}
+      data-perf-p95-frame-ms={performanceResult?.p95FrameMs ?? ''}
+      data-perf-worst-frame-ms={performanceResult?.worstFrameMs ?? ''}
+      data-perf-over-budget-frames={performanceResult?.overBudgetFrameCount ?? ''}
+      data-perf-long-frames={performanceResult?.longFrameCount ?? ''}
+      data-perf-long-tasks={performanceResult?.longTaskCount ?? ''}
+      data-perf-uncovered-frames={performanceResult?.uncoveredFrameCount ?? ''}
+      data-perf-resolution-flashes={performanceResult?.resolutionFlashFrameCount ?? ''}
+      data-perf-res7-requests={performanceResult?.res7RequestCount ?? ''}
+      data-perf-trace-requested={performanceTraceRequested}
+      data-perf-trace-status={performanceTraceStatus}
+      data-perf-trace-run-count={performanceTraceRunCount}
+      data-perf-renderer={performanceRenderer}
+      data-perf-trace-current-run={performanceTraceCurrentRun || ''}
+      data-perf-trace-result={performanceTraceResult ? JSON.stringify(performanceTraceResult) : ''}
+      data-perf-trace-first-p95={performanceTraceResult?.firstPathRun.p95FrameMs ?? ''}
+      data-perf-trace-repeat-median-p95={performanceTraceResult?.repeatRuns?.medianP95FrameMs ?? ''}
+      data-perf-trace-baseline-frame-ms={performanceTraceResult?.environment.baselineFrameMs ?? ''}
+      data-perf-trace-supports-60fps={performanceTraceResult?.environment.supports60FpsBudget ?? ''}
+      data-perf-trace-error={performanceTraceError}
+    ></div>
+    {#if !basemapReady}<div class="map-reveal-cover" aria-hidden="true"></div>{/if}
+    <SpeciesHighlight />
+    <aside class="map-attribution" aria-label="Basemap attribution">
+      <a href="https://carto.com/attributions" target="_blank" rel="noopener noreferrer">CARTO</a>
+      ·
+      <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer"
+        >OpenStreetMap</a
+      >
+    </aside>
+    {#if mapError}<p class="error-message">{mapError}</p>{/if}
+  </div>
 </div>

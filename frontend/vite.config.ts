@@ -8,6 +8,8 @@ export default defineConfig(({ mode }) => {
   if (!target) throw new Error('BACKEND_PROXY_TARGET must be set in frontend/.env');
   return {
     plugins: [tailwindcss(), sveltekit()],
+    // Vite 8 uses Oxc transforms and Rolldown (Oxc parser/resolver).
+    build: { minify: 'oxc' },
     // MapLibre owns its worker bundle. Letting Vite prebundle the worker as a
     // normal dependency produced stale `.vite/deps/maplibre-gl-worker.mjs`
     // references after hot updates.

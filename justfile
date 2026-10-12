@@ -133,14 +133,21 @@ dev: start
 test:
     uv run python -m unittest discover -s tests -v
 
-# Lint Python source and tests.
+# Lint Python and JavaScript/TypeScript source and tests.
 [group('03 - Validation')]
 lint:
     uv run ruff check .
+    cd frontend && bun run lint
+
+# Format frontend source and the JavaScript pipeline helper with Oxfmt.
+[group('03 - Validation')]
+frontend-format:
+    cd frontend && bun run format
 
 # Type-check, test, and build the frontend.
 [group('03 - Validation')]
 frontend-check:
+    cd frontend && bun run format:check
     cd frontend && bun run check
     cd frontend && bun test
     cd frontend && bun run build

@@ -40,6 +40,14 @@ jobs:
       - name: Configure data-free frontend checks
         run: cp frontend/.env.example frontend/.env
 
+      - name: Lint JavaScript and TypeScript with Oxlint
+        working-directory: frontend
+        run: bun run lint
+
+      - name: Check formatting with Oxfmt
+        working-directory: frontend
+        run: bun run format:check
+
       - name: Check frontend types and Svelte
         working-directory: frontend
         run: bun run check
