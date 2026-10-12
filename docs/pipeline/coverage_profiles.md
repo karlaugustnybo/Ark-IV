@@ -42,6 +42,19 @@ without this input require preparation again; old species metadata schemas can
 still omit optional identity/evidence columns. A same-count species substitution
 requires rebuilding the coarse preparation even with fresh fine receipts and
 unchanged species dimensions, and even when SQL exports are absent.
+Raw coarse membership is also reconciled bidirectionally with the distinct
+resolution-3 parent/species relation of the selected fine lists, before the
+shared source-to-serving mapping. This explicitly validates legacy/manual packs
+without assuming that matching paths or base-cell sets prove a common generation.
+It scans fine membership in DuckDB at recording and each prepared-report read,
+including reuse; no global relationship table is materialized in Python.
+A selected Arrow snapshot must have the producer descriptor/columns and the same
+cell IDs and scored metric values as the validated coarse build. Its batches are
+streamed through the producer's shared projection at recording and consumption;
+content addressing alone does not establish that agreement. Snapshot absence
+remains supported. Failed intake preserves the accepted preparation, and failed
+consumption does not select a new dynamic or static publication. These checks do
+not independently attest snapshot boundary memberships or colour domains.
 
 ## Whole-map selection
 

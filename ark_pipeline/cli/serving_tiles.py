@@ -16,9 +16,21 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import duckdb
+import pyarrow as pa
+import pyarrow.ipc as ipc
 import pyarrow.parquet as pq
 
-from ark_pipeline.builders.coarse_cache import sql_path, wide_aggregate_query
+from ark_pipeline.aggregation.pairs import RES3_PARENT_SQL
+from ark_pipeline.builders.coarse_cache import (
+    BOUNDARY_TILE_PROPERTIES,
+    COARSE_SNAPSHOT_SCHEMA_VERSION,
+    METRIC_TILE_NAMES,
+    SYSTEM_TILE_PREFIXES,
+    SYSTEMS,
+    coarse_snapshot_query,
+    sql_path,
+    wide_aggregate_query,
+)
 from ark_pipeline.builders.fine_metrics import (
     aggregate_input_identity,
     aggregate_receipt_matches,
@@ -140,6 +152,8 @@ def validate_exports(report: dict) -> None:
     if exports and not required <= exports.keys():
         raise ValueError("Incomplete PostgreSQL export set")
     with duckdb.connect(report["files"]["build_duckdb"]["path"], read_only=True) as connection:
+        configure_duckdb(connection)
+        validate_fine_membership(connection, report)
         # Source/build producers copy the supplied species dimension verbatim.
         # Compare all supplied fields, including optional identity/evidence fields;
         # an older schema can omit them, but supplied values must not be stale.
@@ -164,6 +178,7 @@ def validate_exports(report: dict) -> None:
             """, [report["files"][name]["path"]]).fetchone()[0]
             if mismatch:
                 raise ValueError(f"Consumed {name} metadata does not match prepared build")
+        validate_coarse_snapshot(connection, report)
         if not exports:
             return  # Maps without SQL still require matching coarse/fine metadata.
         queries = {
@@ -202,6 +217,70 @@ def validate_exports(report: dict) -> None:
             """, [path]).fetchone()[0]
             if mismatch:
                 raise ValueError(f"PostgreSQL export does not match prepared build: {name}")
+
+
+def validate_fine_membership(connection: duckdb.DuckDBPyConnection, report: dict) -> None:
+    """Reconcile raw source IDs before the shared explicit serving-ID mapping.
+
+    Legacy/manual packs have no trustworthy common producer receipt. Reduce
+    the fine lists natively to the distinct parent/species relation instead;
+    DuckDB's configured memory and spill govern the scan, not Python lists.
+    """
+    sources = [records["source"]["path"] for records in report["parts"].values()]
+    mismatch = connection.execute(f"""
+        WITH fine AS (
+            SELECT h3_cell AS h3_index, unnest(species_ids) AS species_id
+            FROM read_parquet(?)
+        ), expected AS MATERIALIZED (SELECT DISTINCT {RES3_PARENT_SQL} AS h3_cell, species_id FROM fine),
+        actual AS MATERIALIZED (SELECT DISTINCT h3_cell, unnest(species_ids) AS species_id FROM read_parquet(?))
+        SELECT count(*) FROM ((SELECT * FROM expected EXCEPT SELECT * FROM actual)
+        UNION ALL (SELECT * FROM actual EXCEPT SELECT * FROM expected))
+    """, [sources, report["files"]["coarse_source"]["path"]]).fetchone()[0]
+    if mismatch:
+        raise ValueError("Coarse source does not match fine parent membership; rerun just data-prepare")
+
+
+def validate_coarse_snapshot(connection: duckdb.DuckDBPyConnection, report: dict) -> None:
+    """Stream a selected Arrow snapshot against its current producer projection."""
+    files = report["files"]
+    descriptor = json.loads(Path(files["metadata"]["path"]).read_text()).get("coarse_snapshot")
+    if not descriptor:
+        if "coarse_snapshot" in files:
+            raise ValueError("Prepared coarse snapshot is absent from its metadata template")
+        return
+    expected_descriptor = {
+        "format": "arrow-ipc-v1", "schema_version": COARSE_SNAPSHOT_SCHEMA_VERSION,
+        "resolution": 3, "systems": [SYSTEM_TILE_PREFIXES[system] for system in SYSTEMS],
+        "metrics": list(METRIC_TILE_NAMES.values()), "boundary_columns": list(BOUNDARY_TILE_PROPERTIES),
+    }
+    if any(descriptor.get(key) != value for key, value in expected_descriptor.items()):
+        raise ValueError("Invalid coarse snapshot descriptor; rerun just data-prepare")
+    path = Path(files["metadata"]["path"]).parent / Path(descriptor["url"]).name
+    if "coarse_snapshot" not in files or path.resolve() != Path(files["coarse_snapshot"]["path"]):
+        raise ValueError("Coarse snapshot does not match its recorded metadata dependency")
+    query = coarse_snapshot_query()
+    columns = [column[0] for column in connection.execute(f"DESCRIBE ({query})").fetchall()]
+    with ipc.open_file(path) as reader:
+        if not set(columns + list(BOUNDARY_TILE_PROPERTIES)) <= set(reader.schema.names):
+            raise ValueError("Invalid coarse snapshot columns; rerun just data-prepare")
+        batches = pa.RecordBatchReader.from_batches(reader.schema,
+            (reader.get_batch(index) for index in range(reader.num_record_batches)))
+        connection.register("prepared_snapshot", batches)
+        try:
+            projection = ", ".join('"' + name + '"' for name in columns)
+            mismatch, cells = connection.execute(f"""
+                WITH expected AS ({query}),
+                actual AS MATERIALIZED (SELECT {projection} FROM prepared_snapshot)
+                SELECT (SELECT count(*) FROM (
+                    (SELECT * FROM expected EXCEPT ALL SELECT * FROM actual)
+                    UNION ALL (SELECT * FROM actual EXCEPT ALL SELECT * FROM expected))),
+                    (SELECT count(*) FROM actual)
+            """).fetchone()
+        finally:
+            connection.unregister("prepared_snapshot")
+            batches.close()
+    if mismatch or descriptor.get("cells") != cells:
+        raise ValueError("Coarse snapshot does not match prepared build; rerun just data-prepare")
 
 
 def validate_coarse_membership(report: dict) -> None:

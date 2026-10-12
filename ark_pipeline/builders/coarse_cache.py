@@ -643,6 +643,27 @@ def export_map_metadata(
     print(f"Exported {target}")
 
 
+def coarse_snapshot_query() -> str:
+    """Project the cell IDs and typed metrics shared by Arrow export and validation."""
+    projections = ["s0.h3_index AS h3_index"]
+    aliases = [f"s{index}" for index in range(len(SYSTEMS))]
+    for alias, system in zip(aliases, SYSTEMS, strict=True):
+        prefix = SYSTEM_TILE_PREFIXES[system]
+        projections.extend(
+            f"coalesce({alias}.{metric}, 0)::USMALLINT AS "
+            f'"{prefix}_{METRIC_TILE_NAMES[metric]}"'
+            for metric in METRICS
+        )
+    joins = " ".join(
+        f"LEFT JOIN h3_res3_agg_{system} {alias} USING (h3_index)"
+        for system, alias in zip(SYSTEMS[1:], aliases[1:], strict=True)
+    )
+    return (
+        f"SELECT {', '.join(projections)} FROM h3_res3_agg_all s0 "
+        f"{joins} ORDER BY h3_index"
+    )
+
+
 def export_coarse_snapshot(
     connection: duckdb.DuckDBPyConnection,
     tile_dir: Path,
@@ -655,22 +676,7 @@ def export_coarse_snapshot(
     the homepage and lets the map render resolution 3 without any tile swaps.
     """
     prefixes = tuple(SYSTEM_TILE_PREFIXES[system] for system in SYSTEMS)
-    projections = ["s0.h3_index AS h3_index"]
-    aliases = [f"s{index}" for index in range(len(SYSTEMS))]
-    for alias, prefix in zip(aliases, prefixes, strict=True):
-        projections.extend(
-            f"coalesce({alias}.{metric}, 0)::USMALLINT AS "
-            f'"{prefix}_{METRIC_TILE_NAMES[metric]}"'
-            for metric in METRICS
-        )
-    joins = " ".join(
-        f"LEFT JOIN h3_res3_agg_{system} {alias} USING (h3_index)"
-        for system, alias in zip(SYSTEMS[1:], aliases[1:], strict=True)
-    )
-    reader = connection.execute(
-        f"SELECT {', '.join(projections)} FROM h3_res3_agg_all s0 "
-        f"{joins} ORDER BY h3_index"
-    ).to_arrow_reader(batch_size=TILE_FEATURE_BATCH_SIZE)
+    reader = connection.execute(coarse_snapshot_query()).to_arrow_reader(batch_size=TILE_FEATURE_BATCH_SIZE)
     table = reader.read_all()
     h3_indexes = table.column("h3_index").to_pylist()
     boundary_indexes = normalize_boundary_indexes(jurisdiction_index)

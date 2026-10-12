@@ -11,6 +11,7 @@ from unittest.mock import patch
 import duckdb
 import h3
 
+from ark_pipeline.builders.coarse_cache import export_coarse_snapshot
 from ark_pipeline.cli.map_serving import validate_config
 from ark_pipeline.cli.serving_tiles import build, record_prepared
 from backend.res7_tiles import METRICS, render_tile
@@ -71,12 +72,13 @@ class MapServingTests(unittest.TestCase):
             with self.subTest(snapshot=has_snapshot), tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()):
                 root = Path(tmp)
                 args, recorded, _ = prepared_fixture(root)
-                name = 'res3-priorities-0123456789abcdef.arrow'
-                snapshot = recorded.metadata_template.parent / name
                 if has_snapshot:
-                    snapshot.write_bytes(b'synthetic dependency bytes')
+                    with duckdb.connect(str(recorded.build_duckdb), read_only=True) as connection:
+                        descriptor = export_coarse_snapshot(connection, recorded.metadata_template.parent)
+                    name = Path(descriptor['url']).name
+                    snapshot = recorded.metadata_template.parent / name
                     metadata = json.loads(recorded.metadata_template.read_text())
-                    metadata['coarse_snapshot'] = {'url': '/tiles/' + name}
+                    metadata['coarse_snapshot'] = descriptor
                     recorded.metadata_template.write_text(json.dumps(metadata))
                     record_prepared(recorded)
                 args.static_fine = False

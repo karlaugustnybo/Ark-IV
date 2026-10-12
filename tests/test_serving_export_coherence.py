@@ -8,13 +8,21 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import duckdb
 import h3
 import pyarrow as pa
+import pyarrow.ipc as ipc
 import pyarrow.parquet as pq
 
-from ark_pipeline.builders.coarse_cache import export_parquet
+from ark_pipeline.aggregation.metrics import aggregate_species_lists
+from ark_pipeline.builders.coarse_cache import (
+    METRICS,
+    SYSTEMS,
+    export_coarse_snapshot,
+    export_parquet,
+)
 from ark_pipeline.builders.fine_metrics import (
     aggregate_part,
     prepare_species,
@@ -26,6 +34,8 @@ from ark_pipeline.cli.serving_tiles import (
     read_prepared,
     record_prepared,
     validate_coarse_membership,
+    validate_exports,
+    validate_fine_membership,
 )
 from tests.test_tile_export import prepared_fixture
 
@@ -49,6 +59,9 @@ def prepared_exports(root, *, expanded=False, empty=False):
             pq.write_table(pa.Table.from_pylist([{**row, 'species_ids': []} for row in original.to_pylist()],
                 schema=original.schema), coarse_source)
             connection.execute('UPDATE h3_res3_agg_all SET total_species=0')
+            for path in (recorded.h3_root / 'res7_merged_parts').glob('*.parquet'):
+                original = pq.read_table(path)
+                pq.write_table(pa.Table.from_pylist([], schema=original.schema), path)
         export_parquet(connection, root / 'exports', resolutions=(3,), include_expanded_cell_species=expanded)
     return args, recorded, cells
 
@@ -65,6 +78,120 @@ def regenerate_fine(recorded):
 
 
 class ServingExportCoherenceTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("tippecanoe"), "Tippecanoe required for publication preservation")
+    def test_fine_only_refresh_rejects_with_genuine_fresh_metrics(self):
+        for sql_exports in (True, False):
+            with self.subTest(sql_exports=sql_exports), tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):
+                root = Path(temporary)
+                args, recorded, _ = prepared_exports(root)
+                species = pq.read_table(recorded.species)
+                second = {**species.to_pylist()[0], 'gbif_accepted_id': '2', 'redlist_category': 'Critically Endangered'}
+                pq.write_table(pa.Table.from_pylist(species.to_pylist() + [second], schema=species.schema), recorded.species)
+                systems = pq.read_table(recorded.species_systems)
+                pq.write_table(pa.Table.from_pylist(systems.to_pylist() + [{'gbif_accepted_id': '2', 'system': 'Terrestrial'}],
+                    schema=systems.schema), recorded.species_systems)
+                pq.write_table(pa.table({'iucn_sis_id': [1, 2]}), recorded.crosswalk)
+                with duckdb.connect(str(recorded.build_duckdb)) as connection:
+                    connection.execute("INSERT INTO SpecInfo SELECT * REPLACE ('2' AS gbif_accepted_id, '2' AS iucn_sis_id, 'Critically Endangered' AS redlist_category) FROM SpecInfo WHERE gbif_accepted_id='1'")
+                    connection.execute("INSERT INTO SpecSystems VALUES ('2', 'Terrestrial')")
+                    export_parquet(connection, root / 'exports', resolutions=(3,))
+                if not sql_exports:
+                    (root / 'exports').rename(root / 'unused-exports')
+                regenerate_fine(recorded)
+                report = record_prepared(recorded)
+                for mode in (False, True):
+                    args.static_fine = mode
+                    build(args)
+                pointers = [(root / path).resolve() for path in ('tiles/current', 'tiles/static/current')]
+                accepted = recorded.output.read_bytes()
+                for path in (recorded.h3_root / 'res7_merged_parts').glob('*.parquet'):
+                    original = pq.read_table(path)
+                    replacement = path.with_suffix('.replacement')
+                    pq.write_table(pa.Table.from_pylist([{**row, 'species_ids': [2]} for row in original.to_pylist()],
+                        schema=original.schema), replacement)
+                    replacement.replace(path)
+                regenerate_fine(recorded)
+                with self.assertRaisesRegex(ValueError, 'Coarse source does not match fine parent membership'):
+                    record_prepared(recorded)
+                self.assertEqual(recorded.output.read_bytes(), accepted)
+                # Reconstruct an old-intake report using genuine new files, never
+                # altering producer receipts, to exercise consumption/reuse gates.
+                for records in report['parts'].values():
+                    for name, value in records.items():
+                        records[name] = file_record(Path(value['path']))
+                recorded.output.write_text(json.dumps(report))
+                with self.assertRaisesRegex(ValueError, 'Coarse source does not match fine parent membership'):
+                    read_prepared(recorded.output)
+                for mode in (False, True):
+                    args.static_fine = mode
+                    with self.assertRaisesRegex(ValueError, 'Coarse source does not match fine parent membership'):
+                        build(args)
+                self.assertEqual([(root / path).resolve() for path in ('tiles/current', 'tiles/static/current')], pointers)
+
+    @unittest.skipUnless(shutil.which("tippecanoe"), "Tippecanoe required for publication preservation")
+    def test_stale_real_arrow_rejects_after_consistent_metadata_and_metrics_refresh(self):
+        for sql_exports in (True, False):
+            with self.subTest(sql_exports=sql_exports), tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):
+                root = Path(temporary)
+                args, recorded, _ = prepared_exports(root)
+                with duckdb.connect(str(recorded.build_duckdb), read_only=True) as connection, patch(
+                    'ark_pipeline.builders.coarse_cache.TILE_FEATURE_BATCH_SIZE', 1
+                ):
+                    descriptor = export_coarse_snapshot(connection, recorded.metadata_template.parent)
+                with ipc.open_file(recorded.metadata_template.parent / Path(descriptor['url']).name) as reader:
+                    self.assertEqual(reader.num_record_batches, 2)
+                metadata = json.loads(recorded.metadata_template.read_text())
+                metadata['coarse_snapshot'] = descriptor
+                recorded.metadata_template.write_text(json.dumps(metadata))
+                if not sql_exports:
+                    (root / 'exports').rename(root / 'unused-exports')
+                report = record_prepared(recorded)
+                for mode in (False, True):
+                    args.static_fine = mode
+                    build(args)
+                pointers = [(root / path).resolve() for path in ('tiles/current', 'tiles/static/current')]
+                accepted = recorded.output.read_bytes()
+                species = pq.read_table(recorded.species)
+                pq.write_table(pa.Table.from_pylist([{**row, 'redlist_category': 'Critically Endangered'} for row in species.to_pylist()],
+                    schema=species.schema), recorded.species)
+                metric_args = regenerate_fine(recorded)
+                with duckdb.connect(str(recorded.build_duckdb)) as connection:
+                    connection.execute("UPDATE SpecInfo SET redlist_category='Critically Endangered'")
+                    prepare_species(connection, recorded.species, recorded.species_systems)
+                    coarse_metrics = root / 'refreshed-coarse.parquet'
+                    aggregate_species_lists(connection, recorded.h3_root / 'h3_res3_species_global_merged.parquet', coarse_metrics)
+                    for system in SYSTEMS:
+                        projection = ', '.join(f'"{metric}__{system.lower()}" AS "{metric}"' for metric in METRICS)
+                        connection.execute(f'CREATE OR REPLACE TABLE h3_res3_agg_{system} AS SELECT h3_index, {projection} FROM read_parquet(?)',
+                            [str(coarse_metrics)])
+                    if sql_exports:
+                        export_parquet(connection, root / 'exports', resolutions=(3,))
+                with self.assertRaisesRegex(ValueError, 'Coarse snapshot does not match prepared build'):
+                    record_prepared(recorded)
+                self.assertEqual(recorded.output.read_bytes(), accepted)
+                for name in ('build_duckdb', 'species'):
+                    report['files'][name] = file_record(Path(report['files'][name]['path']))
+                for name, value in report['exports'].items():
+                    report['exports'][name] = file_record(Path(value['path']))
+                report['metric_identity'] = metric_args._aggregate_metadata_identity
+                for records in report['parts'].values():
+                    for name, value in records.items():
+                        records[name] = file_record(Path(value['path']))
+                recorded.output.write_text(json.dumps(report))
+                with self.assertRaisesRegex(ValueError, 'Coarse snapshot does not match prepared build'):
+                    read_prepared(recorded.output)
+                for mode in (False, True):
+                    args.static_fine = mode
+                    with self.assertRaisesRegex(ValueError, 'Coarse snapshot does not match prepared build'):
+                        build(args)
+                self.assertEqual([(root / path).resolve() for path in ('tiles/current', 'tiles/static/current')], pointers)
+                # Completing the interrupted Arrow/template refresh accepts the
+                # same new preparation without changing biological scores.
+                with duckdb.connect(str(recorded.build_duckdb), read_only=True) as connection:
+                    metadata['coarse_snapshot'] = export_coarse_snapshot(connection, recorded.metadata_template.parent)
+                recorded.metadata_template.write_text(json.dumps(metadata))
+                self.assertEqual(record_prepared(recorded)['status'], 'passed')
+
     @unittest.skipUnless(shutil.which("tippecanoe"), "Tippecanoe required for publication preservation")
     def test_membership_substitution_rejects_with_unchanged_dimensions_and_fresh_fine(self):
         for sql_exports in (True, False):
@@ -131,6 +258,15 @@ class ServingExportCoherenceTests(unittest.TestCase):
                 report = {'files': {name: file_record(path) for name, path in
                     (('coarse_source', source), ('crosswalk', crosswalk), ('build_duckdb', build_path))}}
                 validate_coarse_membership(report)
+                fine = root / 'fine.parquet'
+                # Multiple child cells and reversed/repeated source IDs still
+                # produce the same distinct parent relation before ID mapping.
+                children = list(h3.cell_to_children(h3.latlng_to_cell(55, 12, 3), 7))[:2]
+                pq.write_table(pa.Table.from_pylist([{'h3_cell': h3.str_to_int(cell),
+                    'species_ids': [202, 101, 101]} for cell in children]), fine)
+                report['parts'] = {'fixture': {'source': file_record(fine)}}
+                with duckdb.connect() as connection:
+                    validate_fine_membership(connection, report)
                 pq.write_table(pa.table({source_name: [101, 202], target_name: ['app-a', 'app-c']}), crosswalk)
                 with self.assertRaisesRegex(ValueError, 'Consumed coarse membership does not match prepared build'):
                     validate_coarse_membership(report)
@@ -264,7 +400,19 @@ class ServingExportCoherenceTests(unittest.TestCase):
             with self.subTest(empty=empty), tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):
                 root = Path(temporary)
                 _, recorded, _ = prepared_exports(root, expanded=True, empty=empty)
-                self.assertEqual(record_prepared(recorded)['status'], 'passed')
+
+                def validate():
+                    if not empty:
+                        self.assertEqual(record_prepared(recorded)['status'], 'passed')
+                        return
+                    # Fine aggregate production rejects empty partitions. Check
+                    # the valid empty SQL relation independently of publication,
+                    # with an actually empty fine/coarse source relation.
+                    report = json.loads(recorded.output.read_text())
+                    report['exports'] = {path.name: file_record(path) for path in (root / 'exports').glob('*.parquet')}
+                    validate_exports(report)
+
+                validate()
                 inverse = pq.read_table(root / 'exports/species_cells_res3.parquet')
                 self.assertEqual(inverse.num_rows, 0 if empty else 1)
                 expanded = root / 'exports/cell_species.parquet'
@@ -272,6 +420,6 @@ class ServingExportCoherenceTests(unittest.TestCase):
                 pq.write_table(pa.Table.from_pylist([{'h3_index': h3.str_to_int(h3.latlng_to_cell(-50, 120, 3)),
                     'resolution': 3, 'gbif_accepted_id': '1'}], schema=original.schema), expanded)
                 with self.assertRaisesRegex(ValueError, 'cell_species.parquet'):
-                    record_prepared(recorded)
+                    validate()
                 expanded.rename(expanded.with_suffix('.optional-absent'))
-                self.assertEqual(record_prepared(recorded)['status'], 'passed')
+                validate()
