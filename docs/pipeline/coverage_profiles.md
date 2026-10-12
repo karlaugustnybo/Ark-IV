@@ -3,7 +3,15 @@
 `data-tiles` prepares one coarse archive, optional content-hashed Arrow snapshot,
 raw fine lists, fine aggregates, matching PostgreSQL exports and boundary inputs
 from the recorded preparation. Fine map cells are served dynamically. Use
-`data-tiles --static-fine` for the optional full static fine archive. `global-start`
+`data-tiles --static-fine` for the optional full static fine archive, published
+under `GLOBAL_PREVIEW_ROOT/tiles/static/current/` (or `OUTPUT_DIR/static/current/`
+with an explicit tile-builder output directory). Its receipts, generations and
+writer lock are separate from the default dynamic `tiles/current/` publication.
+Static builds never select or replace the managed dynamic startup bundle; a
+standalone static build still requires `data-tiles` before managed startup/load.
+Static archives can be consumed directly through their published PMTiles and
+metadata paths. Both modes can be built first, refreshed, and reused independently.
+`global-start`
 selects a validated published bundle, or the compatible legacy preview;
 `GLOBAL_SERVING_CONFIG` selects an explicit configuration. `global-db-load` loads
 that configuration's recorded exports, rather than independently selected paths.
@@ -17,6 +25,8 @@ publication. Configuration validation checks schemas, expected base-cell sets,
 boundary records and recorded size/modification versions. These are finite
 validation checks, not a guarantee of crash atomicity or arbitrary reader safety.
 A preparation without SQL exports can serve a map but cannot be loaded into SQL.
+Recorded SQL lists and optional inverse/expanded membership exports are compared
+with the prepared coarse membership, including species IDs and resolutions.
 
 ## Whole-map selection
 
@@ -74,6 +84,11 @@ coverage. Explicit `iucn_sis_id` metadata maps source IDs to serving IDs; names 
 numeric equality do not establish that relationship. Ambiguous mappings reject
 the build. Prepared inputs record and pin the optional artifact; the loader
 replaces its SQL table transactionally alongside the ordinary exports.
+The passage receipt binds the profile and species mapping observed around intake.
+Their checksums and file identities are checked again before replacing output;
+observed changes reject the attempt and preserve the previous supplement/receipt.
+These checks assume atomic input replacement and do not guarantee detection of
+every transient concurrent mutation.
 
 Requests with `include_passage=true` return the union at resolution 3, including
 species with only passage coverage. An absent supplement returns HTTP 503.

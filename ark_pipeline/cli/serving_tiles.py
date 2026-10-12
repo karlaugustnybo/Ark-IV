@@ -10,6 +10,7 @@ import os
 import shutil
 import subprocess
 import time
+from copy import copy
 from importlib.metadata import version
 from pathlib import Path
 from types import SimpleNamespace
@@ -137,18 +138,37 @@ def validate_exports(report: dict) -> None:
     if not required <= exports.keys():
         raise ValueError("Incomplete PostgreSQL export set")
     with duckdb.connect(report["files"]["build_duckdb"]["path"], read_only=True) as connection:
-        for name, query in {
+        queries = {
             "species.parquet": "SELECT {columns} FROM SpecInfo",
             "species_systems.parquet": "SELECT DISTINCT gbif_accepted_id, system FROM SpecSystems WHERE system IN ('Terrestrial','Freshwater','Marine')",
             "cell_species_lists.parquet": "SELECT CAST(CAST('0x' || h3_index AS UBIGINT) AS BIGINT) AS h3_index, 3::SMALLINT AS resolution, gbif_ids AS species_ids FROM H3Res3Species",
-        }.items():
+        }
+        # Optional inverse/expanded tables feed species highlights and legacy
+        # detail readers. They must agree with the same coarse membership.
+        if "species_cells_res3.parquet" in exports:
+            queries["species_cells_res3.parquet"] = """
+                SELECT ids.gbif_id AS gbif_accepted_id, 3::SMALLINT AS resolution,
+                    list_sort(list(CAST(CAST('0x' || hs.h3_index AS UBIGINT) AS BIGINT))) AS h3_indexes
+                FROM H3Res3Species hs, UNNEST(hs.gbif_ids) AS ids(gbif_id)
+                GROUP BY ids.gbif_id
+            """
+        if "cell_species.parquet" in exports:
+            queries["cell_species.parquet"] = """
+                SELECT CAST(CAST('0x' || hs.h3_index AS UBIGINT) AS BIGINT) AS h3_index,
+                    3::SMALLINT AS resolution, ids.gbif_id AS gbif_accepted_id
+                FROM H3Res3Species hs, UNNEST(hs.gbif_ids) AS ids(gbif_id)
+            """
+        for name, query in queries.items():
             path = exports[name]["path"]
             names = pq.ParquetFile(path).schema_arrow.names
             columns = ", ".join('"' + column.replace('"', '""') + '"' for column in names)
             query = query.format(columns=columns)
+            actual = f"SELECT {columns} FROM read_parquet(?)"
+            if name == "species_cells_res3.parquet":
+                actual = "SELECT gbif_accepted_id, resolution, list_sort(h3_indexes) AS h3_indexes FROM read_parquet(?)"
             # This serving contract loads coarse SQL lists; fine lists stay external.
             mismatch = connection.execute(f"""
-                WITH expected AS ({query}), actual AS (SELECT {columns} FROM read_parquet(?))
+                WITH expected AS ({query}), actual AS ({actual})
                 SELECT count(*) FROM ((SELECT * FROM expected EXCEPT ALL SELECT * FROM actual)
                 UNION ALL (SELECT * FROM actual EXCEPT ALL SELECT * FROM expected))
             """, [path]).fetchone()[0]
@@ -300,7 +320,10 @@ def publish(output: Path, generation: Path) -> None:
 
 @tracked_stage("tiles")
 def build(args: argparse.Namespace) -> dict:
+    args = copy(args)
     args.output_dir = args.output_dir.resolve()
+    if getattr(args, "static_fine", False):
+        args.output_dir = args.output_dir / "static"
     args.output_dir.mkdir(parents=True, exist_ok=True)
     # One writer per publication root, released by the OS after a crash.
     with (args.output_dir / ".build.lock").open("a") as lock:
@@ -441,7 +464,7 @@ def parser() -> argparse.ArgumentParser:
     tiles = commands.add_parser("build")
     for name in ("prepared-inputs", "output-dir", "scratch-dir"):
         tiles.add_argument("--" + name, type=Path, required=True)
-    tiles.add_argument("--static-fine", action="store_true", help="Build the optional full fine PMTiles archive instead of dynamic serving.")
+    tiles.add_argument("--static-fine", action="store_true", help="Build the optional full fine PMTiles archive under OUTPUT_DIR/static/current; preserve the dynamic serving publication.")
     tiles.add_argument("--tippecanoe", default="tippecanoe")
     tiles.add_argument("--tile-join", default="tile-join")
     tiles.add_argument("--threads", type=positive_int, default=configured_count("TILE_DUCKDB_THREADS", default=1))

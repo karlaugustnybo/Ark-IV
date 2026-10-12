@@ -18,6 +18,53 @@ from tests.test_tile_export import prepared_fixture
 
 
 class MapServingTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("tippecanoe"), "Tippecanoe is required for the native serving fixture")
+    def test_static_archive_and_dynamic_serving_have_independent_publications(self):
+        from ark_pipeline.cli.map_serving import global_preview_config
+        from ark_pipeline.cli.serving_tiles import valid_archive
+
+        for first_mode in (False, True):
+            with self.subTest(static_first=first_mode), tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()):
+                root = Path(tmp)
+                args, recorded, _ = prepared_fixture(root)
+                original_output = args.output_dir
+                args.static_fine = first_mode
+                first = build(args)
+                self.assertEqual(first['status'], 'passed')
+                self.assertEqual(args.output_dir, original_output)
+                if first_mode:
+                    self.assertFalse((root / 'tiles/current').exists())
+                    self.assertTrue(valid_archive(root / 'tiles/static/current/priorities.pmtiles'))
+                    # A standalone archive does not claim to provide managed dynamic startup.
+                    with patch('ark_pipeline.cli.map_serving.GLOBAL_TILE_DIR', root / 'absent-global'):
+                        with self.assertRaisesRegex(ValueError, 'run just data-tiles'):
+                            global_preview_config(root)
+                args.static_fine = not first_mode
+                self.assertEqual(build(args)['status'], 'passed')
+                dynamic = (root / 'tiles/current').resolve()
+                static = (root / 'tiles/static/current').resolve()
+                self.assertNotEqual(dynamic, static)
+                self.assertEqual(global_preview_config(root), validate_config(dynamic / 'serving.json'))
+                self.assertFalse((static / 'serving.json').exists())
+                self.assertTrue(valid_archive(static / 'priorities.pmtiles'))
+                for mode in (False, True):
+                    args.static_fine = mode
+                    self.assertTrue(build(args)['reused'])
+                    self.assertEqual((root / 'tiles/current').resolve(), dynamic)
+                    self.assertEqual((root / 'tiles/static/current').resolve(), static)
+                # An interrupted archive refresh cannot replace either publication.
+                args.static_fine = True
+                metadata = json.loads(recorded.metadata_template.read_text())
+                metadata['release'] = 'archive-refresh'
+                recorded.metadata_template.write_text(json.dumps(metadata))
+                record_prepared(recorded)
+                with patch('ark_pipeline.cli.serving_tiles.stream_query', side_effect=ValueError('archive failed')):
+                    with self.assertRaisesRegex(ValueError, 'archive failed'):
+                        build(args)
+                self.assertEqual((root / 'tiles/current').resolve(), dynamic)
+                self.assertEqual((root / 'tiles/static/current').resolve(), static)
+                validate_config(dynamic / 'serving.json')
+
     def test_global_preview_prefers_published_build_and_rejects_benchmarks(self):
         from ark_pipeline.cli.map_serving import global_preview_config, reject_benchmark_bundle
         with tempfile.TemporaryDirectory() as tmp:

@@ -198,7 +198,9 @@ schema-validated partitions. Its native batch reducer was
 [3.23× faster on a 3-million-relationship sample](docs/performance/serving_metrics_performance.md),
 with identical metric output. `RES7_WORKERS=1` and a smaller
 `DUCKDB_MEMORY_LIMIT` provide a bounded mode for memory-constrained machines.
-Use `just data-tiles --static-fine` for an optional full fine PMTiles snapshot.
+Use `just data-tiles --static-fine` for an optional full fine PMTiles snapshot
+under `GLOBAL_PREVIEW_ROOT/tiles/static/current/`; the dynamic `tiles/current/`
+bundle remains selected for startup and SQL loading.
 Normal serving uses on-demand fine tiles.
 
 ## Run locally

@@ -24,6 +24,19 @@ from ark_pipeline.spatial.coverage import exact_intersecting_cells_native, load_
 
 
 def build(root: Path, profile_path: Path, species_path: Path, output: Path) -> dict:
+    # Bind receipts to the inputs observed around intake, not paths rehashed
+    # after the scan. Managed writers replace inputs atomically.
+    def identity(path: Path):
+        stat = path.stat()
+        return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+
+    consumed = {path: (identity(path), sha256(path)) for path in (profile_path, species_path)}
+
+    def verify_inputs():
+        for path, (version, digest) in consumed.items():
+            if identity(path) != version or sha256(path) != digest or identity(path) != version:
+                raise ValueError(f"Passage input changed during build: {path}")
+
     profile = replace(
         load_spatial_profile(profile_path), resolution=3, decision_simplification_degrees=0.0
     )
@@ -39,6 +52,7 @@ def build(root: Path, profile_path: Path, species_path: Path, output: Path) -> d
         identifiers = con.execute(
             "SELECT iucn_sis_id, gbif_accepted_id FROM read_parquet(?)", [str(species_path)]
         ).fetchall()
+    verify_inputs()
     mapping = {}
     for sis, serving in identifiers:
         if sis is None:
@@ -104,22 +118,27 @@ def build(root: Path, profile_path: Path, species_path: Path, output: Path) -> d
         temporary = output.with_name(output.name + ".tmp")
         target = "'" + str(temporary).replace("'", "''") + "'"
         con.execute(f"COPY passage TO {target} (FORMAT PARQUET, COMPRESSION ZSTD)")
-    os.replace(temporary, output)
     report = dict(
         status="passed",
         schema_version=1,
         scope="species-range-overlay",
         resolution=3,
         definition="Direct any-touch passage (seasonal=4), unioned with the default species range; map scores unchanged.",
-        profile_sha256=sha256(profile_path),
-        species_sha256=sha256(species_path),
+        profile_sha256=consumed[profile_path][1],
+        species_sha256=consumed[species_path][1],
         source_rows=source_rows,
         accepted_rows=accepted_rows,
         species=len(cells),
         relationships=sum(map(len, cells.values())),
         inputs=inputs,
-        output_sha256=sha256(output),
+        output_sha256=sha256(temporary),
     )
+    try:
+        verify_inputs()
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+    os.replace(temporary, output)
     atomic_json(output.with_suffix(".report.json"), report)
     return report
 

@@ -131,7 +131,7 @@ class TilePublicationTests(unittest.TestCase):
             args.checkpoint_shards = True
             report = build(args)
             self.assertEqual(report["features"], 4)
-            current = root / "tiles/current"
+            current = root / "tiles/static/current"
             first = current.resolve()
             metadata = json.loads((current / "map-metadata.json").read_text())
             self.assertEqual(metadata["complete_resolutions"], [3, 7])
@@ -202,12 +202,12 @@ class TilePublicationTests(unittest.TestCase):
                 report = build(args)
                 self.assertEqual(report["compilation"]["features"], 4)
                 self.assertTrue(build(args)["reused"])
-            previous = (root / "tiles/current").resolve()
+            previous = (root / "tiles/static/current").resolve()
             args.admin0.write_text(args.admin0.read_text() + "\n")
             with patch("ark_pipeline.cli.serving_tiles.stream_query", side_effect=ValueError("stream failed")):
                 with self.assertRaisesRegex(ValueError, "stream failed"):
                     build(args)
-            self.assertEqual((root / "tiles/current").resolve(), previous)
+            self.assertEqual((root / "tiles/static/current").resolve(), previous)
 
     def test_source_changes_and_incomplete_coverage_are_rejected(self):
         with tempfile.TemporaryDirectory() as temporary:
