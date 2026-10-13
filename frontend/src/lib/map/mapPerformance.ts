@@ -1,5 +1,6 @@
 export const FRAME_BUDGET_MS = 1000 / 60;
 export const LONG_FRAME_MS = 50;
+export const ZOOM_FRAME_TARGET_MS = 18;
 
 export type MapPerformanceSample = {
   longitude: number;
@@ -18,6 +19,8 @@ export type MapPerformanceSample = {
 export type FrameTimeSummary = {
   frameCount: number;
   p95FrameMs: number;
+  p99FrameMs: number;
+  under18MsPercent: number;
   worstFrameMs: number;
   overBudgetFrameCount: number;
   longFrameCount: number;
@@ -31,6 +34,7 @@ export type MapPerformanceResult = FrameTimeSummary & {
   uncoveredFrameCount: number;
   resolutionFlashFrameCount: number;
   loadingFrameCount: number;
+  fineFrameCount: number;
   res7RequestCount: number;
   cameraTravelDegrees: number;
   zoomTravel: number;
@@ -48,6 +52,8 @@ export type MapPerformanceRunAggregate = {
   runCount: number;
   medianP95FrameMs: number;
   worstP95FrameMs: number;
+  worstP99FrameMs: number;
+  minUnder18MsPercent: number;
   worstFrameMs: number;
   medianOverBudgetFrameCount: number;
   totalLongFrameCount: number;
@@ -85,6 +91,13 @@ export function summarizeFrameTimes(frameTimes: readonly number[]): FrameTimeSum
   return {
     frameCount: frameTimes.length,
     p95FrameMs: rounded(percentile(frameTimes, 0.95)),
+    p99FrameMs: rounded(percentile(frameTimes, 0.99)),
+    under18MsPercent: frameTimes.length
+      ? rounded(
+          (100 * frameTimes.filter((duration) => duration < ZOOM_FRAME_TARGET_MS).length) /
+            frameTimes.length
+        )
+      : 0,
     worstFrameMs: rounded(frameTimes.length ? Math.max(...frameTimes) : 0),
     overBudgetFrameCount: frameTimes.filter((duration) => duration > FRAME_BUDGET_MS).length,
     longFrameCount: frameTimes.filter((duration) => duration > LONG_FRAME_MS).length
@@ -103,6 +116,8 @@ export function summarizePerformanceRuns(
     runCount: results.length,
     medianP95FrameMs: median((result) => result.p95FrameMs),
     worstP95FrameMs: rounded(Math.max(...values((result) => result.p95FrameMs))),
+    worstP99FrameMs: rounded(Math.max(...values((result) => result.p99FrameMs))),
+    minUnder18MsPercent: Math.min(...values((result) => result.under18MsPercent)),
     worstFrameMs: rounded(Math.max(...values((result) => result.worstFrameMs))),
     medianOverBudgetFrameCount: median((result) => result.overBudgetFrameCount),
     totalLongFrameCount: results.reduce((total, result) => total + result.longFrameCount, 0),
@@ -152,6 +167,7 @@ export class MapPerformanceMonitor {
   private uncoveredFrameCount = 0;
   private resolutionFlashFrameCount = 0;
   private loadingFrameCount = 0;
+  private fineFrameCount = 0;
   private minFineTileCount = 0;
   private maxFineTileCount = 0;
   private minBasemapPixelRatio = 1;
@@ -167,16 +183,18 @@ export class MapPerformanceMonitor {
     this.now = options.now ?? (() => performance.now());
     this.requestFrame = options.requestFrame ?? ((callback) => requestAnimationFrame(callback));
     this.cancelFrame = options.cancelFrame ?? ((handle) => cancelAnimationFrame(handle));
-    this.createLongTaskObserver = options.createLongTaskObserver ?? ((callback) => {
-      if (typeof PerformanceObserver === 'undefined') return null;
-      try {
-        const observer = new PerformanceObserver(callback);
-        observer.observe({ entryTypes: ['longtask'] });
-        return observer;
-      } catch {
-        return null;
-      }
-    });
+    this.createLongTaskObserver =
+      options.createLongTaskObserver ??
+      ((callback) => {
+        if (typeof PerformanceObserver === 'undefined') return null;
+        try {
+          const observer = new PerformanceObserver(callback);
+          observer.observe({ entryTypes: ['longtask'] });
+          return observer;
+        } catch {
+          return null;
+        }
+      });
   }
 
   start(): void {
@@ -192,6 +210,7 @@ export class MapPerformanceMonitor {
     this.uncoveredFrameCount = 0;
     this.resolutionFlashFrameCount = 0;
     this.loadingFrameCount = 0;
+    this.fineFrameCount = 0;
     this.minFineTileCount = this.startSample.fineTileCount;
     this.maxFineTileCount = this.startSample.fineTileCount;
     this.minBasemapPixelRatio = this.startSample.basemapPixelRatio;
@@ -232,6 +251,7 @@ export class MapPerformanceMonitor {
       uncoveredFrameCount: this.uncoveredFrameCount,
       resolutionFlashFrameCount: this.resolutionFlashFrameCount,
       loadingFrameCount: this.loadingFrameCount,
+      fineFrameCount: this.fineFrameCount,
       res7RequestCount,
       cameraTravelDegrees: rounded(this.cameraTravelDegrees),
       zoomTravel: rounded(this.zoomTravel),
@@ -268,16 +288,11 @@ export class MapPerformanceMonitor {
       this.resolutionFlashFrameCount += 1;
     }
     if (sample.fineTilesLoading) this.loadingFrameCount += 1;
+    if (sample.resolution === 7) this.fineFrameCount += 1;
     this.minFineTileCount = Math.min(this.minFineTileCount, sample.fineTileCount);
     this.maxFineTileCount = Math.max(this.maxFineTileCount, sample.fineTileCount);
-    this.minBasemapPixelRatio = Math.min(
-      this.minBasemapPixelRatio,
-      sample.basemapPixelRatio
-    );
-    this.maxBasemapPixelRatio = Math.max(
-      this.maxBasemapPixelRatio,
-      sample.basemapPixelRatio
-    );
+    this.minBasemapPixelRatio = Math.min(this.minBasemapPixelRatio, sample.basemapPixelRatio);
+    this.maxBasemapPixelRatio = Math.max(this.maxBasemapPixelRatio, sample.basemapPixelRatio);
     this.minCellPixelRatio = Math.min(this.minCellPixelRatio, sample.cellPixelRatio);
     this.maxCellPixelRatio = Math.max(this.maxCellPixelRatio, sample.cellPixelRatio);
     if (this.previousSample) {
