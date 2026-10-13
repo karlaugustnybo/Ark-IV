@@ -80,3 +80,60 @@ For source requirements and configuration, see the
 [ordered pipeline guides](../docs/README.md). Historical tools live in ignored
 `archive/` and are not imported by this package. Renames change code fingerprints;
 let the normal receipt checks decide which existing outputs need rebuilding.
+
+## Optional dated-tree investigation
+
+`edge.py` wraps the pinned reference metric engine with reviewed identifier
+joins, crown extraction, risk sampling and mammal-reference comparison.
+`cli/edge_prototype.py` validates public inputs and authorized assessments,
+then writes local descriptive scores and reports. It is independent of the
+required update and serving pipeline.
+
+`edge_matching.py` audits conservative exact-name/lineage bridges;
+`edge_trees.py` streams reproducible crown pilots from official archives;
+`edge_validation.py` and `cli/edge_validate.py` compare reference disagreements
+and rank sensitivity using common risk draws. Outputs retain prototype status.
+`edge_benchmark.py` independently enumerates shared branches and checks
+matched-input calculator agreement. `cli/edge_benchmark.py` runs the unmodified
+authors' R calculator and compares 100 Upham mammal trees with Duke medians
+using an identical species cohort and threat vector. Original-author source
+and results remain in ignored local data.
+`edge_links.py` and `cli/edge_link.py` index the unchanged global release and
+link every reviewed assessment through NCBI/OTT identity or exact-name/current
+lineage checks. Ambiguities remain unresolved; linkage does not compute scores
+or change the tree. This identity artifact can support later clade scoring.
+`edge_link_extension.py` and `cli/edge_link_expand.py` add independent exact
+IUCN/OTT identities using current IUCN taxonomy and compatible lineage/clade
+membership. Original links and genomic-transfer flags remain unchanged.
+Additional tree identity does not imply a verified NCBI/GoaT genomic join.
+`edge_synonyms.py` and `cli/edge_link_synonyms.py` check documented binomial
+name changes using the released OTT alias table and registered NCBI names.
+Unchanged epithets, compatible higher lineage, unique species identity and
+preservation of previous links are required; species-concept disagreements
+remain in a separate review queue. Names missing from the dated tree are
+checked against the full OTT taxonomy to distinguish different source gaps.
+`phylogenetic_gap.py` and `cli/phylogenetic_gap.py` compare rooted marginal
+branch coverage with the existing genus/family score. The mammal prototype
+uses the exact website DNA rule, a fresh reviewed GoaT crosswalk, and all
+uniquely linked DNA-positive mammal records as its baseline, including those
+without IUCN assessments. Missing baseline identities are audited; same-genus
+gaps with missing positive records have their priorities withheld. Batch
+selection recomputes uncovered branches after every choice. This custom Ark
+priority is separate from EDGE/EDGE2 and remains outside production serving.
+`edge_baseline_review.py` and `cli/edge_baseline_review.py` audit missing
+DNA-positive mammal identities using current NCBI names/lineage and full OTT
+names/aliases. Unique documented species leaves can be recovered; merged IDs
+with multiple leaves, missing taxa, nonspecies ranks, hybrids and conflicting
+identities remain audited. The gap pilot applies a cached review only when
+source, code and output receipts match its freshly checked evidence.
+`extinction_status.py` centralizes IUCN authority over conflicting OTT extinction
+flags for verified assessed species. EDGE scoring, baseline review and the gap
+pilot record effective classification, source and overrides while preserving
+raw flags; missing dated branches remain unscored coverage gaps.
+
+Commands: `just edge-download`, `just edge-prototype`,
+`just edge-tree-download`, `just edge-validate`, `just edge-benchmark-setup`,
+`just edge-benchmark`, `just edge-link`, `just edge-link-expand`,
+`just edge-link-synonyms`, `just phylogenetic-gap <validation-receipt>`, `just edge-baseline-review`.
+After reviewing, rerun `just phylogenetic-gap <validation-receipt>` to update gaps and priorities. See the
+[prototype guide](../docs/pipeline/09_edge_prototype.md).

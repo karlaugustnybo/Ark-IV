@@ -40,3 +40,5 @@ stage-based CLI names and artifact-based builders.
 Historical profiling harnesses and raw reports mentioned in these documents are
 kept under local-only `archive/research/`, not in the GitHub code release. Current
 validation lives in `tests/`; use `just data-benchmark` for new end-to-end timings.
+
+Optional research: [dated-tree, EDGE and phylogenetic gaps](pipeline/09_edge_prototype.md).
