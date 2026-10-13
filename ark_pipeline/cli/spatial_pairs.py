@@ -13,6 +13,7 @@ import time
 import tomllib
 import zipfile
 from collections import Counter
+from collections.abc import Iterable
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from dataclasses import dataclass
 from pathlib import Path
@@ -431,6 +432,16 @@ def inspect_supplemental_archive(
     }
 
 
+def resolve_hydrobasin_id_field(fields: Iterable[str], *, layer: str) -> str:
+    """Require one HYBAS_ID field and preserve its spelling for Arrow lookup."""
+    matches = [str(field) for field in fields if str(field).casefold() == "hybas_id"]
+    if not matches:
+        raise ValueError(f"{layer}: missing HYBAS_ID")
+    if len(matches) != 1:
+        raise ValueError(f"{layer}: ambiguous HYBAS_ID fields: {', '.join(matches)}")
+    return matches[0]
+
+
 def inspect_hydrobasin_archive(
     record: dict[str, Any], *, deep: bool
 ) -> dict[str, Any]:
@@ -452,8 +463,10 @@ def inspect_hydrobasin_archive(
             for layer_name, listed_geometry_type in available:
                 info = pyogrio.read_info(path, layer=str(layer_name))
                 layer_errors = []
-                if "hybas_id" not in {str(field).lower() for field in info["fields"]}:
-                    layer_errors.append("missing HYBAS_ID")
+                try:
+                    resolve_hydrobasin_id_field(info["fields"], layer=str(layer_name))
+                except ValueError as error:
+                    layer_errors.append(str(error).removeprefix(f"{layer_name}: "))
                 if info.get("crs") != "EPSG:4326":
                     layer_errors.append(f"expected EPSG:4326, found {info.get('crs')}")
                 if "Polygon" not in str(info.get("geometry_type")):
@@ -1588,6 +1601,7 @@ def build_hydrobasin_index(
     # Reconcile IDs before starting expensive polygon-to-H3 coverage. Provider
     # tables can reference islands absent even from their published base layers.
     missing_ids = set(requested_ids)
+    id_columns: dict[tuple[Path, str], str] = {}
     for (region, level), wanted in sorted(by_region_level.items()):
         code = HYDROBASIN_REGION_CODES[region] if region else "islands"
         for record in by_code[code]:
@@ -1596,7 +1610,11 @@ def build_hydrobasin_index(
                 break
             prefix = "hybas_lake" if "hybas_lake_" in record["logical_name"].lower() else "hybas"
             layer = Path(record["logical_name"]).stem if not region else f"{prefix}_{code}_lev{level:02d}_v1c"
-            id_column = "HYBAS_ID" if region else "hybas_id"
+            id_column = resolve_hydrobasin_id_field(
+                pyogrio.read_info(record["resolved_path"], layer=layer)["fields"],
+                layer=layer,
+            )
+            id_columns[(record["resolved_path"], layer)] = id_column
             _, identifiers = pyogrio.read_arrow(
                 record["resolved_path"], layer=layer, columns=[id_column], read_geometry=False,
             )
@@ -1640,7 +1658,7 @@ def build_hydrobasin_index(
                 prefix = "hybas_lake" if "hybas_lake_" in record["logical_name"].lower() else "hybas"
                 layer = (Path(record["logical_name"]).stem if not region
                          else f"{prefix}_{code}_lev{level:02d}_v1c")
-                id_column = "HYBAS_ID" if region else "hybas_id"
+                id_column = id_columns[(record["resolved_path"], layer)]
                 metadata, identifiers = pyogrio.read_arrow(
                     record["resolved_path"],
                     layer=layer,

@@ -329,6 +329,9 @@ inventoried base layer, without inferring a region or basin level. The
 customized-with-lakes layer takes precedence for shared IDs, with standard
 v1c polygons as fallback. This retains provider distribution units; it does
 not infer habitat suitability or clip marine/terrestrial ranges.
+Each layer must have exactly one case-insensitive `HYBAS_ID` field. Inspection,
+the checker and the builder preserve its actual spelling for Arrow reads;
+missing or ambiguous key fields fail before coverage outputs are published.
 For every referenced region/level, the
 pipeline scans only the small DBF identifier/FID columns, then asks GDAL for the
 WKB of referenced FIDs. Each referenced HydroBASINS v1c polygon is covered once

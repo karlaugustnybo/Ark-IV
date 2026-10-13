@@ -17,6 +17,7 @@ from ark_pipeline.cli.spatial_pairs import (
     _hybas_region_level,
     hydrobasin_files,
     hydrobasin_records_by_code,
+    resolve_hydrobasin_id_field,
 )
 
 
@@ -53,11 +54,14 @@ def audit(root: Path, relations_root: Path) -> dict:
             is_lake = bool(region) and "hybas_lake_" in name.lower()
             is_standard = bool(region) and not is_lake
             is_island = not region
-            column = "hybas_id" if is_island else "HYBAS_ID"
             layer = (
                 Path(name).stem
                 if is_island
                 else f"hybas_{'lake_' if is_lake else ''}{code}_lev{level:02d}_v1c"
+            )
+            column = resolve_hydrobasin_id_field(
+                pyogrio.read_info(record["resolved_path"], layer=layer)["fields"],
+                layer=layer,
             )
             matched = set()
             invalid = set()
