@@ -132,10 +132,11 @@ sets of species relationships.
 
 Each polygon, point, and relationship archive has a content-addressed receipt covering its input checksum,
 semantic profile, relevant code, geometry dependency versions, schemas, and
-output checksums. HydroBASINS relationship receipts additionally bind the nine
-regional geometry archives. A readable Parquet file without a matching receipt
-is rebuilt. Polygon rows retain row-sized audits; tabular sources reconcile all
-rows into decision counts, and referenced basins retain per-geometry audits.
+output checksums. HydroBASINS relationship receipts additionally bind the registered
+standard, customized-with-lakes and island geometry archives. A readable Parquet
+file without a matching receipt is rebuilt. Polygon rows retain row-sized audits;
+tabular sources reconcile all rows into decision counts, and referenced basins
+retain per-geometry audits.
 
 After all configured archives pass, aggregate pairs into serving lists:
 
