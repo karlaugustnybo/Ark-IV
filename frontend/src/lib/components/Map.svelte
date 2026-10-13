@@ -841,10 +841,10 @@
   }
 
   function fineViewport(camera: MapCamera, useMapFootprint = true) {
-    // A flat map has an exact rectangular web-tile footprint. The polygon
-    // scan is reserved for genuinely pitched views; using it at pitch zero
-    // can include many rows that only touch the rectangle's boundary.
-    const useProjectedFootprint = useMapFootprint && livePitch > 0.5;
+    // Only an unrotated, flat map matches the axis-aligned tile rectangle.
+    // Forecast prewarming deliberately uses its supplied camera instead.
+    const useProjectedFootprint =
+      useMapFootprint && (livePitch !== 0 || (map?.getBearing() ?? 0) % 360 !== 0);
     const geographicBounds = useProjectedFootprint ? map?.getBounds() : undefined;
     const width = container?.clientWidth ?? 0;
     const height = container?.clientHeight ?? 0;
@@ -1283,6 +1283,7 @@
         }),
         preloadMapBundle()
       ]);
+      if (disposed) return;
       await Promise.all(
         frameworks
           .filter(
@@ -1293,6 +1294,7 @@
             loadBoundaryCollection(framework.id).catch((reason) => console.error(reason))
           )
       );
+      if (disposed) return;
       const metadata: MapMetadata = bundle.metadata;
       coarseSnapshot = bundle.coarseSnapshot;
       staticBasemap = bundle.staticBasemap;
@@ -1336,7 +1338,6 @@
       currentResolution = availableResolutions.includes(3) ? 3 : availableResolutions[0];
       resolution.set(currentResolution);
       useSystemDomain(currentSystem);
-      if (disposed) return;
 
       const tileUrl = metadata.tile_schema_version
         ? `${config.tileUrl}${config.tileUrl.includes('?') ? '&' : '?'}v=${metadata.tile_schema_version}`
@@ -1605,6 +1606,7 @@
       if (performanceEnabled) {
         const { MapPerformanceMonitor: MapPerformanceMonitorClass } =
           await import('$lib/map/mapPerformance');
+        if (disposed) return;
         performanceStatus = 'idle';
         performanceMonitor = new MapPerformanceMonitorClass({
           sample: () => ({

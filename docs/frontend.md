@@ -3,7 +3,7 @@
 The map keeps the global resolution-3 Arrow layer available while resolution-7
 cells load. Dynamic fine tiles commit a complete visible viewport before its
 complete guard ring. GPU buffers warm one tile per frame, and the visible
-handoff waits for coverage of the actual camera footprint, including pitched
+handoff waits for coverage of the actual camera footprint, including rotated and pitched
 views. An older complete camera generation can remain visible while panning
 within the same habitat and boundary source. Changing that source immediately
 uses correctly filtered coarse context until new fine coverage is ready.
@@ -18,6 +18,8 @@ The colour menu offers linear, logarithmic and exact Jenks natural breaks.
 Logarithmic colour is the default; offset and gamma tune its contrast. Jenks
 classifies the filtered global coarse snapshot in a worker, giving all displayed
 layers a common reference rather than changing its breaks with each fine viewport.
+Leaving the route cancels initialization before it can create a classification
+worker; mounted workers terminate during route cleanup.
 Per-species normalization divides priority by richness, not area. Palette and
 transparency controls affect display only; they do not change the score.
 
