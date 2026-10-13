@@ -206,7 +206,8 @@
                 ><td><strong>Present</strong></td></tr
               >
               <tr
-                ><td>2</td><td>A safely linked record reports EBP criteria containing 6.7 or 6.C</td
+                ><td>2</td><td
+                  >A safely linked record reports a non-empty <code>ebp_standard_criteria</code> value</td
                 ><td><strong>Present</strong></td></tr
               >
               <tr
