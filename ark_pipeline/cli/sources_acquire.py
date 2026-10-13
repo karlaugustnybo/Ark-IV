@@ -390,7 +390,15 @@ def age_days(record: dict[str, Any]) -> float:
 def is_due(source: Source, record: dict[str, Any] | None, force: bool) -> bool:
     if force or record is None:
         return True
-    configured_release = inventory_release(source_inventory(source))
+    inventory = source_inventory(source)
+    if inventory is not None:
+        registered_names = {item["logical_name"] for item in record.get("files", [])}
+        required_names = set(source.get("required_files", [])) | {
+            item["logical_name"] for item in inventory["files"]
+        }
+        if not required_names.issubset(registered_names):
+            return True
+    configured_release = inventory_release(inventory)
     if configured_release is not None:
         return configured_release != str(record.get("release"))
     if source.get("update_policy") == "pinned-discontinued":

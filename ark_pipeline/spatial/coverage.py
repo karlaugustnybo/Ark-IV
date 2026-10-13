@@ -25,6 +25,8 @@ from shapely import affinity, make_valid
 from shapely.geometry import MultiPolygon, Polygon, box
 from shapely.geometry.base import BaseGeometry
 
+from ark_pipeline.spatial.simplification import simplify_grouped
+
 
 class GeometryCoverageError(ValueError):
     """Raised when a source geometry cannot safely produce coverage."""
@@ -100,6 +102,9 @@ def canonical_json(value: Any) -> bytes:
 def load_spatial_profile(path: Path) -> SpatialProfile:
     payload = tomllib.loads(path.read_text(encoding="utf-8"))
     digest = hashlib.sha256(canonical_json(payload)).hexdigest()
+    missing_policy = payload.get("hydrobasin_coverage", {}).get("missing_geometry_policy", "error")
+    if missing_policy not in {"error", "exclude-with-audit"}:
+        raise ValueError("hydrobasin missing_geometry_policy must be error or exclude-with-audit")
     coverage = payload["coverage"]
     policy = payload["row_policy"]
     repair = payload["geometry_repair"]
@@ -665,7 +670,8 @@ def direct_any_touch_intersecting_cells_native(
     ):
         emit(phase=f"Simplify polygon · {profile.decision_simplification_degrees}°", fraction=None, force=True)
         decision = _simplified_decision_geometry(
-            unwrapped, profile.decision_simplification_degrees, audit=simplification_audit
+            unwrapped, profile.decision_simplification_degrees, audit=simplification_audit,
+            source_validated=True,
         )
         simplification_applied = decision is not unwrapped
         if not simplification_applied:
@@ -728,7 +734,7 @@ def _bbox_area(geometry: BaseGeometry) -> float:
 def _simplified_decision_geometry(
     source: BaseGeometry,
     tolerance: float,
-    *, audit: dict | None = None,
+    *, audit: dict | None = None, source_validated: bool = False,
 ) -> BaseGeometry:
     """Return the explicit approximate decision geometry for a profile.
 
@@ -742,7 +748,7 @@ def _simplified_decision_geometry(
     if audit is None:
         audit = {}
     audit.update(method="original", rejections=[], original_coordinates=int(shapely.get_num_coordinates(source)),
-                 original_validity=shapely.is_valid_reason(source))
+                 original_validity="Valid Geometry" if source_validated else shapely.is_valid_reason(source))
     source_polygons = list(_iter_polygons(source))
 
     def accepted(candidate, method):
@@ -750,6 +756,9 @@ def _simplified_decision_geometry(
         if candidate is None or candidate.is_empty:
             reasons.append("empty or non-polygonal result")
         else:
+            # Audit contract: a rejected attempt names every defect found, so
+            # record validity and component-count defects together instead of
+            # short-circuiting on the first one.
             if not candidate.is_valid:
                 reasons.append("invalid: " + shapely.is_valid_reason(candidate))
             components = len(list(_iter_polygons(candidate)))
@@ -767,7 +776,7 @@ def _simplified_decision_geometry(
     if accepted(simplified, "fast"):
         return simplified
     topology_preserved = polygonal_parts(
-        shapely.simplify(source, tolerance, preserve_topology=True)
+        simplify_grouped(source, tolerance)
     )
     if not accepted(topology_preserved, "topology-preserving"):
         audit["result_coordinates"] = audit["original_coordinates"]
