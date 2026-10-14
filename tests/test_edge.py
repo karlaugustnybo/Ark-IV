@@ -76,6 +76,17 @@ class EdgeInputTests(unittest.TestCase):
         self.assertIsNone(candidate_list("EW", 1))
         self.assertIsNone(candidate_list("EX", 1))
 
+    def test_current_rank_gate_rejects_merged_genus_and_absent_ids(self):
+        joined = reviewed_tip_join(
+            [assessment(1, "101", "EN"), assessment(2, "2", "VU"), assessment(3, "3")],
+            {"1": {"A"}, "2": {"B"}, "3": {"C"}},
+            {"101": "1"}, current_ranks={"1": "genus", "3": "species"},
+        )
+        self.assertEqual([r["join_status"] for r in joined],
+                         ["ncbi_not_current_species", "ncbi_not_current_species", "joined"])
+        self.assertEqual([r["tree_tip"] for r in joined], [None, None, "C"])
+        self.assertEqual(joined[0]["canonical_ncbi_taxid"], "1")
+
     def test_join_never_chooses_ambiguous_or_unsafe_taxa(self):
         rows = [
             assessment(1, "old"),
@@ -291,6 +302,7 @@ class EdgeEngineTests(unittest.TestCase):
                 info = tarfile.TarInfo("ott/taxonomy.tsv")
                 info.size = len(data)
                 archive.addfile(info, io.BytesIO(data))
+            (root / "TOL/nodes.dmp").write_text("11 | 1 | species |\n22 | 1 | species |\n")
             config_path = Path(__file__).resolve().parents[1] / "config/edge_prototype.toml"
             import tomllib
 

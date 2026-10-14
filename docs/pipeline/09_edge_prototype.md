@@ -175,7 +175,10 @@ All estimates are conditional on observed baseline coverage.
 Greedy target selection recomputes uncovered branches after every choice and
 resolves priority ties by SIS ID. It avoids repeated counting of shared gains;
 it is a threat-weighted heuristic, not a proven optimum. Fixed-budget comparison
-with legacy priorities also reports cutoff ties.
+with legacy priorities also reports cutoff ties. Missing website rows or required
+DNA flags remain unavailable with an audit reason and are excluded from comparison
+denominators; the fresh gap cohort is preserved. An empty selection (including
+budget zero) retains the same complete plan schema.
 
 The baseline review uses documented current names, lineage, full OTT names/aliases
 and unique leaves. Merged IDs with multiple leaves remain unresolved despite a
@@ -183,6 +186,8 @@ preferred name; internal nodes, hybrids, nonspecies taxa and absent branches are
 not grafted or copied. Review receipts bind source/code/output identities and
 preserve original input reports. Applying a compatible review transfers only
 approved link columns onto fresh evidence. Stale or unapproved changes reject.
+Receipts must include all required dependency digests, including the current-name
+synonym helper; older incomplete receipts require a fresh review.
 
 ## IUCN authority for extinction status
 

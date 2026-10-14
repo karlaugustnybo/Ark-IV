@@ -234,6 +234,7 @@ def run(args):
                 Path(__file__),
                 Path("ark_pipeline/edge_baseline_review.py"),
                 Path("ark_pipeline/edge_matching.py"),
+                Path("ark_pipeline/edge_synonyms.py"),
                 Path("ark_pipeline/edge_links.py"),
                 Path("ark_pipeline/extinction_status.py"),
                 Path("ark_pipeline/edge.py"),

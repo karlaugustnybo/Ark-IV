@@ -246,8 +246,10 @@ def assessment_join(
 
 
 def reviewed_tip_join(
-    rows: list[dict], identifiers: dict[str, set[str]], merges: dict[str, str]
+    rows: list[dict], identifiers: dict[str, set[str]], merges: dict[str, str],
+    *, current_ranks: dict[str, str] | None = None,
 ) -> list[dict]:
+    """Join reviewed assessments; current_ranks gates canonical identities when supplied."""
     candidates = Counter()
     joined = []
     for original in rows:
@@ -272,7 +274,9 @@ def reviewed_tip_join(
                 tips = identifiers.get(taxid, set())
                 row["canonical_ncbi_taxid"] = taxid
                 row["join_status"] = "ncbi_not_in_clade" if not tips else "ambiguous_ncbi_to_ott"
-                if len(tips) == 1:
+                if current_ranks is not None and current_ranks.get(taxid) != "species":
+                    row["join_status"] = "ncbi_not_current_species"
+                elif len(tips) == 1:
                     row["tree_tip"] = next(iter(tips))
                     row["join_status"] = "joined"
                     candidates[row["tree_tip"]] += 1

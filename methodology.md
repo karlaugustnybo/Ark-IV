@@ -1034,7 +1034,10 @@ A separate optional [dated-tree mammal prototype](docs/pipeline/09_edge_prototyp
 now computes ED and original EDGE (`ln(1 + ED) + GE ln(2)`), plus ED2/GE2/EDGE2
 components using the pinned Duke reference engine. It operates on the complete
 released mammal crown before joining reviewed IUCN assessments, reports every
-join failure, and compares scores with the published mammal supplement.
+join failure, and compares scores with the published mammal supplement. Both
+scoring entry points require the canonical NCBI concept to be present at species
+rank in the registered current nodes snapshot before assigning assessment risk
+or attempting current-name rescue. Rejected tips retain unjoined pooled risk.
 Its 256 seeded risk draws use one median tree, so the reported intervals omit
 phylogenetic uncertainty. Output status is `prototype_unvalidated`; these
 descriptive artifacts are separate from the species dimension and supply no

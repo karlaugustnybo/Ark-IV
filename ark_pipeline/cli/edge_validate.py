@@ -17,6 +17,7 @@ from ark_pipeline.cli.sources_acquire import load_manifest
 from ark_pipeline.edge import (
     acquire_inputs,
     assessment_join,
+    canonical_taxid,
     compare_reference,
     load_clade,
     load_ncbi_merges,
@@ -25,6 +26,7 @@ from ark_pipeline.edge import (
     score_clade,
     tip_identifiers,
 )
+from ark_pipeline.edge_links import current_ncbi_ranks
 from ark_pipeline.edge_matching import (
     build_ott_index,
     current_species_lineages,
@@ -84,9 +86,15 @@ def run(args):
     tree = load_clade(Path(sources["dated-tree"]["path"]), config["clade"])
     original_tips = {leaf.name for leaf in tree.leaves()}
     identifiers = tip_identifiers(tree, Path(sources["ott-taxonomy"]["path"]), merges)
-    baseline_joined = reviewed_tip_join(
-        assessment_join(args.crosswalk, assessments), identifiers, merges
+    rows = assessment_join(args.crosswalk, assessments)
+    ranks = current_ncbi_ranks(
+        nodes_path,
+        {
+            canonical_taxid(str(row["matched_ncbi_species_taxid"]), merges)
+            for row in rows if row["matched_ncbi_species_taxid"]
+        },
     )
+    baseline_joined = reviewed_tip_join(rows, identifiers, merges, current_ranks=ranks)
     print("Auditing exact names against genus, family and existing identifiers", flush=True)
     index = build_ott_index(
         Path(sources["ott-taxonomy"]["path"]), args.input_dir / "ott_index.parquet"
@@ -256,7 +264,7 @@ def run(args):
         "archives": manifests,
         "code": {
             name: receipt(Path(__file__).parents[1] / name)
-            for name in ["edge.py", "edge_matching.py", "edge_trees.py", "edge_validation.py"]
+            for name in ["edge.py", "edge_links.py", "edge_matching.py", "edge_trees.py", "edge_validation.py"]
         },
         "limitations": [
             "Eight first eligible archive members by default: a convenience pilot, not a random or complete 101-tree ensemble.",
@@ -281,6 +289,10 @@ def run(args):
 def write_report(path, report, outliers, stability):
     coverage = report["coverage"]
     same = report["reference_after"]["same_category"]
+    correlations = {
+        key: f"{same[key]:.3f}" if same[key] is not None else "Unavailable"
+        for key in ("edge2_spearman", "ed2_spearman")
+    }
     lines = [
         "# What the mammal EDGE follow-up tells us",
         "",
@@ -293,7 +305,8 @@ def write_report(path, report, outliers, stability):
         "",
         "## Agreement with published scores",
         "",
-        f"For {same['species']:,} species with the same threat category, rank agreement is **{same['edge2_spearman']:.3f} for EDGE2** and **{same['ed2_spearman']:.3f} for ED2**, where 1 means identical ordering.",
+        f"For {same['species']:,} species with the same threat category, rank agreement is **{correlations['edge2_spearman']} for EDGE2** and **{correlations['ed2_spearman']} for ED2**, where 1 means identical ordering.",
+        "Unavailable correlation means the cohort is too small or has constant ranks to establish an ordering.",
         "Matching coverage and score accuracy are separate questions. The controlled before/after comparison in report.json uses the original comparison cohort, with identical seeded risk draws.",
         "",
         "## What changing the tree does",

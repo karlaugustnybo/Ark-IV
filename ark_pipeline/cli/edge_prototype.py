@@ -15,6 +15,7 @@ from ark_pipeline.cli.sources_acquire import load_manifest
 from ark_pipeline.edge import (
     acquire_inputs,
     assessment_join,
+    canonical_taxid,
     compare_reference,
     load_clade,
     load_ncbi_merges,
@@ -23,6 +24,7 @@ from ark_pipeline.edge import (
     score_clade,
     tip_identifiers,
 )
+from ark_pipeline.edge_links import current_ncbi_ranks
 from ark_pipeline.runtime.provenance import atomic_json, git_state, iso_now, sha256
 
 
@@ -58,12 +60,21 @@ def run(args, config: dict, sources: dict) -> dict:
     # No GoaT attributes enter this prototype; retain the reviewed crosswalk
     # snapshot even when a newer GoaT export has been acquired.
     merged = source_file(root, manifest, "ncbi-taxonomy", "merged.dmp", root / "TOL/merged.dmp")
+    nodes = source_file(root, manifest, "ncbi-taxonomy", "nodes.dmp", root / "TOL/nodes.dmp")
     merges = load_ncbi_merges(merged)
     print("Extracting complete mammal crown", flush=True)
     tree = load_clade(Path(sources["dated-tree"]["path"]), config["clade"])
     print(f"Indexing OTT identifiers for {len(tree):,} tree tips", flush=True)
     identifiers = tip_identifiers(tree, Path(sources["ott-taxonomy"]["path"]), merges)
-    joined = reviewed_tip_join(assessment_join(crosswalk, assessments), identifiers, merges)
+    rows = assessment_join(crosswalk, assessments)
+    ranks = current_ncbi_ranks(
+        nodes,
+        {
+            canonical_taxid(str(row["matched_ncbi_species_taxid"]), merges)
+            for row in rows if row["matched_ncbi_species_taxid"]
+        },
+    )
+    joined = reviewed_tip_join(rows, identifiers, merges, current_ranks=ranks)
     if not any(
         row["join_status"] == "joined" and row["redlist_category"] != "EX" for row in joined
     ):
@@ -107,10 +118,12 @@ def run(args, config: dict, sources: dict) -> dict:
             "crosswalk_provenance": receipt(summary_path),
             "assessments": receipt(assessments),
             "ncbi_merged_ids": receipt(merged),
+            "ncbi_nodes": receipt(nodes),
             "config": receipt(args.config),
         },
         "code": {
             "edge": receipt(Path(__file__).resolve().parents[1] / "edge.py"),
+            "edge_links": receipt(Path(__file__).resolve().parents[1] / "edge_links.py"),
             "cli": receipt(Path(__file__).resolve()),
         },
         "outputs": {

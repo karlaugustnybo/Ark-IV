@@ -13,6 +13,23 @@ if HAS_ENGINE:
 from ark_pipeline.phylogenetic_gap import genome_evidence, greedy_targets, marginal_gaps, rooted_pd
 
 
+class WebsiteComparisonTests(unittest.TestCase):
+    def test_comparison_excludes_missing_and_reports_unavailable_ranks(self):
+        from ark_pipeline.cli.phylogenetic_gap import comparison
+
+        frame = pd.DataFrame({"iucn_sis_id": [1, 2, 3],
+            "redlist_category": ["EN", "VU", "CR"],
+            "old": [None, 4.0, 4.0], "new": [12.0, 2.0, 3.0]})
+        stats = comparison(frame, "old", "new")
+        self.assertEqual(stats["species"], 2)
+        self.assertEqual(stats["top_overlap"], 2)
+        self.assertIsNone(stats["rank_correlation"])
+        self.assertIsNone(comparison(frame.iloc[:2], "old", "new")["rank_correlation"])
+        self.assertEqual(comparison(frame.iloc[:1], "old", "new"), {"species": 0})
+        frame.loc[2, "old"] = 5.0
+        self.assertAlmostEqual(comparison(frame, "old", "new")["rank_correlation"], 1.0)
+
+
 @unittest.skipUnless(HAS_ENGINE, "Optional engine: uv sync --group edge")
 class PhylogeneticGapTests(unittest.TestCase):
     def tree(self):

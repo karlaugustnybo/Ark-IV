@@ -38,7 +38,11 @@ def comparison(frame, old, new, k=100):
         species=len(common),
         budget=min(k, len(common)),
         top_overlap=len(set(first.iucn_sis_id) & set(second.iucn_sis_id)),
-        rank_correlation=common[old].rank().corr(common[new].rank()),
+        rank_correlation=(
+            float(common[old].rank().corr(common[new].rank()))
+            if len(common) > 1 and common[old].nunique() > 1 and common[new].nunique() > 1
+            else None
+        ),
         legacy_cutoff_score=float(boundary),
         legacy_at_cutoff=int(common[old].eq(boundary).sum()),
         legacy_at_or_above_cutoff=int(common[old].ge(boundary).sum()),
@@ -244,6 +248,23 @@ def run(args):
             for key, value in review_report["source_hashes"].items()
         ):
             raise ValueError("Baseline review uses different current sources")
+        required_code = {
+            "ark_pipeline/cli/edge_baseline_review.py",
+            "ark_pipeline/edge_baseline_review.py",
+            "ark_pipeline/edge_matching.py",
+            "ark_pipeline/edge_synonyms.py",
+            "ark_pipeline/edge_links.py",
+            "ark_pipeline/extinction_status.py",
+            "ark_pipeline/edge.py",
+        }
+        if review_report.get("schema_version") != 1 or not required_code.issubset(
+            review_report.get("code", {})
+        ):
+            raise ValueError("Baseline review lacks required code provenance; rerun review")
+        for name in required_code:
+            current_code = Path(__file__).resolve().parents[2] / name
+            if sha256(current_code) != review_report["code"][name]["sha256"]:
+                raise ValueError("Baseline review code changed; rerun review")
         for code in review_report["code"].values():
             if sha256(Path(code["path"])) != code["sha256"]:
                 raise ValueError("Baseline review code changed; rerun review")
@@ -361,9 +382,20 @@ def run(args):
         ]
     ]
     legacy["iucn_sis_id"] = pd.to_numeric(legacy.iucn_sis_id).astype("int64")
+    legacy["legacy_row_present"] = True
     species = species.merge(legacy, on="iucn_sis_id", how="left", validate="one_to_one")
+    required_flags = ["has_dna_species_level", "genus_has_dna", "family_has_dna", "goat_data_deficient"]
+    complete = species[required_flags].notna().all(axis=1)
+    if not species.loc[complete, required_flags].isin([True, False]).all().all():
+        raise ValueError("Website comparison requires boolean DNA flags")
+    species["legacy_comparison_status"] = "available"
+    species.loc[~complete, "legacy_comparison_status"] = "missing_required_website_flags"
+    species.loc[species.legacy_row_present.isna(), "legacy_comparison_status"] = "absent_from_website_cohort"
+    species["legacy_comparison_available"] = complete
 
     def old_weight(row):
+        if not row.legacy_comparison_available:
+            return float("nan")
         if row.goat_data_deficient:
             return DEFAULT_WEIGHTS["gdd"]
         if not row.family_has_dna:
@@ -377,7 +409,7 @@ def run(args):
     species["legacy_dna_weight"] = species.apply(old_weight, axis=1)
     species["legacy_priority"] = species.threat_weight * species.legacy_dna_weight
     eligible = species.gap_score_eligible
-    identity_eligible = species.identity_score_eligible
+    identity_eligible = species.identity_score_eligible & species.legacy_comparison_available
     if (
         not species.loc[identity_eligible, "website_species_dna"]
         .astype(bool)
@@ -394,21 +426,20 @@ def run(args):
         & species.redlist_category.isin(["CR", "EN", "VU"])
     ]
     plan = greedy_targets(tree, baseline_tips, candidates, args.budget)
-    if not plan.empty:
-        plan = plan.merge(
-            species[
-                [
-                    "iucn_sis_id",
-                    "iucn_scientific_name",
-                    "redlist_category",
-                    "legacy_priority",
-                    "genomic_gap_myr",
-                ]
-            ],
-            on="iucn_sis_id",
-            validate="one_to_one",
-            suffixes=("", "_static"),
-        )
+    plan = plan.merge(
+        species[
+            [
+                "iucn_sis_id",
+                "iucn_scientific_name",
+                "redlist_category",
+                "legacy_priority",
+                "genomic_gap_myr",
+            ]
+        ],
+        on="iucn_sis_id",
+        validate="one_to_one",
+        suffixes=("", "_static"),
+    )
     # Independent branch-union verification on representative scored species.
     pd_baseline = rooted_pd(tree, baseline_tips)
     for row in (
@@ -460,6 +491,8 @@ def run(args):
         eligible_website_dna=int(species.loc[eligible, "website_species_dna"].sum()),
         eligible_threatened_without_website_dna=len(candidates),
         join_status_counts=species.current_goat_join_status.value_counts().to_dict(),
+        website_comparison_available=int((eligible & species.legacy_comparison_available).sum()),
+        website_comparison_unavailable=int((eligible & ~species.legacy_comparison_available).sum()),
         comparison=comparison(species[eligible], "legacy_priority", "ark_gap_priority"),
         greedy_budget=args.budget,
         greedy_selected=len(plan),
@@ -496,6 +529,7 @@ def run(args):
         f"{len(candidates):,} threatened eligible mammals lack website DNA evidence.",
         f"{report['dna_positive_goat_records_without_tree_link']:,} DNA-positive GoaT mammal records lack a verified tree link. Priorities for {report['priorities_withheld_for_incomplete_genus_baseline']:,} additional mammals are withheld because an unlinked DNA-positive record belongs to the same genus. Missing records elsewhere in the family remain flagged; the remaining estimates are conditional on baseline coverage.",
         "",
+        f"Website comparisons are available for {report['website_comparison_available']:,} of {report['eligible']:,} eligible mammals; missing rows or flags remain unavailable.",
         f"Fixed-budget threatened top-100 overlap with the old score: {report['comparison'].get('top_overlap')} (legacy cutoff has {report['comparison'].get('legacy_at_cutoff')} tied species).",
         "",
         "## First greedy selections",
@@ -504,7 +538,7 @@ def run(args):
         "|---|---|---:|---:|",
     ]
     text += [
-        f"| {r.iucn_scientific_name} | {r.redlist_category} | {r.genomic_gap_myr:.3f} | {r.legacy_priority:g} |"
+        f"| {r.iucn_scientific_name} | {r.redlist_category} | {r.genomic_gap_myr:.3f} | {format(r.legacy_priority, 'g') if pd.notna(r.legacy_priority) else 'Unavailable'} |"
         for r in plan.head(10).itertuples()
     ]
     text += ["", "## Limits", "", *["- " + v for v in report["limitations"]]]

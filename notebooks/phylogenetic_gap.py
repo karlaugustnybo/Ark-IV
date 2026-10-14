@@ -70,8 +70,12 @@ def _(Path, hashlib, json, mo, os, pd):
     assert overridden_status.ott_extinct_flag.all()
     assert overridden_status.effective_extinct.eq(False).all()
     assert overridden_status.loc[overridden_status.tree_tip.isna(), "ark_gap_priority"].isna().all()
-    # Compare the entire checked identity cohort, including withheld priorities.
-    identity = species[species.identity_score_eligible].set_index("iucn_sis_id")
+    # Compare available website rows in the checked identity cohort, including withheld priorities.
+    assert species.loc[~species.legacy_comparison_available, "legacy_priority"].isna().all()
+    assert species.legacy_comparison_status.eq("available").equals(species.legacy_comparison_available)
+    assert (eligible.legacy_comparison_available.sum() == report["website_comparison_available"])
+    assert ((~eligible.legacy_comparison_available).sum() == report["website_comparison_unavailable"])
+    identity = species[species.identity_score_eligible & species.legacy_comparison_available].set_index("iucn_sis_id")
     old = legacy.set_index("iucn_sis_id").loc[identity.index]
     assert identity.website_species_dna.astype(bool).equals(old.has_dna_species_level.astype(bool))
     # Tree identities and all upstream genomic-transfer decisions are unchanged.

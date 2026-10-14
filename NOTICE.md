@@ -174,4 +174,4 @@ binary deployment.
   exact set of 1,000 augmented trees.
 
 Downloaded inputs and computed results are local data artifacts, outside the
-CC0 code dedication. See [data policy](DATA_POLICY.md#optional-dated-tree-investigation).
+application code licence. See [data policy](DATA_POLICY.md#optional-dated-tree-investigation).

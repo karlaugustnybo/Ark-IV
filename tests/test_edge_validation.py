@@ -38,6 +38,40 @@ def add_member(archive, name, contents):
 
 
 class EdgeFollowupTests(unittest.TestCase):
+    def test_report_preserves_unavailable_reference_correlations(self):
+        from ark_pipeline.cli.edge_validate import write_report
+        from ark_pipeline.edge import compare_reference
+
+        species = pd.DataFrame([
+            {"iucn_sis_id": i, "join_status": "scored", "redlist_category": "EN",
+             "ark_ed2_myr_median": float(i), "ark_edge2_myr_median": float(i)}
+            for i in (1, 2)
+        ])
+        outliers = pd.DataFrame({"category_agrees": pd.Series(dtype=bool),
+                                 "ed2_same_category_rank_delta": pd.Series(dtype=float)})
+        with tempfile.TemporaryDirectory() as tmp:
+            for mode, count in [("zero", 0), ("one", 1), ("constant", 2), ("finite", 2)]:
+                reference = [{"iucn_sis_id": i,
+                    "reference_category": "EN" if i <= count else "LC",
+                    "reference_ed2_myr": 1.0 if mode == "constant" else float(i),
+                    "reference_edge2_myr": 1.0 if mode == "constant" else float(i)}
+                    for i in (1, 2)]
+                _, agreement = compare_reference(species, reference)
+                report = {"coverage": {"new_exact_name_matches": 0, "baseline_scored": 2,
+                    "improved_scored": 2, "registered_mammals": 2},
+                    "reference_after": agreement, "tree_count": 1,
+                    "tree_stability": {}, "tree_stability_vs_birth_median": {},
+                    "threatened_top100_in_every_pilot_tree": 2,
+                    "topology_audit": {"birth_topology_unique_mammal_topologies": 1},
+                    "limitations": []}
+                path = Path(tmp) / (mode + ".md")
+                write_report(path, report, outliers, pd.DataFrame())
+                text = path.read_text()
+                self.assertIn(f"For {count} species", text)
+                self.assertEqual("**Unavailable for EDGE2**" in text, mode != "finite")
+                if mode == "finite":
+                    self.assertIn("1.000 for EDGE2", text)
+
     def test_current_ncbi_lineage_overrides_old_crosswalk_lineage(self):
         with tempfile.TemporaryDirectory() as tmp:
             nodes = Path(tmp) / "nodes.dmp"
