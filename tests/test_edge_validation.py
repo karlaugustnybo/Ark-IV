@@ -40,6 +40,48 @@ def add_member(archive, name, contents):
 
 
 class EdgeFollowupTests(unittest.TestCase):
+    def test_report_distinguishes_self_comparison_from_unavailable_overlap(self):
+        from ark_pipeline.cli.edge_validate import write_report
+
+        outliers = pd.DataFrame({"category_agrees": pd.Series(dtype=bool),
+                                 "ed2_same_category_rank_delta": pd.Series(dtype=float)})
+        with tempfile.TemporaryDirectory() as tmp:
+            for count, category in [(1, "LC"), (1, "EN"), (2, "VU"), (101, "EN")]:
+                with self.subTest(count=count, category=category):
+                    species = pd.DataFrame([
+                        {"iucn_sis_id": i, "iucn_scientific_name": f"Test {i}",
+                         "join_status": "scored", "redlist_category": category,
+                         "ark_edge2_myr_median": 1.0, "terminal_branch_myr": 1.0}
+                        for i in range(count)
+                    ])
+                    equal = rank_tree(species, "equal-median", "equal-median")
+                    birth = rank_tree(species, "birth-median", "birth-median")
+                    dates = rank_tree(species, "dates-1", "birth-dates")
+                    stability, stats = stability_summary(pd.concat([birth, dates]), equal)
+                    _, birth_stats = stability_summary(dates, birth)
+                    threatened = count if category != "LC" else 0
+                    self.assertEqual(
+                        birth_stats["birth-dates"]["baseline_top100_threatened_size"], threatened
+                    )
+                    report = {"coverage": {"new_exact_name_matches": 0,
+                        "baseline_scored": count, "improved_scored": count,
+                        "registered_mammals": count},
+                        "reference_after": {"same_category": {"species": 0,
+                            "edge2_spearman": None, "ed2_spearman": None}},
+                        "tree_count": 3, "tree_stability": stats,
+                        "tree_stability_vs_birth_median": birth_stats,
+                        "threatened_top100_in_every_pilot_tree": threatened,
+                        "topology_audit": {"birth_topology_unique_mammal_topologies": 1},
+                        "limitations": []}
+                    path = Path(tmp) / "report.md"
+                    write_report(path, report, outliers, stability)
+                    text = path.read_text()
+                    self.assertIn(f"| birth-median | 1 | {threatened}–{threatened} | Same tree |", text)
+                    self.assertIn(f"| birth-dates | 1 | {threatened}–{threatened} | {threatened}–{threatened} |", text)
+                    report["tree_stability_vs_birth_median"] = {}
+                    write_report(path, report, outliers, stability)
+                    self.assertIn(f"| birth-dates | 1 | {threatened}–{threatened} | Unavailable |", path.read_text())
+
     def test_report_preserves_unavailable_reference_correlations(self):
         from ark_pipeline.cli.edge_validate import write_report
         from ark_pipeline.edge import compare_reference

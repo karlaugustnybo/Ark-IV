@@ -330,7 +330,7 @@ def write_report(path, report, outliers, stability):
         birth_overlap = (
             f"{birth_stats['top100_threatened_overlap_min']}–{birth_stats['top100_threatened_overlap_max']}"
             if birth_stats
-            else "100 (same tree)"
+            else "Same tree" if group == "birth-median" else "Unavailable"
         )
         lines.append(
             f"| {group} | {stats['trees']} | {stats['top100_threatened_overlap_min']}–{stats['top100_threatened_overlap_max']} | {birth_overlap} |"
