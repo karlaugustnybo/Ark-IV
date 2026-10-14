@@ -40,3 +40,9 @@ stage-based CLI names and artifact-based builders.
 Historical profiling harnesses and raw reports mentioned in these documents are
 kept under local-only `archive/research/`, not in the GitHub code release. Current
 validation lives in `tests/`; use `just data-benchmark` for new end-to-end timings.
+
+## Exploratory notebooks
+
+[Serving export investigations](../notebooks/README.md) cover data completeness,
+coarse mapped range and DNA representation, and score-surface sensitivity.
+Use invented fixtures for code verification; real derived outputs remain local.

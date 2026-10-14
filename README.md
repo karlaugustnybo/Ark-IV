@@ -275,3 +275,11 @@ The code licence does **not** apply to source datasets or generated data
 artifacts. Those retain their own terms and required credits; see `NOTICE.md`
 and `DATA_POLICY.md`. In particular, AGPL does not grant permission to publish
 IUCN, EDGE, or other restricted data alongside the application.
+
+## Local exploratory notebooks
+
+The three [serving investigations](notebooks/README.md) describe export coverage,
+range–representation associations and alternative score surfaces. They are
+independent of production scoring and use their own PEP 723 environments.
+`just nb-graph-check` is data-free. Execution and HTML export are explicit opt-in
+recipes; ordinary `just check` does not read global notebook snapshots.
