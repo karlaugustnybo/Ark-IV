@@ -1080,7 +1080,7 @@ def _(cell_scores, cp_uncl_n, cp_uncl_share, jaccard, mo, pl, rank_set, spearman
         ("Exact-name matches only", "exact_only"),
         ("Partially covered ladder (EBP style)", "genus_partial"),
         ("EDGE cohort mass (availability pilot)", "edge_pilot"),
-        ("Framework-bearing cells only", "framework"),
+        ("Ecoregion-contact score (zero outside contacts)", "framework"),
     ]
     cp_sweep_rows = []
     for _label, _col in extra_alternates:
@@ -1099,11 +1099,11 @@ def _(cell_scores, cp_uncl_n, cp_uncl_share, jaccard, mo, pl, rank_set, spearman
     cp_sweep_df = pl.DataFrame(cp_sweep_rows)
     cp_min_rho = float(cp_sweep_df["spearman_all"].min())
     cp_min_j = float(cp_sweep_df["jaccard_1pct"].min())
-    framework_cells_n = cell_scores.filter(pl.col("framework") > 0.0).height
-    edge_cells_n = cell_scores.filter(pl.col("edge_pilot") > 0.0).height
+    framework_positive_cells_n = cell_scores.filter(pl.col("framework") > 0.0).height
+    edge_positive_cells_n = cell_scores.filter(pl.col("edge_pilot") > 0.0).height
     cp_sweep_table = mo.ui.table(
         cp_sweep_df.to_dicts(),
-        label="Crosswalk- and boundary-enabled specifications vs baseline",
+        label="Crosswalk- and boundary-enabled specifications vs baseline: all selected occupied cells",
     )
     cp_panel = mo.vstack(
         [
@@ -1123,12 +1123,17 @@ def _(cell_scores, cp_uncl_n, cp_uncl_share, jaccard, mo, pl, rank_set, spearman
         family-represented-only as 2 and family-absent/gdd as 4. **EDGE
         cohort mass** is deliberately a pilot: the serving layer stores no ED
         values (the ZSL lists are restricted), so the spec re-ranks with a 0/1
-        availability dummy over the {edge_cells_n:,} cells touching an
-        EDGE-group species — a rank-movement statement, not an EVE ranking.
-        **Framework-restricted** ranks within the {framework_cells_n:,} cells
-        carrying ≥1 RESOLVE 2017 ecoregion (biogeographic contacts —
-        attribution and naming caveat in notebook 1 §2b), so its correlation
-        should be read against its own support set rather than all occupied cells.
+        availability dummy and has {edge_positive_cells_n:,} cells with positive
+        pilot score — a rank-movement statement, not an EVE ranking.
+        **Ecoregion-contact score** retains baseline scores on cells carrying
+        ≥1 RESOLVE 2017 ecoregion and sets other cells to zero (biogeographic
+        contacts — attribution and naming caveat in notebook 1 §2b).
+        {framework_positive_cells_n:,} cells have positive framework score;
+        neither positive-score count measures all boundary or labelled-species contacts.
+        Every top set and correlation in this table uses the same
+        {cell_scores.height:,} selected occupied cells, including outside-support
+        zeros. Zero-score ties can enter top sets through deterministic cell-key
+        tie breaking; these comparisons are not restricted to positive-score cells.
         """),
         ]
     )
@@ -2230,13 +2235,17 @@ def _(cell_points, cell_story, mo, pl):
             .agg(pl.len())
             .sort("len", descending=True)
         )
+        _baseline = _r["baseline"].filter(_r["baseline"].is_finite())
+        _gap = _r["share_gap"].filter(_r["share_gap"].is_finite())
         _rows.append(
             {
                 "region": _name,
                 "cells": _r.height,
                 "species (pairs)": int(_r["n_species"].sum() or 0),
-                "mean baseline": float(_r["baseline"].mean() or 0.0),
-                "mean gap share": float(_r["share_gap"].mean() or 0.0),
+                "baseline observations": len(_baseline),
+                "mean baseline": _baseline.mean(),
+                "defined gap observations": len(_gap),
+                "mean gap share": _gap.mean(),
                 "dominant driver": _dom.head(1)["driver"].item() if _dom.height else "—",
             }
         )
@@ -2247,6 +2256,11 @@ def _(cell_points, cell_story, mo, pl):
         polygons. Compare these exploratory cuts without assuming the
         ordering or composition of their results. Pull the numbers straight from the cells
         above so they update with each export.
+        Means use the reported finite-observation counts; a mean with no
+        defined observations is unavailable (null), not measured zero.
+        Gap shares are defined only for positive-score cells under these
+        nonnegative weight rules. Empty rectangles indicate no selected cells,
+        not biological absence.
         """),
             mo.ui.table(_rows, label="Region snapshots at res-3"),
         ]
