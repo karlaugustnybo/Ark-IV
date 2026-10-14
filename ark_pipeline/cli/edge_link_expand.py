@@ -165,6 +165,7 @@ def run(args):
             p.name: receipt(p)
             for p in [
                 Path(__file__),
+                Path(__file__).parents[1] / "edge.py",
                 Path(__file__).parents[1] / "edge_link_extension.py",
                 Path(__file__).parents[1] / "edge_matching.py",
                 Path(__file__).parents[1] / "edge_links.py",

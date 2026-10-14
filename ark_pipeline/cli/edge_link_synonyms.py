@@ -272,6 +272,7 @@ def run(args):
             p.name: receipt(p)
             for p in [
                 Path(__file__),
+                Path(__file__).parents[1] / "edge.py",
                 Path("ark_pipeline/edge_synonyms.py"),
                 Path("ark_pipeline/edge_link_extension.py"),
                 Path("ark_pipeline/edge_matching.py"),

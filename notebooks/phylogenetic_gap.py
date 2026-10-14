@@ -31,6 +31,21 @@ def _(Path, hashlib, json, mo, os, pd):
     report = json.loads((directory / "report.json").read_text())
     for name, output in report["outputs"].items():
         assert hashlib.sha256((directory / name).read_bytes()).hexdigest() == output["sha256"], name
+    required_code = {
+        "ark_pipeline/cli/phylogenetic_gap.py",
+        "ark_pipeline/phylogenetic_gap.py",
+        "ark_pipeline/edge.py",
+        "ark_pipeline/edge_matching.py",
+        "ark_pipeline/edge_benchmark.py",
+        "ark_pipeline/builders/species_metadata.py",
+        "ark_pipeline/builders/coarse_cache.py",
+        "ark_pipeline/edge_links.py",
+        "ark_pipeline/edge_baseline_review.py",
+        "ark_pipeline/extinction_status.py",
+    }
+    assert required_code.issubset(report.get("code", {})), "Incomplete code provenance; rerun gap CLI from fresh sources"
+    for name in required_code:
+        assert hashlib.sha256((project / name).read_bytes()).hexdigest() == report["code"][name]["sha256"], f"Changed code: {name}; rerun gap CLI from fresh sources"
     for name, code in report["code"].items():
         assert hashlib.sha256(Path(code["path"]).read_bytes()).hexdigest() == code["sha256"], name
     species = pd.read_parquet(directory / "species_gap_pilot.parquet")

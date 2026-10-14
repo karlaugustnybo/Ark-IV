@@ -124,6 +124,7 @@ def run(args, config: dict, sources: dict) -> dict:
         "code": {
             "edge": receipt(Path(__file__).resolve().parents[1] / "edge.py"),
             "edge_links": receipt(Path(__file__).resolve().parents[1] / "edge_links.py"),
+            "extinction_status": receipt(Path(__file__).resolve().parents[1] / "extinction_status.py"),
             "cli": receipt(Path(__file__).resolve()),
         },
         "outputs": {

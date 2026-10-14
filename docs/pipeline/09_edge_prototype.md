@@ -206,7 +206,16 @@ Parquet audit tables: score components and complete-clade scores; link evidence
 and class coverage denominators; synonym/remaining-review evidence; sampled
 stability and reference residuals; gap/baseline audits and greedy gains. The
 benchmark also saves serialized cases, mappings, preparation and R session receipts.
-These are local artifacts, not public datasets.
+These are local artifacts, not public datasets. Validation permits an empty direct
+baseline when checked current-name rescue provides a scored cohort; if neither
+route yields an eligible assessed species, it stops with an explicit unsupported
+cohort error. Unavailable rank correlations are null, with available/unavailable
+tree counts; finite comparisons retain their observed range and overlap.
+
+Code receipts include the extinction-status and identity/tree-validation helpers
+that affect these results. The gap companion requires the complete dependency
+set and current hashes. Saved reports missing those digests require a fresh CLI
+run from the source inputs; do not rewrite an old receipt to claim compatibility.
 
 Six marimo companions inspect saved outputs without acquisition or mutation:
 `edge_benchmark`, `edge_links`, `edge_links_expanded`, `edge_links_synonyms`,

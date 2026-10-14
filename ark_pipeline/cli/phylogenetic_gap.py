@@ -502,6 +502,9 @@ def run(args):
             for p in [
                 Path(__file__),
                 Path("ark_pipeline/phylogenetic_gap.py"),
+                Path("ark_pipeline/edge.py"),
+                Path("ark_pipeline/edge_matching.py"),
+                Path("ark_pipeline/edge_benchmark.py"),
                 Path("ark_pipeline/builders/species_metadata.py"),
                 Path("ark_pipeline/builders/coarse_cache.py"),
                 Path("ark_pipeline/edge_links.py"),

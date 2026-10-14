@@ -117,6 +117,12 @@ def run(args):
     output.mkdir(parents=True, exist_ok=True)
     metadata.to_parquet(output / "tip_taxonomy.parquet", index=False)
     audit.to_parquet(output / "matching_audit.parquet", index=False)
+    if not any(
+        row["join_status"] == "joined" and row["redlist_category"] != "EX" for row in joined
+    ):
+        raise ValueError(
+            "No eligible assessed species after current-identity matching; validation cohort unsupported"
+        )
     reference = read_mammal_reference(Path(sources["mammal-reference"]["path"]))
     print("Scoring the original matching route for a controlled comparison", flush=True)
     scores, _ = score_clade(
@@ -264,7 +270,10 @@ def run(args):
         "archives": manifests,
         "code": {
             name: receipt(Path(__file__).parents[1] / name)
-            for name in ["edge.py", "edge_links.py", "edge_matching.py", "edge_trees.py", "edge_validation.py"]
+            for name in [
+                "edge.py", "edge_links.py", "edge_matching.py", "edge_trees.py",
+                "edge_validation.py", "extinction_status.py",
+            ]
         },
         "limitations": [
             "Eight first eligible archive members by default: a convenience pilot, not a random or complete 101-tree ensemble.",

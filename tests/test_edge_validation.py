@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import io
+import json
 import tarfile
 import tempfile
 import unittest
@@ -13,7 +14,7 @@ HAS_ENGINE = importlib.util.find_spec("dated_complete_tree") is not None
 if HAS_ENGINE:
     from ete4 import Tree
 
-from ark_pipeline.edge import score_clade
+from ark_pipeline.edge import compare_reference, score_clade
 from ark_pipeline.edge_matching import (
     build_ott_index,
     current_species_lineages,
@@ -25,6 +26,7 @@ from ark_pipeline.edge_trees import acquire_archive, extract_archive
 from ark_pipeline.edge_validation import (
     align_mammal_crown,
     rank_tree,
+    scored_species,
     stability_summary,
     topology_signature,
 )
@@ -336,6 +338,69 @@ class EdgeFollowupTests(unittest.TestCase):
             )
             self.assertTrue(all(row["join_status"] == "ncbi_not_in_clade" for row in improved))
             self.assertFalse(audit.accepted.any())
+
+    @unittest.skipUnless(HAS_ENGINE, "optional dated-tree engine")
+    def test_empty_direct_scores_keep_schema_for_valid_rescue(self):
+        tree = Tree("((A:1,B:1):2,C:3):0;", parser=1)
+        joined = [{"iucn_sis_id": 1, "iucn_scientific_name": "Test one",
+                   "redlist_category": "EN", "tree_tip": None,
+                   "join_status": "ncbi_not_in_clade"}]
+        scores, diagnostic = score_clade(tree.copy(), joined, 8, 42)
+        baseline = scored_species(joined, scores)
+        reference = [{"iucn_sis_id": 1, "reference_category": "EN",
+                      "reference_ed2_myr": 2.0, "reference_edge2_myr": 0.7}]
+        comparison, agreement = compare_reference(baseline, reference)
+        self.assertTrue(comparison.empty)
+        self.assertEqual(agreement["all_joined"]["species"], 0)
+        self.assertIsNone(agreement["all_joined"]["ed2_spearman"])
+        self.assertIn("ark_ed2_myr_median", comparison)
+        self.assertIn("terminal_branch_myr", baseline)
+        rescued = [{**joined[0], "tree_tip": "A", "join_status": "joined"}]
+        rescued_scores, after = score_clade(tree.copy(), rescued, 8, 42)
+        improved = scored_species(rescued, rescued_scores)
+        comparison, agreement = compare_reference(improved, reference)
+        self.assertEqual(agreement["all_joined"]["species"], 1)
+        self.assertEqual(improved.iloc[0].join_status, "scored")
+        self.assertEqual(diagnostic["retained_tree_tips"], 3)
+        self.assertEqual(after["retained_tree_tips"], 3)
+        self.assertEqual(after["unassessed_or_unjoined_tree_tips"], 2)
+
+    def test_stability_nullable_correlations_and_mixed_availability(self):
+        def species(scores):
+            return pd.DataFrame([
+                {"iucn_sis_id": i, "iucn_scientific_name": f"Test {i}",
+                 "join_status": "scored", "redlist_category": "VU",
+                 "ark_edge2_myr_median": value, "terminal_branch_myr": 1}
+                for i, value in enumerate(scores, 1)
+            ])
+
+        for scores in [[5], [5, 5]]:
+            with self.subTest(scores=scores):
+                baseline = rank_tree(species(scores), "base", "base")
+                summary, stats = stability_summary(rank_tree(species(scores), "one", "dates"), baseline)
+                detail = stats["dates"]
+                self.assertIsNone(detail["rank_correlation_min"])
+                self.assertIsNone(detail["rank_correlation_max"])
+                self.assertEqual(detail["rank_correlation_unavailable_trees"], 1)
+                self.assertEqual(detail["top100_threatened_overlap_min"], len(scores))
+                self.assertEqual(len(summary), len(scores))
+                json.dumps(stats, allow_nan=False)
+        baseline = rank_tree(species([5, 10]), "base", "base")
+        alternatives = pd.concat([
+            rank_tree(species([5, 5]), "constant", "dates"),
+            rank_tree(species([10, 5]), "reversed", "dates"),
+            rank_tree(species([5, 10]), "same", "dates"),
+        ])
+        summary, stats = stability_summary(alternatives, baseline)
+        detail = stats["dates"]
+        self.assertEqual(detail["rank_correlation_available_trees"], 2)
+        self.assertEqual(detail["rank_correlation_unavailable_trees"], 1)
+        self.assertAlmostEqual(detail["rank_correlation_min"], -1)
+        self.assertAlmostEqual(detail["rank_correlation_max"], 1)
+        self.assertEqual(detail["trees"], 3)
+        self.assertEqual(detail["top100_threatened_overlap_min"], 2)
+        self.assertEqual(len(summary), 2)
+        json.dumps(stats, allow_nan=False)
 
     def test_stability_rejects_changed_cohorts_and_excludes_non_threatened(self):
         species = pd.DataFrame(

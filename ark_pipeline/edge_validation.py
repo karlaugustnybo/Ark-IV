@@ -52,7 +52,9 @@ def scored_species(joined: list[dict], scores: list[dict]) -> pd.DataFrame:
             else:
                 row.update(by_tip[row["tree_tip"]], join_status="scored")
         records.append(row)
-    return pd.DataFrame(records)
+    # Retain the complete crown-score schema even when no assessment joins directly.
+    columns = dict.fromkeys(key for row in [*joined, *scores] for key in row)
+    return pd.DataFrame(records).reindex(columns=list(columns))
 
 
 def rank_tree(species: pd.DataFrame, tree_id: str, group: str) -> pd.DataFrame:
@@ -105,20 +107,24 @@ def stability_summary(results: pd.DataFrame, baseline: pd.DataFrame) -> tuple[pd
             len(base_top & set(part.loc[part.threatened_rank <= 100, "iucn_sis_id"]))
             for _, part in frame.groupby("tree_id")
         ]
-        rank_correlations = [
-            float(
-                base.assessed_rank.rank().corr(part.set_index("iucn_sis_id").assessed_rank.rank())
-            )
-            for _, part in frame.groupby("tree_id")
-        ]
+        rank_correlations = []
+        for _, part in frame.groupby("tree_id"):
+            x = base.assessed_rank.rank()
+            y = part.set_index("iucn_sis_id").assessed_rank.rank()
+            if x.nunique() > 1 and y.nunique() > 1:
+                correlation = x.corr(y)
+                if np.isfinite(correlation):
+                    rank_correlations.append(float(correlation))
         # Average tied ranks here give a Spearman comparison; display ranks use min.
         details[group] = {
             "trees": len(tree_ids),
             "baseline_top100_threatened_size": len(base_top),
             "top100_threatened_overlap_min": min(overlaps),
             "top100_threatened_overlap_max": max(overlaps),
-            "rank_correlation_min": min(rank_correlations),
-            "rank_correlation_max": max(rank_correlations),
+            "rank_correlation_available_trees": len(rank_correlations),
+            "rank_correlation_unavailable_trees": len(tree_ids) - len(rank_correlations),
+            "rank_correlation_min": min(rank_correlations) if rank_correlations else None,
+            "rank_correlation_max": max(rank_correlations) if rank_correlations else None,
         }
     summary = pd.DataFrame(summaries)
     for group in details:
