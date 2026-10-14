@@ -1046,9 +1046,11 @@ must not be relabelled completed reference genomes.
 
 Score exploration checks range-rarity conservation against one weight per
 listed species and independently checks declared range lengths. Country shares
-use overlapping land-contact cells. Ecoregion fractions keep land-mapped species
-with zero coverage and intersect the numerator with the denominator's land
-universe. Ecoregions are not protected areas. Moran permutations use the same
+use overlapping country-scope contact cells (nonempty `admin0`), including
+possible EEZ-only contacts; this is not a terrestrial mask. Ecoregion fractions
+keep country-contacted species with zero coverage and intersect the numerator
+with that same country-contact denominator. Ecoregions are not protected areas.
+Moran permutations use the same
 zero-based adjacency and normalization as observed values. Rank comparisons
 keep zero-score cells in a consistent selected universe; constant correlations
 are undefined. Parent aggregation repeats child budgets rather than rebuilding

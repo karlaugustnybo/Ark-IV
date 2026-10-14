@@ -211,9 +211,10 @@ def _(BOUND_P, CROSSWALK_P, SPECIES_P, duckdb, mo, pl):
         boundaries, **not** protected areas (Protected Planet data remains
         excluded); "framework-bearing cell" means "inside one of the retained
         terrestrial partitions".
-        **Municipality grain** remains a stub: only {_mun:,} res-3 cells in this
-        export carry any ADM2 membership, so municipality stewardship
-        questions are not answerable from serving files today.
+        **Municipality grain:** {_mun:,} of {_cells:,} res-3 cells in this
+        export carry ADM2 contact membership ({_mun / _cells:.1%}). Stewardship
+        analyses must use the observed memberships and review boundary coverage;
+        an empty membership does not distinguish missing boundaries from no contact.
         """),
             mo.md(f"""
         **Crosswalk rows and registered species use different denominators.**
@@ -453,8 +454,8 @@ def _(LISTS_P, alt, duckdb, h3, mo, pl):
                 "polygons on hexes over open water too, so occupied cells include "
                 "ocean hexes touched by mapped species. This number says the export "
                 "covers this fraction of the sphere's coarse grid; occupancy on land is a different "
-                "quantity (notebook 3's stewardship cut keeps land-contacted cells "
-                "only)."
+                "quantity (notebook 3's stewardship cut keeps country-scope contacts, "
+                "including possible EEZ contacts; it is not a terrestrial mask)."
             ),
         ]
     )
@@ -549,8 +550,7 @@ def _(BOUND_P, CROSSWALK_P, LISTS_P, SPECIES_P, SYSTEMS_P, duckdb, h3, mo, os):
     species each — {", ".join(_names.get(c, c) for c in _countries)} — these are the
     spots where the map will saturate and where a coarse-cell "priority" means
     a *lot* of co-occurring species. The freshwater / marine / terrestrial
-    columns (species may belong to several systems) show how the mass leans
-    marine here: in the richest cell {_top[0][4] / _top[0][1]:.0%} of the
+    columns (species may belong to several systems) report the recorded system mixture: in the richest cell {_top[0][4] / _top[0][1]:.0%} of the
     species carry the Marine system in this snapshot. This does not identify a biological cause of richness. {_note}
     """),
             mo.ui.table(_rows, label="Top res-3 cells by species count"),
@@ -627,7 +627,7 @@ def _(CELLS_P, alt, duckdb, pl):
     (_bar + _lab).properties(
         width=600,
         height=280,
-        title="Mapped range size: most of the map's species live on very few cells",
+        title="Mapped range size across the selected species",
     ).configure_axis(labelFontSize=11, titleFontSize=12).configure_title(
         anchor="start", fontSize=13
     )
@@ -648,8 +648,8 @@ def _(CELLS_P, duckdb, mo):
     mo.md(
         f"Range size (res-3 cells per species): min {_s[0]:,}, median {_s[1]:,.0f}, "
         f"p90 {_s[2]:,.0f}, p99 {_s[3]:,.0f}, max {_s[4]:,}. "
-        "The long right tail is the macro-scale of the map: a handful of very "
-        "wide-range species cover enormous swaths of cells."
+        "Compare these quantiles within the selected mapped cohort; they do not "
+        "establish the distribution of ranges outside these inputs."
     )
     return
 

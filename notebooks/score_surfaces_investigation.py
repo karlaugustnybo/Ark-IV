@@ -907,9 +907,8 @@ def _(CROSSWALK_P, LISTS_P, SPECIES_P, WL_DNA, WL_T, con, jaccard, mo, os, pl, r
             **{class_mean:.2f}**. Read against the size asymmetry: a small
             overlap is structurally favoured when k_own is smaller than the baseline set, so treat the
             per-class exact values as directional and compare their occupied-cell denominators explicitly.
-            Scoring classes separately is the specification most likely to
-            reallocate the map, since amphibian and insect hotspots do not
-            need vertebrate escorts.
+            Compare each class specification on its own occupied-cell support
+            before attributing a rank change to taxonomic composition.
             """),
                 mo.ui.table(class_df.to_dicts(), label="Per-class hotspots vs global baseline"),
             ]
@@ -987,8 +986,7 @@ def _(alt, cell_points, mo, pl, score_map, sweep_df, top_b):
         weight-ladder specifications Spearman ρ ≥ **{_min_rho:.2f}** and the
         top-1% Jaccard stays ≥ **{_min_j1:.2f}**. Range-rarity stands apart in
         the same table (ρ = **{_rarity_rho:.2f}** all cells) — not a mere
-        adjustment but a distribution of the species budgets (§2). The per-class specification
-        (below) most strongly reshapes the taxonomic composition.
+        adjustment but a distribution of the species budgets (§2). Compare the per-class specification below on its stated support.
 
         On Spearman: cells the rank correlation carries a large tie
         mass of identical scores; average-rank ties sit in the *lower* tail,
@@ -1019,8 +1017,7 @@ def _(mo):
       unclassified remainder is a coverage question, not a weight choice;
     - `cell_boundaries[].conservation_framework` (RESOLVE 2017 terrestrial
       ecoregions, CC BY 4.0 — a biogeographic partition, *not* protected
-      areas) restricts scores to ecoregion-bearing cells, the paper-level
-      "land mask" robustness spec;
+      areas) restricts scores to ecoregion-bearing cells, an ecoregion-contact specification rather than an independent terrestrial mask;
 
     plus the EBP-style partially-covered DNA ladder and an EDGE-cohort
     pilot mass map. Each is scored live below and compared against the
@@ -1129,7 +1126,7 @@ def _(cell_scores, cp_uncl_n, cp_uncl_share, jaccard, mo, pl, rank_set, spearman
         availability dummy over the {edge_cells_n:,} cells touching an
         EDGE-group species — a rank-movement statement, not an EVE ranking.
         **Framework-restricted** ranks within the {framework_cells_n:,} cells
-        carrying ≥1 RESOLVE 2017 ecoregion (the biogeographic land mask —
+        carrying ≥1 RESOLVE 2017 ecoregion (biogeographic contacts —
         attribution and naming caveat in notebook 1 §2b), so its correlation
         should be read against its own support set rather than all occupied cells.
         """),
@@ -1221,9 +1218,7 @@ def _(cell_scores, con, jaccard, math, mo, rank_set, spearman):
         {_nulls["rarity"]:+.3f}, exact_only {_nulls["exact_only"]:+.3f},
         genus_partial {_nulls["genus_partial"]:+.3f}; a single permutation is a diagnostic, not a confidence band. Applied here: the §2 headline
         baseline↔rarity J = {_j_rarity:.2f} sits ~{(_j_rarity / expected_j):.0f}×
-        above this random-assignment approximation (the clean statement
-        is "the overlap exists but is *small* in practice", not "the maps are
-        noise"), and ρ = {_rho_rarity:.2f} can be compared with these individual null draws —
+        above this random-assignment approximation (interpret the observed overlap on the stated support), and ρ = {_rho_rarity:.2f} can be compared with these individual null draws —
         quote σ₁ [the tie-structured null] first, the excess second.
         """),
         ]
@@ -1388,13 +1383,14 @@ def _(mo):
 
     $$\text{share(species } s, \text{area } a) =
     \text{(range cells of } s \text{ inside } a) \over
-    \text{(all land-contacted range cells of } s)$$
+    \text{(all country-contacted range cells of } s)$$
 
     Reading note: the shares are *cell-contact* counts, not area weights, so a
     cell where a species' polygon merely touches two countries contributes to
-    both. Land-contacted range cells exclude ocean-only res-3 hexes — shares
-    for species with important marine range fractions are relatively distorted
-    and the proxy undercounts them.
+    both. Country-contacted cells have nonempty `admin0` membership. The serving
+    country scope unions land with matching EEZs, so this denominator includes
+    possible ocean-only contacts and is not a terrestrial mask. Cells without
+    country-scope contacts are excluded; shares are conditional on that support.
 
     As a first use, this turns the dark-spot cohort — Endangered or Critically
     Endangered species on ≤ 25 res-3 cells with no species-level evidence and
@@ -1414,8 +1410,8 @@ def _(BOUND_P, CELLS_P, SPECIES_P, con, mo, pl):
             SELECT h3_index AS cell, UNNEST(admin0) AS iso
             FROM '{BOUND_P}' WHERE len(admin0) > 0
         ),
-        land AS (
-            SELECT r.sid, COUNT(*) AS land_cells
+        country_contact AS (
+            SELECT r.sid, COUNT(*) AS country_contact_cells
             FROM ranges r JOIN (SELECT DISTINCT cell FROM bounds) ub USING (cell)
             GROUP BY 1
         ),
@@ -1432,25 +1428,27 @@ def _(BOUND_P, CELLS_P, SPECIES_P, con, mo, pl):
         sizes AS (
             SELECT gbif_accepted_id AS sid, len(h3_indexes) AS ncells FROM '{CELLS_P}'
         )
-        SELECT base.species_name, s2c.iso, s2c.du, land.land_cells, sizes.ncells
+        SELECT base.species_name, s2c.iso, s2c.du, country_contact.country_contact_cells, sizes.ncells
         FROM base
         JOIN sizes ON base.sid = sizes.sid
-        JOIN land ON base.sid = land.sid
+        JOIN country_contact ON base.sid = country_contact.sid
         JOIN s2c ON base.sid = s2c.sid
         WHERE NOT base.gdd AND NOT base.has_dna
           AND base.redlist_category IN ('Critically Endangered', 'Endangered')
     """)
         .pl()
         .filter(pl.col("ncells") <= 25)
-        .with_columns((pl.col("du") / pl.col("land_cells")).alias("land_share"))
+        .with_columns(
+            (pl.col("du") / pl.col("country_contact_cells")).alias("country_contact_share")
+        )
     )
 
     steward_countries = (
         steward.group_by("iso")
         .agg(
             n_dark=pl.col("species_name").n_unique(),
-            n_quarter=(pl.col("land_share") >= 0.25).sum(),
-            n_single=(pl.col("land_share") >= 0.9).sum(),
+            n_quarter=(pl.col("country_contact_share") >= 0.25).sum(),
+            n_single=(pl.col("country_contact_share") >= 0.9).sum(),
         )
         .sort("n_quarter", descending=True)
     )
@@ -1467,14 +1465,14 @@ def _(alt, mo, os, pl, steward, steward_countries, steward_species_n):
         f"{_names.get(r['iso'], r['iso'])} ({r['n_quarter']})"
         for r in _top.head(6).iter_rows(named=True)
     )
-    _single_species = steward.filter(pl.col("land_share") >= 0.9)
+    _single_species = steward.filter(pl.col("country_contact_share") >= 0.9)
     single_count = _single_species["species_name"].n_unique()
     _bars = (
         alt.Chart(_top)
         .mark_bar(color="#b0503f")
         .encode(
             y=alt.Y("iso:N", sort=_order, title=None),
-            x=alt.X("n_quarter:Q", title="dark species with ≥ 25% land share"),
+            x=alt.X("n_quarter:Q", title="dark species with ≥ 25% country-contact share"),
             tooltip=[alt.Tooltip("n_dark:Q", title="all dark species touched")],
         )
         .properties(
@@ -1489,8 +1487,8 @@ def _(alt, mo, os, pl, steward, steward_countries, steward_species_n):
         [
             mo.md(f"""
         **{steward_species_n:,}** restricted, threatened, without recorded species evidence species
-        (share > 0 on land cells) resolve here at country grain. Live top-6 by
-        dark species with ≥ 25% land share: {_top_names}. Country contacts
+        (share > 0 on country-contact cells) resolve here at country grain. Live top-6 by
+        dark species with ≥ 25% country-contact share: {_top_names}. Country contacts
         can overlap, so their shares need not sum to one. {single_count:,}
         species meet the ≥90% threshold; this is a coarse contact diagnostic,
         not exclusivity or an authorized sequencing recommendation.
@@ -1503,8 +1501,8 @@ def _(alt, mo, os, pl, steward, steward_countries, steward_species_n):
 
 @app.cell
 def _(BOUND_P, CELLS_P, SPECIES_P, con, mo, pl):
-    # Stewardship × protection-adjacent split: how much of each dark
-    # species' *land-contacted* range sits inside a RESOLVE 2017 ecoregion
+    # Stewardship × ecoregion contacts: how much of each dark
+    # species' *country-contacted* range sits inside a RESOLVE 2017 ecoregion
     # (the conservation_framework codes the serving layer retained) versus
     # outside. Ecoregions are biogeographic units — not protected areas —
     # so this reads as "biogeographically anchored vs. un-anchored range",
@@ -1518,7 +1516,7 @@ def _(BOUND_P, CELLS_P, SPECIES_P, con, mo, pl):
             SELECT DISTINCT h3_index AS cell FROM '{BOUND_P}'
             WHERE len(conservation_framework) > 0
         ),
-        land AS (
+        country_contact AS (
             SELECT DISTINCT h3_index AS cell FROM '{BOUND_P}' WHERE len(admin0) > 0
         ),
         base AS (
@@ -1532,19 +1530,19 @@ def _(BOUND_P, CELLS_P, SPECIES_P, con, mo, pl):
         ),
         fw_count AS (
             SELECT r.sid, COUNT(*) AS n_fw
-            FROM ranges r JOIN fw USING (cell) JOIN land USING (cell) GROUP BY 1
+            FROM ranges r JOIN fw USING (cell) JOIN country_contact USING (cell) GROUP BY 1
         ),
-        land_count AS (
-            SELECT r.sid, COUNT(*) AS n_land
-            FROM ranges r JOIN land USING (cell) GROUP BY 1
+        country_contact_count AS (
+            SELECT r.sid, COUNT(*) AS n_country_contact
+            FROM ranges r JOIN country_contact USING (cell) GROUP BY 1
         )
         SELECT base.species_name, base.family,
-               COALESCE(fc.n_fw, 0)::DOUBLE / lc.n_land::DOUBLE AS fw_share,
+               COALESCE(fc.n_fw, 0)::DOUBLE / lc.n_country_contact::DOUBLE AS fw_share,
                sz.ncells
         FROM base
         JOIN sizes sz ON sz.sid = base.sid
         LEFT JOIN fw_count fc ON fc.sid = base.sid
-        JOIN land_count lc ON lc.sid = base.sid
+        JOIN country_contact_count lc ON lc.sid = base.sid
         WHERE NOT base.gdd AND NOT base.has_dna
           AND base.rl IN ('Critically Endangered', 'Endangered')
     """)
@@ -1564,9 +1562,9 @@ def _(BOUND_P, CELLS_P, SPECIES_P, con, mo, pl):
         [
             mo.md(f"""
         **Stewardship × ecoregion anchorage** for the {fw_steward.height:,} dark
-        species with land-contacted ranges: {
+        species with country-contacted ranges: {
                 fw_steward.filter(pl.col("anchorage") == "≥80% inside ecoregions").height:,}
-        have ≥ 80% of their land-contacted cells inside a RESOLVE 2017
+        have ≥ 80% of their country-contacted cells inside a RESOLVE 2017
         ecoregion boundary and {
                 fw_steward.filter(
                     pl.col("anchorage") == "<20% inside (mostly un-anchored)"
@@ -1574,18 +1572,19 @@ def _(BOUND_P, CELLS_P, SPECIES_P, con, mo, pl):
         sit almost entirely outside it. Honest caveat, stated flat: a
         species being "inside ecoregions" is a statement about biogeographic
         cataloguing, not about protection status (Protected Planet data
-        stays out of the serving layer). Because the any-touch rule puts
-        most land-contacted res-3 cells inside *some* ecoregion, the split
-        can be close to degenerate — the actionable
+        stays out of the serving layer). The denominator includes possible EEZ-only country contacts, while
+        the numerator intersects those same contacts with retained ecoregions.
+        Zero ecoregion contact stays visible; inspect the observed split rather
+        than presuming terrestrial coverage. The actionable
         protection-vs-nothing split the §7 reviewer note asks for needs
         protected-area geometry (a licensed acquisition), not the
-        ecoregion codes. The numbers still separate the few wholly
+        ecoregion codes. The numbers identify wholly
         un-anchored dark species (panel below) whose priority geography is
         tied to no named bioregion.
         """),
             mo.ui.table(
                 _split.to_dicts(),
-                label="Dark-cohort anchorage split (share of land-contacted cells inside any ecoregion)",
+                label="Dark-cohort anchorage split (share of country-contacted cells inside any ecoregion)",
             ),
             mo.accordion(
                 {
@@ -1637,14 +1636,14 @@ def _(mo):
 def _(disclosure, mo, pl, steward):
     if disclosure.value:
         work_order = mo.ui.table(
-            steward.filter(pl.col("land_share") >= 0.9)
+            steward.filter(pl.col("country_contact_share") >= 0.9)
             .sort("du", descending=True)
             .head(12)
             .select(
                 "species_name",
                 "iso",
-                pl.col("du").alias("land cells in country"),
-                pl.col("land_share").round(2),
+                pl.col("du").alias("country-contact cells in country"),
+                pl.col("country_contact_share").round(2),
                 pl.col("ncells").alias("all mapped cells"),
             )
             .to_dicts(),
@@ -1707,13 +1706,12 @@ def _(BOUND_P, CELLS_P, SPECIES_P, con, disclosure, mo, pl):
     municipality_panel = mo.vstack(
         [
             mo.md(f"""
-        **ADM2 / municipality grain today.** Only {municipality.height:,.0f} dark-species
-        municipality memberships exist — the global ADM2 acquisition is a
-        cataloguing exercise, and the serving boundary files still carry the
-        configured memberships. The municipality stewardship
-        contract from the roadmap ("this ADM2 area holds a fraction of the mapped
-        distribution of …") becomes answerable only once a full build supplies
-        those matching pairs everywhere. Species rows below are gated by the
+        **ADM2 / municipality grain today.** {municipality.height:,.0f} dark-species
+        municipality contact pairs are observed in these configured inputs.
+        This panel reports contacts rather than distribution fractions. Missing
+        memberships may reflect unavailable boundaries or no spatial contact;
+        these files alone do not distinguish the two. A fraction requires an
+        explicit denominator and boundary-coverage review. Species rows below are gated by the
         same internal-only switch as the work-order table above.
         """),
             _mun_ui,
@@ -1730,7 +1728,7 @@ def _(mo):
     The roadmap's P2 item starts from exactly the question this section
     previews for UI presentation: two cells can carry the same score while
     being driven by opposite things — many threatened species that *already*
-    have adequate genomic resources, a handful of species weighed heavily on
+    have recorded qualifying evidence, a handful of species weighed heavily on
     both dimensions, or sheer richness adding many low-weight contributions.
     The closest structural precedent, Schultz et al. 2024 (reviewed bioRxiv
     preprint — treated by the roadmap as methodological precedent, not
@@ -2120,7 +2118,9 @@ def _(alt, cell_points, pair_level, mo, pl):
             y=alt.Y("mean_dna_share:Q", title="% species-level DNA in cell, mean"),
             tooltip=[alt.Tooltip("mean_dna_share:Q", format=".1f")],
         )
-        .properties(width=560, height=150, title="…and the sequencing coverage the same cells show")
+        .properties(
+            width=560, height=150, title="…and the recorded species evidence the same cells show"
+        )
     )
     geography_panel = mo.vstack([_rich, _dna])
     geography_panel
@@ -2269,9 +2269,10 @@ def _(cp_min_j, cp_min_rho, EXPORT_STAMP, mo):
     The crosswalk-enabled sweep has minimum top-1% overlap {cp_min_j:.2f}
     and minimum defined rank correlation {cp_min_rho:.2f} for these inputs.
 
-    Country stewardship is a land-contact ratio with overlapping countries,
+    Country stewardship uses country-scope contacts, including possible EEZ
+    contacts and overlapping countries,
     not area-weighted responsibility. Zero ecoregion coverage stays in the
-    land-mapped cohort; ecoregions do not measure legal protection. Every
+    country-contacted cohort; ecoregions do not measure legal protection. Every
     derived table and aggregate stays local pending DATA_POLICY.md review.
 
     Composition bins describe score arithmetic. The gap share is one for

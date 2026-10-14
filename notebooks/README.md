@@ -26,8 +26,14 @@ The fixture output directory must be new or empty. Its organisms, identifiers,
 cohorts and boundary codes are invented. It has enough variation for actual
 logistic fitting; it is not a calibrated ecological simulation. Missing files,
 missing required columns and empty input tables fail with an explicit input
-message. Empty model selections or absent reference levels show an unavailable
-model instead of inventing a result. Some small/singular cohorts cannot support
+message. Cell lists, boundaries and inverse ranges must contain only valid
+resolution-3 H3 keys; mixed-resolution exports are rejected before analysis,
+including legacy files without a `resolution` column. Use a res-3-only export
+for this coarse workflow; no fine rows are silently dropped. Empty model
+selections or absent reference levels show an unavailable
+model instead of inventing a result. Conditional fits report convergence and
+finite-result failures independently, preserving the other valid fit. Some
+small/singular cohorts cannot support
 the configured fit; fitting errors remain visible.
 
 Without environment overrides, the notebooks retain the original local defaults:
@@ -60,8 +66,11 @@ Assessment cohorts do not timestamp genome availability.
 Top sets use deterministic cell-key tie breaking and report their own selected
 universe. Zero or constant surfaces have undefined correlations. A null reference
 is an unblocked diagnostic, not a spatial correction. Parent aggregation sums
-child-cell budgets and can repeat species. Country-contact shares overlap;
-ecoregions are biogeographic partitions, not protection. With sampled DNA weight
+child-cell budgets and can repeat species. Country-contact shares overlap and
+can include EEZ-only contacts; `admin0`
+is not a terrestrial mask. Ecoregion shares intersect those same contacts and
+retain zero coverage. Ecoregions are biogeographic partitions, not protection.
+With sampled DNA weight
 zero, gap-weight share is one in every positive-score cell, so the bivariate gap
 axis is structurally degenerate under this ladder.
 

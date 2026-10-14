@@ -65,6 +65,7 @@ def configured_inputs(files: tuple[str, ...] = tuple(SCHEMAS)) -> NotebookInputs
     rather than masquerading as biological zeroes or rendering partial results.
     """
     import duckdb
+    import h3
 
     exports = Path(os.environ.get("ARK_NOTEBOOK_EXPORTS", "data/global/exports"))
     crosswalk = Path(
@@ -104,6 +105,39 @@ def configured_inputs(files: tuple[str, ...] = tuple(SCHEMAS)) -> NotebookInputs
                     raise ValueError(
                         "Mapped ranges must contain at least one cell; missing coverage belongs outside this table"
                     )
+            if path.name in {
+                "species_cells_res3.parquet",
+                "cell_species_lists.parquet",
+                "cell_boundaries.parquet",
+            }:
+                message = (
+                    f"Notebook input {path.name} requires valid resolution-3 H3 cells; "
+                    "supply a resolution-3-only export (mixed resolutions are not analysed)"
+                )
+                if (
+                    "resolution" in relation.columns
+                    and (
+                        relation.filter("resolution IS NULL OR resolution != 3")
+                        .count("*")
+                        .fetchone()[0]
+                    )
+                ):
+                    raise ValueError(message)
+                # Check keys as well: legacy files can omit the resolution column,
+                # and a declared resolution does not establish the actual H3 key.
+                column = (
+                    "UNNEST(h3_indexes) AS cell"
+                    if path.name == "species_cells_res3.parquet"
+                    else "h3_index AS cell"
+                )
+                keys = relation.project(column).distinct().execute()
+                while batch := keys.fetchmany(4096):
+                    for (key,) in batch:
+                        if not isinstance(key, int) or not 0 < key < 2**64:
+                            raise ValueError(message)
+                        cell = h3.int_to_str(key)
+                        if not h3.is_valid_cell(cell) or h3.get_resolution(cell) != 3:
+                            raise ValueError(message)
             identity.update(path.name.encode())
             with path.open("rb") as stream:
                 while block := stream.read(1024 * 1024):

@@ -351,7 +351,7 @@ def _(BUCKETS, alt, derived_df, pl):
         )
     )
     (_bars + _labels).properties(
-        width=620, height=300, title="Genomic coverage climbs with range size"
+        width=620, height=300, title="Recorded species evidence by mapped range size"
     ).configure_axis(labelFontSize=11, titleFontSize=12).configure_title(
         anchor="start", fontSize=13
     )
@@ -575,7 +575,7 @@ def _(TOP_CLASSES, alt, derived_df, mo, pl):
             .properties(
                 width=620,
                 height=320,
-                title="Whole cohorts shifted along the range axis",
+                title="Cumulative mapped footprint by lineage class",
             )
             .configure_axis(labelFontSize=11, titleFontSize=12)
             .configure_title(anchor="start", fontSize=13),
@@ -602,8 +602,8 @@ def _(mo):
     species as independent experiments and overstates certainty. The
     confidence intervals are therefore **cluster-robust by family** (standard
     errors clustered on the species table's `family` column); the point
-    estimates are still population-average log-odds, only the uncertainty is
-    corrected. A full mixed/GLMM accounting of within-family random effects
+    estimates remain fitted associations in this selected cohort; clustering
+    adjusts their standard errors. A full mixed/GLMM accounting of within-family random effects
     is the next step and is listed in the conclusion's limits.
     """)
     return
@@ -756,7 +756,7 @@ def _(mo):
     distinct selection processes are collapsed into that conditioning:
 
     1. `P(mapped | threat, class, scope)` — having a managed cartographic
-       product at all (over half of registered species have none); and
+       product at all (coverage is computed above from the selected register); and
     2. `P(species-level DNA | mapped, threat, class, scope)` — the §4 model.
 
     Fit both conditional associations with family-clustered uncertainty.
@@ -811,45 +811,54 @@ def _(TOP_CLASSES, mo, np, pl, sm, species_df):
     )
 
     def _fit(frame, y: str):
-        mo.stop(
-            frame.height == 0, mo.md("No complete observations for the conditional logistic model.")
-        )
+        # Validate each process independently so an unavailable fit does not
+        # suppress the other process's supported association.
+        if frame.height == 0:
+            return None, "No complete observations for this conditional logistic model."
         import pandas
 
         _pd = frame.to_pandas()
         _y = _pd[y].astype(float)
-        mo.stop(
-            _y.nunique() < 2 or _pd["family"].nunique() < 2,
-            mo.md("Conditional logit needs both outcomes and multiple family clusters."),
-        )
-        mo.stop(
+        if _y.nunique() < 2 or _pd["family"].nunique() < 2:
+            return None, "Conditional logit needs both outcomes and multiple family clusters."
+        if (
             "Magnoliopsida" not in set(_pd["cls"])
             or "LC" not in set(_pd["rl5"])
-            or "terrestrial" not in set(_pd["scp"]),
-            mo.md("The stated conditional-logit reference levels are absent."),
-        )
+            or "terrestrial" not in set(_pd["scp"])
+        ):
+            return None, "The stated conditional-logit reference levels are absent."
         _x = pandas.get_dummies(
             _pd[["cls", "rl5", "scp"]],
             columns=["cls", "rl5", "scp"],
             prefix={"cls": "cls", "rl5": "rl", "scp": "scp"},
             dtype=float,
         ).drop(columns=["cls_Magnoliopsida", "rl_LC", "scp_terrestrial"], errors="ignore")
-        mo.stop(
-            np.linalg.matrix_rank(sm.add_constant(_x).to_numpy()) < _x.shape[1] + 1,
-            mo.md("Conditional-logit design is rank-deficient."),
-        )
-        return sm.Logit(_y, sm.add_constant(_x)).fit(
+        if np.linalg.matrix_rank(sm.add_constant(_x).to_numpy()) < _x.shape[1] + 1:
+            return None, "Conditional-logit design is rank-deficient."
+        result = sm.Logit(_y, sm.add_constant(_x)).fit(
             disp=0,
             cov_type="cluster",
             cov_kwds={"groups": _pd["family"]},
         )
+        if not result.mle_retvals["converged"] or not np.isfinite(result.params).all():
+            return (
+                None,
+                "Conditional logit did not converge to finite results; no model interpretation is available.",
+            )
+        with np.errstate(over="ignore"):
+            if not np.isfinite(np.exp(result.params)).all():
+                return (
+                    None,
+                    "Conditional-logit odds ratios are nonfinite; no model interpretation is available.",
+                )
+        return result, ""
 
     A_frame = _frame.filter(
         pl.col("rl5").is_in(["LC", "NT", "VU", "EN", "CR", "DD", "Not assessed"])
         & pl.col("scp").is_not_null()
         & pl.col("cls").is_not_null()
     ).select("mapped", "cls", "rl5", "scp", "family")
-    fit_a = _fit(A_frame, "mapped")
+    fit_a, diagnostic_a = _fit(A_frame, "mapped")
     B_frame = _frame.filter(
         pl.col("mapped")
         & pl.col("rl5").is_in(["LC", "VU", "EN", "CR"])
@@ -858,17 +867,18 @@ def _(TOP_CLASSES, mo, np, pl, sm, species_df):
         & pl.col("cls").is_in(TOP_CLASSES)
         & pl.col("has_dna").is_not_null()
     ).select("has_dna", "cls", "rl5", "scp", "family")
-    fit_b = _fit(B_frame, "has_dna")
+    fit_b, diagnostic_b = _fit(B_frame, "has_dna")
 
-    def _or(fit, term: str) -> float:
-        mo.stop(
-            term not in fit.params.index,
-            mo.md(f"No observations for model term {term}; its odds ratio is unavailable."),
-        )
+    def _or(fit, term: str) -> float | None:
+        if fit is None or term not in fit.params.index:
+            return None
         return float(np.exp(fit.params[term]))
 
-    map_n = int(fit_a.nobs)
-    dna_n = int(fit_b.nobs)
+    def _reported(value: float | None) -> str:
+        return f"{value:.2f}×" if value is not None else "unavailable"
+
+    map_n = int(fit_a.nobs) if fit_a is not None else None
+    dna_n = int(fit_b.nobs) if fit_b is not None else None
     map_cr = _or(fit_a, "rl_CR")
     map_en = _or(fit_a, "rl_EN")
     map_vu = _or(fit_a, "rl_VU")
@@ -876,27 +886,38 @@ def _(TOP_CLASSES, mo, np, pl, sm, species_df):
     dna_cr = _or(fit_b, "rl_CR")
     net_cr = None
     net_en = None
-    _dir = "below" if map_cr < 1 else "above"
-    part_panel = mo.vstack(
-        [
-            mo.md(f"""
+    _panel_a = (
+        mo.md(f"**Model A — mapping association unavailable.** {diagnostic_a}")
+        if fit_a is None
+        else mo.md(f"""
         **Model A — P(mapped | class, category, scope).** n = {map_n:,}
-        registered species (family known). Having a mapped range, as odds
-        ratios against a Least-Concern Magnoliopsida terrestrial species:
-        CR ×**{map_cr:.2f}**, EN ×**{map_en:.2f}**, VU ×**{map_vu:.2f}**,
-        Red List Data Deficient ×**{map_dd:.2f}**. With class composition held,
-        threatened categories have recorded mapping odds {_dir} the
-        reference category in this fitted model. This association depends on
-        the register, available systems and taxonomy, and model specification.
-        """),
-            mo.md(f"""
+        registered species (family known). Mapping odds ratios against a
+        Least-Concern Magnoliopsida terrestrial species: CR **{_reported(map_cr)}**,
+        EN **{_reported(map_en)}**, VU **{_reported(map_vu)}**,
+        Red List Data Deficient **{_reported(map_dd)}**. Missing category terms
+        have unavailable odds ratios. These associations depend on the register,
+        available systems and taxonomy, and model specification.
+        """)
+    )
+    _panel_b = (
+        mo.md(f"**Model B — representation association unavailable.** {diagnostic_b}")
+        if fit_b is None
+        else mo.md(f"""
         **Model B — P(species-level DNA | mapped, class, category, scope)** —
         n = {dna_n:,} mapped, GoaT-known species. CR odds ratio
-        **{dna_cr:.2f}×**. These are separate conditional associations.
-        Multiplying conditional odds ratios does not give the odds ratio for
-        being both mapped and represented, or a population selection bias.
-        Such a claim needs predicted joint probabilities and a defined target
-        population. No causal correction is made here.
+        **{_reported(dna_cr)}** (unavailable if the CR term is absent).
+        """)
+    )
+    part_panel = mo.vstack(
+        [
+            _panel_a,
+            _panel_b,
+            mo.md("""
+        These are separate conditional associations. Multiplying conditional
+        odds ratios does not give the odds ratio for being both mapped and
+        represented, or a population selection bias. Such a claim needs
+        predicted joint probabilities and a defined target population.
+        No causal correction is made here.
         """),
         ]
     )
@@ -967,8 +988,8 @@ def _(TOP_CLASSES, alt, derived_df, mo, pl):
         **{dark_df.height:,}** Endangered or Critically Endangered species sit on ≤ 25 res-3
         cells (~≤ 310,000 km²) with no species-level genomic evidence in GoaT/NCBI
         — restricted to the top-8 lineage classes defined above; the conclusion's
-        section-end count over all classes is larger. The full per-species list
-        is effectively a sampling-campaign work order: narrow, threatened genomes
+        section-end count also includes other classes. The per-species list is an exploratory candidate cohort for additional
+        review: narrow, threatened species
         with no qualifying species-level evidence in the selected export. Absence
         of recorded evidence is not proof of biological absence.
         """),
@@ -1023,9 +1044,10 @@ def _(dark_df, mo, pl, species_df):
             f"`ark_pipeline/builders/species_metadata.py`). Top classes among\n"
             f"them:\n"
             f"{', '.join(f'{k} {v:,}' for k, v in list(dark_ebp_bycls.items())[:3])}.\n"
-            "They belong to a planning-alignment frame ('already an EBP\n"
-            f"target'); the remaining **{dark_no_ebp:,}** lack that recorded criterion flag. This does not establish a new\n"
-            "sequencing target without additional biological review."
+            "These supplied flags conflict with the current producer's evidence rule: a\n"
+            "safe-transferred positive criteria flag also implies qualifying species evidence.\n"
+            "Check input consistency before interpreting this crossing; it does not establish\n"
+            f"a planned target cohort. The remaining **{dark_no_ebp:,}** lack that flag."
         )
     else:
         _ebp_line = (
@@ -1036,11 +1058,10 @@ def _(dark_df, mo, pl, species_df):
             "gated on safe species transfer."
         )
     ebp_note = mo.md(f"""
-    **EBP overlap for the work order.** Of the {dark_df.height:,} restricted
+    **EBP criteria-evidence crossing.** Of the {dark_df.height:,} restricted
     threatened species without recorded species-level evidence above: {_ebp_line} The
-    flag is a GoaT criteria check, not a pipeline computation, so its
-    coverage follows GoaT's reporting of EBP criteria — a provenance
-    caveat, not an error.
+    flag is computed by the pipeline from safe-transferred GoaT criteria text;
+    it is neither independent quality certification nor target-list membership.
     """)
     _rel = species_df.select(
         "concept_relation",
@@ -1126,7 +1147,7 @@ def _(alt, derived_df, mo, np, pl, species_df):
         .properties(
             width=560,
             height=260,
-            title="Sequencing coverage of the species assessed in each assessment-date band",
+            title="Recorded species evidence by assessment-date band",
         )
     )
     _labels = (
@@ -1147,7 +1168,7 @@ def _(alt, derived_df, mo, np, pl, species_df):
             .configure_title(anchor="start", fontSize=13),
             mo.md(f"""
         Each cohort = species whose retained assessment is *dated* in that
-        displayed band (crosswalk `iucn_assessment_date`; sequencing state as of
+        displayed band (crosswalk `iucn_assessment_date`; recorded evidence as of
         this export). Observation semantics: the input is expected to retain one row per SIS species, and
         {species_df.filter(pl.col("assess_year").is_not_null()).height:,} of the
         {species_df.height:,} registered rows have cohort dating (the
@@ -1156,9 +1177,8 @@ def _(alt, derived_df, mo, np, pl, species_df):
         time, with a linear slope of **{slope_pp:+.1f} percentage points per
         cohort period** ({first_pct:.1f}% → {last_pct:.1f}%). Positive means
         newer assessment cohorts have higher present-day representation;
-        older cohorts have also had more years to accumulate sequences, so
-        the trend partially presumes the dynamic rather than proving it — a
-        bias-aware reading of the static coverage percentage.
+        assessment dates do not timestamp projects, sampling or genome availability.
+        This static comparison cannot establish sequencing progress.
         """),
         ]
     )
@@ -1196,7 +1216,9 @@ def _(derived_df, mo, pl):
             & (pl.col("ncells") <= 25)
         )
         .select(
-            pl.when(pl.col("genus_has_dna"))
+            pl.when(pl.col("genus_has_dna").is_null() | pl.col("family_has_dna").is_null())
+            .then(pl.lit("unknown higher-level evidence"))
+            .when(pl.col("genus_has_dna"))
             .then(pl.lit("genus represented"))
             .when(pl.col("family_has_dna"))
             .then(pl.lit("family represented"))
@@ -1209,28 +1231,29 @@ def _(derived_df, mo, pl):
     _dc = {r["status"]: r["n"] for r in _dark_cross.iter_rows(named=True)}
     ladder_note = mo.md(f"""
     **Categorical-ladder descriptives for the mapped, GoaT-known universe**
-    ({_tot:,} species). The serving ladder collapses every "no species-level
-    genome" state into the gap buckets it weights (`sp`/`gen`/`fam`/`gdd`);
-    what the counts below add is *which* part of that mass the roadmap's
-    species-absent / genus-represented / family-represented / none ladder
-    would move, and how the restricted-threatened dark cohort crosses it —
-    **{_dc.get("genus represented", 0):,}** of those dark species sit in a
-    genus with a sequenced reference (EBP-style partial coverage),
-    {_dc.get("family represented", 0):,} only have a family-level relative
-    sequenced, and {_dc.get("family absent", 0):,} have neither:
-    {_row.get("species-level evidence (samp)", 0):,} species have a species-level
-    recorded representation, {_row.get("species absent, genus represented (partial)", 0):,}
-    would be *partially* covered, {_row.get("genus absent, family represented", 0):,}
-    only have a family-level relative, and
-    {_row.get("no recorded evidence nearby (family absent)", 0):,} have no
-    reference anywhere nearby. The scored "genus-represented counts as
-    partially covered" variant and its rank movement run in notebook 3 §3b;
-    the roadmap explicitly keeps the ladder descriptive until validated —
-    these are the descriptives it asks for first. Vocabulary matters here
-    too: the roadmap asks to say *reference-genome representation* wherever
-    the current copy says genomic representation, because one reference
-    genome per species is not EBP's bar — assume that substitution
-    throughout.
+    ({_tot:,} species). These descriptive evidence buckets are separate from
+    the unchanged production weights and predicate precedence.
+
+    Among restricted threatened species without recorded species evidence,
+    **{_dc.get("genus represented", 0):,}** have a represented genus,
+    {_dc.get("family represented", 0):,} have only a represented family,
+    {_dc.get("family absent", 0):,} have known false genus and family flags,
+    and **{_dc.get("unknown higher-level evidence", 0):,}** have unknown
+    higher-level evidence. Unknown flags do not establish lineage absence.
+
+    Across the full known-species cohort,
+    {_row.get("species-level evidence (samp)", 0):,} have recorded species evidence,
+    {_row.get("species absent, genus represented (partial)", 0):,} have a represented genus,
+    {_row.get("genus absent, family represented", 0):,} have only a represented family,
+    {_row.get("no recorded evidence nearby (family absent)", 0):,} have known false
+    nearby-lineage flags, and {_row.get("unknown higher-level evidence", 0):,}
+    have unknown higher-level evidence. Representation means recorded qualifying
+    evidence under the website rule, which can include samples or work in progress;
+    it does not establish a sequenced relative or completed reference genome.
+
+    The exploratory genus-partial variant and its rank movement run in notebook 3
+    §3b. The ladder remains descriptive until validated; neither broad evidence
+    flags nor the separate narrow EBP criteria flag certify assembly quality.
     """)
     ladder_note
     return
@@ -1303,7 +1326,7 @@ def _(alt, derived_df, mo, pl):
             ),
             tooltip=[alt.Tooltip("pct_dna:Q", format=".1f", title="% with DNA")],
         )
-        .properties(width=620, height=130, title="…and how much of each realm is sequenced")
+        .properties(width=620, height=130, title="…and the recorded species evidence in each scope")
     )
     mo.vstack(
         [
@@ -1373,6 +1396,8 @@ def _(
     _unmapped_aves = species_df.filter(
         pl.col("ncells").is_null() & (pl.col("goat_class") == "Aves")
     ).height
+    _map_cr_text = f"{map_cr:.2f}" if map_cr is not None else "unavailable"
+    _dna_cr_text = f"{dna_cr:.2f}" if dna_cr is not None else "unavailable"
     mo.md(f"""
     ## What this run can tell us
 
@@ -1383,8 +1408,9 @@ def _(
     Consult the family-clustered confidence intervals before interpreting it.
 
     Mapping and representation are separate conditional associations:
-    CR mapping odds ratio {map_cr:.2f}; CR representation odds ratio among
-    mapped, GoaT-known species {dna_cr:.2f}. They do not establish causation,
+    CR mapping odds ratio {_map_cr_text}; CR representation odds ratio among
+    mapped, GoaT-known species {_dna_cr_text}. Unavailable fits or absent terms
+    have no numerical interpretation. They do not establish causation,
     population bias, or an end-to-end odds ratio. The dark cohort has
     {_dark_total:,} rows meeting the stated mapped-range and evidence filters.
 
