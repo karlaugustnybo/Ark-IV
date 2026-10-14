@@ -345,3 +345,58 @@ global-start:
       RES7_PARTS_DIR="$source_parts" \
       RES7_AGGREGATE_PARTS_DIR="$aggregate_parts" \
       just serve
+
+# Fetch pinned public dated-tree, OTT taxonomy and mammal comparison inputs.
+[group('04 - Scientific investigations')]
+edge-download:
+    uv run --group edge python -m ark_pipeline.cli.edge_prototype --download-only
+
+# Run the optional mammal EDGE-style prototype, with coverage and residual reports.
+[group('04 - Scientific investigations')]
+edge-prototype samples="256" seed="42":
+    uv run --group edge python -m ark_pipeline.cli.edge_prototype --download --root '{{ global_data_root }}' --crosswalk '{{ global_crosswalk_path }}' --samples '{{ samples }}' --seed '{{ seed }}'
+
+# Extract reproducible mammal crowns from the official alternative-tree archives.
+[group('04 - Scientific investigations')]
+edge-tree-download trees="8":
+    uv run --group edge python -m ark_pipeline.cli.edge_tree_download --trees-per-archive '{{ trees }}'
+
+# Check exact-name matching, reference disagreements and tree sensitivity.
+[group('04 - Scientific investigations')]
+edge-validate samples="128" seed="42":
+    uv run --group edge python -m ark_pipeline.cli.edge_validate --root '{{ global_data_root }}' --crosswalk '{{ global_crosswalk_path }}' --samples '{{ samples }}' --seed '{{ seed }}'
+
+# Install optional R reference-calculator dependencies into ignored local data.
+[group('04 - Scientific investigations')]
+edge-benchmark-setup:
+    Rscript -e 'dir.create("data/edge/benchmark/r-library", recursive=TRUE, showWarnings=FALSE); install.packages(c("ape", "phylobase", "data.table"), lib="data/edge/benchmark/r-library", repos="https://cloud.r-project.org")'
+
+# Check original-author arithmetic and compare trees with identical mammal risks.
+[group('04 - Scientific investigations')]
+edge-benchmark seed="42":
+    uv run --group edge python -m ark_pipeline.cli.edge_benchmark --download --seed '{{ seed }}'
+
+# Link Ark assessments to the unchanged Duke global tree, with identity audits.
+[group('04 - Scientific investigations')]
+edge-link:
+    uv run --group edge python -m ark_pipeline.cli.edge_link --root '{{ global_data_root }}' --crosswalk '{{ global_crosswalk_path }}'
+
+# Recover independent IUCN/tree identities without altering genomic transfers.
+[group('04 - Scientific investigations')]
+edge-link-expand:
+    uv run --group edge python -m ark_pipeline.cli.edge_link_expand --root '{{ global_data_root }}'
+
+# Investigate documented species-name changes and retain unresolved concept reviews.
+[group('04 - Scientific investigations')]
+edge-link-synonyms:
+    uv run --group edge python -m ark_pipeline.cli.edge_link_synonyms --root '{{ global_data_root }}'
+
+# Compare rooted mammal DNA gaps with the website's existing genus/family score.
+[group('04 - Scientific investigations')]
+phylogenetic-gap legacy_validation budget="20":
+    uv run --group edge python -m ark_pipeline.cli.phylogenetic_gap --root '{{ global_data_root }}' --crosswalk '{{ global_crosswalk_path }}' --legacy-validation '{{ legacy_validation }}' --budget '{{ budget }}'
+
+# Review missing DNA-positive mammal identities before rebuilding the gap pilot.
+[group('04 - Scientific investigations')]
+edge-baseline-review:
+    uv run --group edge python -m ark_pipeline.cli.edge_baseline_review
