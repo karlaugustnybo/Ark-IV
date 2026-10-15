@@ -13,6 +13,7 @@ import time
 from pathlib import Path
 
 import psutil
+from launch import owned_process
 
 from ark_pipeline.cli import benchmark_pipeline as bp
 from ark_pipeline.runtime.provenance import atomic_json, sha256
@@ -227,13 +228,12 @@ def main(argv=None):
 
             def execute(stage=stage):
                 with (REPORT / (stage["name"] + ".log")).open("w") as log:
-                    subprocess.run(
-                        stage["command"],
-                        stdout=log,
-                        stderr=subprocess.STDOUT,
-                        timeout=stage["timeout"],
-                        check=True,
-                    )
+                    with owned_process(
+                        stage["command"], stdout=log, stderr=subprocess.STDOUT
+                    ) as child:
+                        child.wait(timeout=stage["timeout"])
+                        if child.returncode:
+                            raise subprocess.CalledProcessError(child.returncode, stage["command"])
 
             instrument(stage, OUT, {}, execute=execute)
         report["status"] = "passed"

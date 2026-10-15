@@ -6,14 +6,18 @@ import contextlib
 import hashlib
 import io
 import json
+import os
 import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+
+import psutil
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "sandbox/coreweave/scripts"
@@ -779,31 +783,6 @@ class CompletionContracts(unittest.TestCase):
         self.assertEqual(environment["SPATIAL_PROFILE"], str(profile.resolve()))
         self.assertEqual(config["iucn_reconciliation"], "automatic")
 
-    def test_unexpected_process_wait_error_still_terminates_owned_group(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp).resolve()
-            (root / "logs").mkdir()
-            state = {"running": True, "waits": 0}
-
-            def wait(**kwargs):
-                state["waits"] += 1
-                if state["waits"] == 1:
-                    raise RuntimeError("invented polling error")
-                state["running"] = False
-
-            child = SimpleNamespace(
-                pid=12345, poll=lambda: None if state["running"] else 0, wait=wait
-            )
-            with (
-                patch.object(job, "OUT", root),
-                patch.object(job.subprocess, "Popen", return_value=child),
-                patch.object(job.os, "killpg") as kill,
-            ):
-                with self.assertRaisesRegex(RuntimeError, "polling error"):
-                    job.run_command("fixture", ["true"], {}, {"stages": []}, float("inf"))
-            self.assertEqual(kill.call_args.args[0], child.pid)
-            self.assertFalse(state["running"])
-
     def test_stage_validation_happens_before_factory(self):
         with tempfile.TemporaryDirectory() as temp:
             for stages in (
@@ -1122,6 +1101,210 @@ class CompletionContracts(unittest.TestCase):
             self.assertEqual(report["membership"], {"shared": 1, "added": 0, "removed": 0})
             self.assertEqual(report["coarse_membership"]["equal_richness_cells"], 1)
             self.assertEqual(len(report["sources"]["baseline_sha256"]), 4)
+
+
+class OwnedProcessTests(unittest.TestCase):
+    def command(self, root, outcome):
+        # The leader exits first; its worker ignores TERM in the same owned group.
+        worker = (
+            "import pathlib,signal,sys,time;"
+            "signal.signal(signal.SIGTERM,signal.SIG_IGN);"
+            "pathlib.Path(sys.argv[1]).write_text('ready');time.sleep(60)"
+        )
+        leader = (
+            "import pathlib,subprocess,sys,time,os;"
+            f"p=subprocess.Popen([sys.executable,'-c',{worker!r},{str(root / 'ready')!r}]);"
+            f"ready=pathlib.Path({str(root / 'ready')!r});"
+            "exec('while not ready.exists(): time.sleep(0.005)');"
+            f"pathlib.Path({str(root / 'pids')!r}).write_text(str(os.getpid())+' '+str(p.pid));"
+            + (f"sys.exit({outcome})" if outcome is not None else "time.sleep(60)")
+        )
+        return [sys.executable, "-c", leader]
+
+    @contextlib.contextmanager
+    def fixture(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            with patch.object(launch, "PROCESS_TERM_GRACE_SECONDS", 0.1):
+                try:
+                    yield root
+                finally:
+                    # Failures must not leak even these exact synthetic processes.
+                    if (root / "pids").exists():
+                        for pid in map(int, (root / "pids").read_text().split()):
+                            try:
+                                process = psutil.Process(pid)
+                                if (
+                                    process.is_running()
+                                    and process.status() != psutil.STATUS_ZOMBIE
+                                ):
+                                    process.kill()
+                            except psutil.NoSuchProcess:
+                                pass
+
+    def assert_stopped(self, root):
+        pids = list(map(int, (root / "pids").read_text().split()))
+        for pid in pids:
+            deadline = time.monotonic() + 2
+            while psutil.pid_exists(pid):
+                try:
+                    process = psutil.Process(pid)
+                    if process.status() == psutil.STATUS_ZOMBIE:
+                        break  # In containers the orphan's reaping belongs to PID 1.
+                except psutil.NoSuchProcess:
+                    break
+                self.assertLess(time.monotonic(), deadline, f"Owned worker {pid} survived")
+                time.sleep(0.01)
+        self.assertFalse(psutil.pid_exists(pids[0]), "Direct leader was not reaped")
+
+    def test_full_worker_finishes_group_on_every_exit_path(self):
+        real_owned = launch.owned_process
+
+        @contextlib.contextmanager
+        def short_observation(command, **kwargs):
+            with real_owned(command, **kwargs) as child:
+                wait = child.wait
+
+                def short_wait(timeout=None):
+                    if timeout == 15 and mode == "poll_error":
+                        end = time.monotonic() + 2
+                        while not (root / "pids").exists():
+                            self.assertLess(time.monotonic(), end)
+                            time.sleep(0.01)
+                        raise RuntimeError("invented polling error")
+                    return wait(timeout=0.2 if timeout == 15 else timeout)
+
+                child.wait = short_wait
+                yield child
+
+        for mode in ("success", "failure", "memory", "deadline", "disk", "exception", "poll_error"):
+            with self.subTest(mode=mode), self.fixture() as root:
+                (root / "logs").mkdir()
+                outcome = 0 if mode == "success" else 3 if mode == "failure" else None
+                report = {"stages": []}
+                disk_error = RuntimeError("invented disk observation failure")
+
+                def disk():
+                    if mode == "exception":
+                        raise disk_error
+                    return 451 * 1024**3 if mode == "disk" else 0
+
+                with (
+                    patch.object(job, "OUT", root),
+                    patch.object(job, "owned_process", short_observation),
+                    patch.object(job, "disk_bytes", disk),
+                    patch.object(job, "memory_observation", return_value=mode == "memory"),
+                    patch.object(
+                        job.shutil, "disk_usage", return_value=SimpleNamespace(free=30 * 1024**3)
+                    ),
+                ):
+                    deadline = time.monotonic() + (0.15 if mode == "deadline" else 30)
+                    if mode == "success":
+                        job.run_command(
+                            mode, self.command(root, outcome), dict(os.environ), report, deadline
+                        )
+                    else:
+                        with self.assertRaises(RuntimeError) as raised:
+                            job.run_command(
+                                mode,
+                                self.command(root, outcome),
+                                dict(os.environ),
+                                report,
+                                deadline,
+                            )
+                        if mode == "exception":
+                            self.assertIs(raised.exception, disk_error)
+                        elif mode == "poll_error":
+                            self.assertIn("polling error", str(raised.exception))
+                        elif mode != "failure":
+                            self.assertIn("headroom", str(raised.exception))
+                self.assert_stopped(root)
+                if mode in {"success", "failure"}:
+                    self.assertEqual(report["stages"][0]["exit_code"], outcome)
+                else:
+                    self.assertEqual(report["stages"], [])
+
+    def test_profiler_extra_stage_group_cleanup_preserves_reports_and_hooks(self):
+        for outcome in (None, 0, 3):
+            with self.subTest(outcome=outcome), self.fixture() as root:
+                sample = write_json(root / "sample.json", {"synthetic": True})
+                boundaries = write_json(root / "boundaries.json", {})
+                extra = write_json(
+                    root / "extra.json",
+                    [
+                        {
+                            "name": "owned",
+                            "command": self.command(root, outcome),
+                            "timeout": 1,
+                        }
+                    ],
+                )
+                original_plan, original_stage = profiler.bp.plan, profiler.bp.run_stage
+                threads = []
+                thread_factory = profiler.threading.Thread
+
+                def thread(*args, **kwargs):
+                    result = thread_factory(*args, **kwargs)
+                    threads.append(result)
+                    return result
+
+                with (
+                    patch.object(profiler.bp, "run", return_value={"status": "passed"}),
+                    patch.object(profiler, "sample", return_value={"cpu_stat": {}}),
+                    patch.object(profiler, "allocated", return_value=0),
+                    patch.object(profiler.threading, "Thread", thread),
+                    patch.object(profiler, "ROOT", profiler.ROOT),
+                    patch.object(profiler, "OUT", profiler.OUT),
+                    patch.object(profiler, "REPORT", profiler.REPORT),
+                ):
+                    args = [
+                        "--root",
+                        str(root / "input"),
+                        "--output",
+                        str(root / "output"),
+                        "--report",
+                        str(root / "report"),
+                        "--sample",
+                        str(sample),
+                        "--profile",
+                        str(ROOT / "config/spatial_semantics_iucn_richness_v3.toml"),
+                        "--boundaries",
+                        str(boundaries),
+                        "--extra-stages",
+                        str(extra),
+                    ]
+                    if outcome == 0:
+                        self.assertEqual(profiler.main(args), 0)
+                    else:
+                        with self.assertRaises(
+                            subprocess.TimeoutExpired
+                            if outcome is None
+                            else subprocess.CalledProcessError
+                        ):
+                            profiler.main(args)
+                self.assert_stopped(root)
+                self.assertIs(profiler.bp.plan, original_plan)
+                self.assertIs(profiler.bp.run_stage, original_stage)
+                self.assertTrue(threads)
+                self.assertTrue(all(not t.is_alive() for t in threads))
+                report = json.loads((root / "report/profile-report.json").read_text())
+                self.assertEqual(report["status"], "passed" if outcome == 0 else "failed")
+                self.assertEqual(report["measurements"][0]["stage"], "owned")
+                self.assertTrue((root / "report/owned.log").is_file())
+
+    def test_cleanup_failure_preserves_original_interruption(self):
+        child = SimpleNamespace()
+        for original in (RuntimeError("original"), KeyboardInterrupt()):
+            with (
+                self.subTest(error=type(original).__name__),
+                patch.object(launch.subprocess, "Popen", return_value=child),
+                patch.object(launch, "_stop_process_group", side_effect=OSError("cleanup")),
+            ):
+                with self.assertRaises(type(original)) as raised:
+                    with launch.owned_process(["unused"]):
+                        raise original
+                self.assertIs(raised.exception, original)
+                self.assertIn("cleanup failed: OSError", original.__notes__[0])
 
 
 if __name__ == "__main__":

@@ -2,11 +2,80 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import math
 import os
+import signal
+import subprocess
 import time
 from pathlib import Path
+
+import psutil
+
+PROCESS_TERM_GRACE_SECONDS = 15
+
+
+def _stop_process_group(child):
+    """Finish the session we launched, even if its leader has already exited."""
+
+    def send(sig):
+        try:
+            os.killpg(child.pid, sig)
+            return True
+        except ProcessLookupError:
+            return False
+
+    def running():
+        child.poll()
+        if not send(0):
+            return False
+        # Orphan zombies may await PID 1; they no longer execute or hold memory.
+        for process in psutil.process_iter():
+            try:
+                if (
+                    os.getpgid(process.pid) == child.pid
+                    and process.status() != psutil.STATUS_ZOMBIE
+                ):
+                    return True
+            except (ProcessLookupError, psutil.NoSuchProcess):
+                pass
+        return False
+
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        if not send(sig):
+            break
+        deadline = time.monotonic() + PROCESS_TERM_GRACE_SECONDS
+        while running():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(0.05, remaining))
+        else:
+            break
+    else:
+        raise RuntimeError("Owned process group did not stop after KILL")
+    child.wait(timeout=PROCESS_TERM_GRACE_SECONDS)
+
+
+@contextlib.contextmanager
+def owned_process(command, **kwargs):
+    """Bound local stage cleanup to its new process group on every exit path.
+
+    TERM has a finite grace before KILL, including descendants left by a successful
+    leader. Commands must keep their workers in this group rather than daemonize.
+    """
+    child = subprocess.Popen(command, start_new_session=True, **kwargs)
+    try:
+        yield child
+    except BaseException as error:
+        try:
+            _stop_process_group(child)
+        except BaseException as cleanup_error:
+            error.add_note("Owned process-group cleanup failed: " + type(cleanup_error).__name__)
+        raise
+    else:
+        _stop_process_group(child)
 
 
 def cost_plan(cpu, memory_gib, lifetime_seconds, cpu_rate, memory_rate):

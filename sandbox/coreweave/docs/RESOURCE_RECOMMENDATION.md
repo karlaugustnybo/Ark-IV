@@ -65,3 +65,9 @@ completed benchmark report. These explicit companions avoid assuming a historica
 combined-report schema. Older explicit reports containing `full_pairs` and
 `full_population` remain accepted. The population needs the stated cloud I/O
 calibration; a plain local report does not establish that calibration.
+
+Extra profiling stages use the same owned process-group cleanup as full-worker
+stages. A timeout still records a failed measured stage, restores benchmark hooks
+and joins the sampler; group cleanup completes first with a 15-second TERM grace
+and KILL escalation. Successful or failed leaders also have leftover group
+members stopped. Commands must not detach workers into independent sessions.

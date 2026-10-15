@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 
 from cloud_storage import main as storage_main
+from launch import owned_process
 
 from ark_pipeline.cli import benchmark_pipeline as bp
 from ark_pipeline.runtime.provenance import atomic_json
@@ -151,31 +152,18 @@ def run_command(name, command, environment, report, deadline):
         raise RuntimeError("Compute deadline exhausted before stage launch")
     start = time.monotonic()
     with (OUT / "logs" / f"{name}.log").open("w") as log:
-        child = subprocess.Popen(
+        with owned_process(
             command,
             stdout=log,
             stderr=subprocess.STDOUT,
             cwd=str(Path(__file__).resolve().parents[3]),
             env=environment,
-            start_new_session=True,
-        )
-        try:
+        ) as child:
             while child.poll() is None:
                 try:
                     child.wait(timeout=15)
                 except subprocess.TimeoutExpired:
-                    try:
-                        usage = disk_bytes()
-                    except Exception:
-                        import signal
-
-                        os.killpg(child.pid, signal.SIGTERM)
-                        try:
-                            child.wait(timeout=15)
-                        except subprocess.TimeoutExpired:
-                            os.killpg(child.pid, signal.SIGKILL)
-                            child.wait()
-                        raise
+                    usage = disk_bytes()
                     report["peak_allocated_scratch_bytes"] = max(
                         report.get("peak_allocated_scratch_bytes", 0), usage
                     )
@@ -187,27 +175,9 @@ def run_command(name, command, environment, report, deadline):
                         or usage > 450 * 1024**3
                         or shutil.disk_usage("/scratch").free < 20 * 1024**3
                     ):
-                        import signal
-
-                        os.killpg(child.pid, signal.SIGTERM)
-                        try:
-                            child.wait(timeout=15)
-                        except subprocess.TimeoutExpired:
-                            os.killpg(child.pid, signal.SIGKILL)
-                            child.wait()
                         raise RuntimeError(
                             "Job stopped to preserve time/disk/memory headroom for result persistence"
                         )
-        finally:
-            if child.poll() is None:
-                import signal
-
-                os.killpg(child.pid, signal.SIGTERM)
-                try:
-                    child.wait(timeout=15)
-                except subprocess.TimeoutExpired:
-                    os.killpg(child.pid, signal.SIGKILL)
-                    child.wait()
     entry = {"name": name, "seconds": time.monotonic() - start, "exit_code": child.returncode}
     report["stages"].append(entry)
     atomic_json(OUT / "run-report.json", report)

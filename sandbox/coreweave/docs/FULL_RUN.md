@@ -80,3 +80,9 @@ metadata reconciliation and complete serving validation together. The standalone
 PR does not introduce these other PRs' scientific or runtime implementations.
 Result persistence selects regular generation paths and completed products;
 `tiles/current` symlinks and transient spill directories are excluded.
+
+Local stages run in an owned process group. Before persistence or the next stage,
+cleanup sends TERM, allows up to 15 seconds for the group to finish, then sends
+KILL to surviving group members and reaps the leader. This also applies when a
+leader exits successfully but leaves workers behind. Stage commands must keep
+workers in that group; detached daemons are outside this lifecycle contract.
