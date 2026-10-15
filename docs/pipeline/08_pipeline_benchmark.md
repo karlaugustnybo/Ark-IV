@@ -214,3 +214,25 @@ Skipping classification preserves the envelope of all ring coordinates, but is
 not suitable for computing polygon area or cell coverage. The setting is scoped
 to the dedicated census process and must not be used concurrently with other
 GDAL work in threads. No additional Rust extension or build toolchain is required.
+
+## Replaying coarse exports
+
+To compare export implementations without repeating spatial coverage, use
+`scripts.benchmark_coarse_exports` with a previous benchmark's `config.json`,
+`build.duckdb` and boundary inputs:
+
+```sh
+uv run --frozen python -m scripts.benchmark_coarse_exports \
+  --benchmark-root /path/to/previous/benchmark \
+  --output-root /path/to/new/export-replay
+```
+
+The database opens read-only and the output directory must be new. The replay
+uses one DuckDB thread and the same boundary-index instances across cell-boundary
+Parquet, coarse Arrow, map metadata and GeoJSON feature exports. Input/output
+hashes, wall/CPU times and process peak RSS are recorded. Compare every output
+hash and input identity before timing; use `--profile` only in separate matched
+cProfile trials. Initial input hashing, aggregation, fine exports and Tippecanoe
+compilation are outside the measured phases. Fresh processes do not clear OS
+caches. See [the replay method](../performance/coarse_export_performance.md).
+Generated reports and exports remain private under the data policy.
