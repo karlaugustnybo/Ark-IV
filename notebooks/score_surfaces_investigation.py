@@ -1194,12 +1194,14 @@ def _(cell_scores, con, jaccard, math, mo, rank_set, spearman):
             con.sql(f"""
             WITH f AS (
                 SELECT ROW_NUMBER() OVER (ORDER BY baseline) AS rn,
-                       RANK() OVER (ORDER BY baseline) AS r1
+                       RANK() OVER (ORDER BY baseline)
+                           + (COUNT(*) OVER (PARTITION BY baseline) - 1) / 2.0 AS r1
                 FROM cs
             ),
             o AS (
                 SELECT ROW_NUMBER() OVER (ORDER BY RANDOM()) AS rn,
-                       RANK() OVER (ORDER BY {col}) AS r2
+                       RANK() OVER (ORDER BY {col})
+                           + (COUNT(*) OVER (PARTITION BY {col}) - 1) / 2.0 AS r2
                 FROM cs
             )
             SELECT CORR(r1, r2) FROM f JOIN o USING (rn)
@@ -1711,8 +1713,9 @@ def _(BOUND_P, CELLS_P, SPECIES_P, con, disclosure, mo, pl):
     municipality_panel = mo.vstack(
         [
             mo.md(f"""
-        **ADM2 / municipality grain today.** {municipality.height:,.0f} dark-species
-        municipality contact pairs are observed in these configured inputs.
+        **ADM2 / municipality grain today.** {municipality.height:,.0f} cell-level
+        dark-species / municipality contacts are observed in these configured inputs.
+        One species–municipality pair can contribute contacts from multiple range cells.
         This panel reports contacts rather than distribution fractions. Missing
         memberships may reflect unavailable boundaries or no spatial contact;
         these files alone do not distinguish the two. A fraction requires an
