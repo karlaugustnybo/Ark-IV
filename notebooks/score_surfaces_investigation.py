@@ -2150,10 +2150,12 @@ def _(cell_scores, h3, jaccard, mo, pl, rank_set, spearman):
     )
 
     def _share_top(frame, col: str, share: float) -> float:
-        _k = max(1, int(share * frame.height))
         _total = frame[col].sum()
         return (
-            float(frame.sort(col, descending=True).head(_k)[col].sum() / _total)
+            float(
+                frame.filter(pl.col("cell").is_in(list(rank_set(frame, col, share))))[col].sum()
+                / _total
+            )
             if _total
             else float("nan")
         )
