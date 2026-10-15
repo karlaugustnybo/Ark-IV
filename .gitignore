@@ -50,3 +50,6 @@ data/**
 app/static/data/boundary-geometry/
 # Installed global ADM2 catalogues point to an ignored, versioned local build.
 app/static/data/adm2-catalogs
+
+# Marimo sessions embed local analysis outputs; notebooks are source-only.
+/notebooks/__marimo__/

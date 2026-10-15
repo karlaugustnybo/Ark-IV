@@ -159,6 +159,33 @@ release-history-check:
 [group('03 - Validation')]
 check: lint test frontend-check release-check
 
+# Check notebook graphs without opening or reading serving snapshots.
+[group('03 - Validation')]
+nb-graph-check:
+    uvx --from 'marimo>=0.19' marimo check --strict notebooks/data_overview.py notebooks/range_dna_investigation.py notebooks/score_surfaces_investigation.py
+
+# Explicit opt-in execution. PEP 723 preserves each notebook's own dependencies.
+# Configure ARK_NOTEBOOK_EXPORTS and ARK_NOTEBOOK_CROSSWALK for an isolated snapshot.
+[group('03 - Validation')]
+nb-check:
+    uv run notebooks/data_overview.py
+    uv run notebooks/range_dna_investigation.py
+    uv run notebooks/score_surfaces_investigation.py
+
+# Local HTML only; sandbox reads each PEP 723 header (range notebook uses pandas 2).
+# Choose an explicit output directory. Nothing is uploaded or automatically removed.
+[group('03 - Validation')]
+nb-export-smoke output:
+    mkdir -p '{{ output }}'
+    uvx --from 'marimo>=0.19' marimo export html --sandbox notebooks/data_overview.py -o '{{ output }}/data_overview.html'
+    uvx --from 'marimo>=0.19' marimo export html --sandbox notebooks/range_dna_investigation.py -o '{{ output }}/range_dna_investigation.html'
+    uvx --from 'marimo>=0.19' marimo export html --sandbox notebooks/score_surfaces_investigation.py -o '{{ output }}/score_surfaces_investigation.html'
+
+# Generate invented data in a new/empty directory; no downloads or pipeline build.
+[group('03 - Validation')]
+nb-fixture output:
+    uv run notebooks/_synthetic_exports.py '{{ output }}'
+
 # Validate the configured H3 list files without requiring a crosswalk.
 [group('03 - Validation')]
 validate-h3:
