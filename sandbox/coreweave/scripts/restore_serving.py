@@ -47,20 +47,22 @@ def restore(root: Path, *, publish_current=False, validator=None):
         if record is None or record["bytes"] != pinned["bytes"]:
             raise ValueError("Pinned file not covered by verified inventory")
         pinned["modified_ns"] = path.stat().st_mtime_ns
-    target = generation / "serving-restored.json"
-    if target.exists():
+    restored = generation.with_name(generation.name + "-restored")
+    target = restored / "serving.json"
+    if restored.exists() or restored.is_symlink():
         raise ValueError("Refusing to overwrite existing relocated configuration")
     if publish_current and validator is None:
         raise ValueError("Publishing current requires a compatible serving validator")
+    current = root / "tiles/current"
+    if publish_current and (current.exists() or current.is_symlink()):
+        raise ValueError("Refusing to replace an existing current selection")
+    restored.mkdir()
     target.write_text(json.dumps(config, indent=2) + "\n")
     if validator is not None:
         validator(target)
     if publish_current:
-        current = root / "tiles/current"
-        if current.exists() or current.is_symlink():
-            raise ValueError("Refusing to replace an existing current selection")
         current.parent.mkdir(parents=True, exist_ok=True)
-        current.symlink_to(generation.relative_to(current.parent), target_is_directory=True)
+        current.symlink_to(restored.relative_to(current.parent), target_is_directory=True)
     return target
 
 

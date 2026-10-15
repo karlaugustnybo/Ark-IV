@@ -44,13 +44,20 @@ stages. Retain exact sources, schemas, profiles and receipts for a future
 reviewed compatibility procedure.
 
 Download every inventory file and verify hashes before `restore_serving.py`.
-It writes a separate relocated configuration, checks pinned files against the
-verified inventory and refreshes local mtimes; it preserves original receipts.
+It writes `serving.json` in a separate sibling generation named with a
+`-restored` suffix, checks pinned files against the verified inventory and
+refreshes local mtimes; original configuration and receipts stay unchanged.
+The relocated config continues to reference the verified downloaded data.
 By default it does not publish `tiles/current`. `--publish-current` additionally
 requires the compatible `map_serving.validate_config` integration from the
 independent serving PR. That module is absent from this PR's actual-main base;
 ordinary restoration and checks remain independent. A relocated configuration
 alone is not evidence that the complete serving API is valid.
+Publication points `tiles/current` at this restored generation, so consumers
+read the validated relocated `current/serving.json`. Existing restored generations
+and current selections (including dangling links) are never replaced. Failed
+validation leaves the restored config for inspection and publishes no current
+selection; use a fresh download for another restoration attempt.
 
 Stage input downloads before the worker with a reviewed `cloud_storage.py
  download-inputs` command including the immutable catalog and

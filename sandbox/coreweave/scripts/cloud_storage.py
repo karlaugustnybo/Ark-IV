@@ -20,6 +20,7 @@ if HERE.name == "scripts":
     HERE = HERE.parent
 DEFAULT_PROJECT = "ark-pipeline-storage"
 EXTRA_INPUTS = ("gbif_backbone_species.tsv", "2024_EDGE_species_external_with_gbif.tsv")
+LOOKUP_PINS = "acquisition/lookup-pins.json"
 RESULT_DIRS = ("tiles", "coarse-tiles", "species", "metrics", "exports")
 
 
@@ -89,11 +90,29 @@ def input_plan(root):
             previous = selected.setdefault(item["path"], item)
             if previous and previous != item:
                 raise ValueError(f"Conflicting manifest record: {item['path']}")
+    if (root / LOOKUP_PINS).exists() or (root / LOOKUP_PINS).is_symlink():
+        pins = json.loads(safe_path(root, LOOKUP_PINS).read_text())
+        selected[LOOKUP_PINS] = {}
+        for item in pins["files"]:
+            name = item["path"]
+            if name not in EXTRA_INPUTS:
+                raise ValueError("Lookup pins may only select supported lookup files")
+            previous = selected.setdefault(name, item)
+            if previous != item:
+                raise ValueError(f"Conflicting lookup pin: {name}")
     for name in EXTRA_INPUTS:
         if (root / name).is_file():
-            selected[name] = {}
+            selected.setdefault(name, {})
     plan = []
     for relative, record in sorted(selected.items()):
+        if relative in EXTRA_INPUTS and (
+            type(record.get("bytes")) is not int
+            or not isinstance(record.get("sha256"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", record["sha256"])
+        ):
+            raise ValueError(
+                "Lookup inputs require explicit size/SHA256 pins in the manifest or " + LOOKUP_PINS
+            )
         path = safe_path(root, relative)
         size = path.stat().st_size
         if "bytes" in record and size != record["bytes"]:

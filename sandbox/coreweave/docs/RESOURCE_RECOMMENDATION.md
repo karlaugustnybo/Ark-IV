@@ -35,9 +35,12 @@ source geometries, retries and downstream audits require separate evidence.
 
 Optional `--census`, `--archive` and `--probe-root` together replace the source-scan
 stage with the hash-matched single-archive calibration. The complete local census
-must name the same archive hashes as the acquisition manifest; its unchanged
-rows and size bands remain the projection population. This checks declared
-identity, not independent proof that the census was calculated correctly.
+must name the same archive hashes as the acquisition manifest and match the
+selected profile's row policy and current size bands. Its census method and the
+selected archive's size/count/exclusion observations must match the new scan;
+missing or incompatible fields reject calibration. Its unchanged full population
+remains the projection population. This checks compatibility and the selected
+archive, not independent proof of the other archives' census calculations.
 `--extra-stages` takes an explicit JSON stage list using the driver's
 name/command/timeout schema. Use it to measure `profile_supplemental.py` and
 `profile_density.py` after the benchmark, with their explicit arguments. The

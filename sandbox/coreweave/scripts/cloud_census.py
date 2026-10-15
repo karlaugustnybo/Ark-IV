@@ -9,8 +9,31 @@ import math
 import time
 from pathlib import Path
 
-from ark_pipeline.cli.benchmark_pipeline import source_scan
+from ark_pipeline.cli.benchmark_pipeline import SIZE_BREAKS, row_policy, source_scan
 from ark_pipeline.runtime.provenance import atomic_json, sha256
+from ark_pipeline.spatial.coverage import load_spatial_profile
+
+
+def validate_observation(full, measured, item):
+    """Bind calibration to the current scanner's semantics and archive observations."""
+    for key in ("row_policy", "size_breaks", "census_method"):
+        if key not in full or key not in measured or full[key] != measured[key]:
+            raise ValueError(f"Census semantics differ: {key}")
+    local = next(row for row in full["archives"] if row["logical_name"] == item["logical_name"])
+    if len(measured["archives"]) != 1:
+        raise ValueError("Calibration must measure exactly the selected archive")
+    observed = measured["archives"][0]
+    for key in (
+        "logical_name",
+        "sha256",
+        "bytes",
+        "release",
+        "size_bin_counts",
+        "scanned",
+        "excluded",
+    ):
+        if key not in local or key not in observed or local[key] != observed[key]:
+            raise ValueError(f"Census archive observations differ: {key}")
 
 
 def calibrate(full, item, elapsed):
@@ -50,6 +73,13 @@ def main(argv=None):
     from cloud_storage import safe_path
 
     full = json.loads(args.census.read_text())
+    profile = load_spatial_profile(Path(config["profile"]))
+    if full.get("row_policy") != row_policy(profile) or full.get("size_breaks") != list(
+        SIZE_BREAKS
+    ):
+        raise ValueError("Full census policy or size bands differ from the selected profile")
+    if not isinstance(full.get("census_method"), str) or not full["census_method"]:
+        raise ValueError("Full census must declare its census method")
     expected = {record["logical_name"]: record["sha256"] for record in source["files"]}
     actual = {record["logical_name"]: record["sha256"] for record in full["archives"]}
     if actual != expected or len(actual) != len(full["archives"]):
@@ -73,7 +103,10 @@ def main(argv=None):
     calibration_out.mkdir(parents=True, exist_ok=False)
     started = time.monotonic()
     source_scan({**config, "root": str(args.probe_root), "output": str(calibration_out)})
-    result = calibrate(full, item, time.monotonic() - started)
+    elapsed = time.monotonic() - started
+    measured = json.loads((calibration_out / "population.json").read_text())
+    validate_observation(full, measured, item)
+    result = calibrate(full, item, elapsed)
     atomic_json(output / "population.json", result)
     return 0
 

@@ -16,6 +16,18 @@ be transferred to the target service. Source manifests, sizes and declared
 SHA256 identities are validated; the input files must stay unchanged. There
 is no default workstation volume and no data relocation.
 
+Lookup files require explicit byte-size and SHA256 pins. Existing acquisition
+manifest records are preserved. For lookups not registered there, supply a
+separate `acquisition/lookup-pins.json` with a `files` array containing `path`,
+`bytes` and `sha256` for each lookup, using independently verified source pins.
+Do not rewrite existing acquisition receipts to accommodate staging. Only the
+two supported lookup filenames are accepted in this companion; conflicting pins
+are rejected. The companion travels with the selected inputs, so upload and
+preflight use the same pins. Missing pins fail before transfer; wrong sizes or
+checksums fail before upload credentials/provider calls. Manifest and companion
+documents declare identity; hashing an unknown file alone does not establish
+its prior provenance or permission to transfer it.
+
 Actual upload commands accept entity, project, catalog name, state directory
 and a positive byte-size cap (`--max-gb`, decimal GB). The cap is a transfer
 safety limit, not remaining provider quota or a price guarantee. The project

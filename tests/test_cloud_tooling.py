@@ -312,6 +312,51 @@ class StorageTests(unittest.TestCase):
             with self.assertRaises(ValueError), patch.dict(sys.modules, {"wandb": None}):
                 storage.main(["upload-inputs", "--root", str(root), "--dry-run", "--max-gb", "nan"])
 
+    def test_lookup_pins_survive_manifest_and_companion_entrypoints(self):
+        for companion in (False, True):
+            with self.subTest(companion=companion), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp).resolve()
+                lookups = [record(root / name, relative=name) for name in storage.EXTRA_INPUTS]
+                manifest = write_json(root / "acquisition/current.json", {"sources": {}})
+                with self.assertRaisesRegex(ValueError, "explicit size/SHA256"):
+                    preflight_checks.check(root)
+                if companion:
+                    write_json(root / storage.LOOKUP_PINS, {"files": lookups})
+                else:
+                    write_json(manifest, {"sources": {"lookups": {"files": lookups}}})
+                before = manifest.read_bytes()
+                planned = {item["path"]: item for item in storage.input_plan(root)}
+                for item in lookups:
+                    self.assertEqual(planned[item["path"]]["expected_sha256"], item["sha256"])
+                self.assertEqual(preflight_checks.check(root)["files"], 4 if companion else 3)
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(
+                        storage.main(["upload-inputs", "--root", str(root), "--dry-run"]), 0
+                    )
+                    output = root / "preflight"
+                    self.assertEqual(
+                        preflight_checks.main(["--root", str(root), "--output", str(output)]), 0
+                    )
+                self.assertEqual(manifest.read_bytes(), before)
+                (root / lookups[0]["path"]).write_bytes(b"tampered!")
+                with self.assertRaisesRegex(ValueError, "checksum"):
+                    preflight_checks.check(root)
+                with (
+                    patch.dict(sys.modules, {"wandb": SimpleNamespace()}),
+                    patch.object(storage, "credentials") as credentials,
+                ):
+                    with self.assertRaisesRegex(ValueError, "checksum"):
+                        storage.upload(
+                            SimpleNamespace(root=root, max_gb=1), list(planned.values()), "inputs"
+                        )
+                    credentials.assert_not_called()
+                if companion:
+                    write_json(
+                        root / storage.LOOKUP_PINS, {"files": [{**lookups[0], "sha256": "bad"}]}
+                    )
+                    with self.assertRaisesRegex(ValueError, "explicit size/SHA256"):
+                        storage.input_plan(root)
+
     def test_entire_inventory_and_staged_bytes_checked_before_replace(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp).resolve()
@@ -498,6 +543,100 @@ class PipelineContracts(unittest.TestCase):
             {"size_bin_counts": [3]},
         )
         self.assertEqual((work, pairs, sensitivity), (6, 12, [[6, 12], [6, 12]]))
+
+    def test_census_cli_binds_semantics_and_archive_observations(self):
+        import copy
+
+        profile = ROOT / "config/spatial_semantics_iucn_richness_v3.toml"
+        policy = cloud_census.row_policy(cloud_census.load_spatial_profile(profile))
+        bands = list(cloud_census.SIZE_BREAKS)
+        cases = [
+            None,
+            "row_policy",
+            "size_breaks",
+            "census_method",
+            "missing_method",
+            "missing_policy",
+            "missing_bands",
+            "scanned",
+            "excluded",
+            "release",
+            "bytes",
+            "size_bin_counts",
+            "missing_observation",
+        ]
+        for bad in cases:
+            with self.subTest(bad=bad), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp).resolve()
+                item = record(root / "source/synthetic.zip", relative="synthetic.zip")
+                item.update(logical_name="synthetic.zip", release="invented")
+                write_json(
+                    root / "source/acquisition/current.json",
+                    {"sources": {"iucn-spatial": {"files": [item]}}},
+                )
+                archive = {
+                    **item,
+                    "wall_seconds": 1,
+                    "scanned": 1,
+                    "excluded": {},
+                    "size_bin_counts": [1] + [0] * len(bands),
+                }
+                measured = {
+                    "row_policy": policy,
+                    "size_breaks": bands,
+                    "census_method": "native-ring-envelopes-v1",
+                    "archives": [archive],
+                    "eligible_polygons": 1,
+                    "size_bin_counts": archive["size_bin_counts"],
+                }
+                full = copy.deepcopy(measured)
+                if bad in {"row_policy", "size_breaks", "census_method"}:
+                    full[bad] = "incompatible"
+                elif bad == "missing_method":
+                    del full["census_method"]
+                elif bad == "missing_policy":
+                    del full["row_policy"]
+                elif bad == "missing_bands":
+                    del full["size_breaks"]
+                elif bad == "missing_observation":
+                    del full["archives"][0]["scanned"]
+                elif bad is not None:
+                    full["archives"][0][bad] = "incompatible"
+                census = write_json(root / "census.json", full)
+                config = write_json(
+                    root / "config.json",
+                    {
+                        "root": str(root / "source"),
+                        "output": str(root / "output"),
+                        "profile": str(profile),
+                    },
+                )
+                before = census.read_bytes()
+
+                def scan(config):
+                    write_json(Path(config["output"]) / "population.json", measured)
+
+                argv = [
+                    "--config",
+                    str(config),
+                    "--census",
+                    str(census),
+                    "--archive",
+                    "synthetic.zip",
+                    "--probe-root",
+                    str(root / "probe"),
+                ]
+                with patch.object(cloud_census, "source_scan", side_effect=scan):
+                    if bad is None:
+                        self.assertEqual(cloud_census.main(argv), 0)
+                        saved = json.loads((root / "output/population.json").read_text())
+                        self.assertEqual(saved["archives"], full["archives"])
+                        self.assertGreater(saved["cloud_io_calibration"]["cloud_seconds"], 0)
+                    else:
+                        with self.assertRaises(ValueError):
+                            cloud_census.main(argv)
+                        self.assertFalse((root / "output/population.json").exists())
+                self.assertEqual(census.read_bytes(), before)
 
     def test_restore_requires_full_hash_verification_and_preserves_source(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -876,12 +1015,62 @@ class CompletionContracts(unittest.TestCase):
                 restore_serving.restore(root)
             chosen = record(selection, selection.read_bytes(), relative="serving-selection.json")
             write_json(inventory, {"files": [data, config, chosen]})
-            validated = []
-            target = restore_serving.restore(
-                root, publish_current=True, validator=lambda path: validated.append(path)
-            )
-            self.assertEqual(validated, [target])
-            self.assertEqual((root / "tiles/current").resolve(), source.parent)
+            before = source.read_bytes()
+
+            def validate(path):
+                value = json.loads(path.read_text())
+                for filename, pin in value["pinned_files"].items():
+                    stat = Path(filename).stat()
+                    self.assertEqual(pin, {"bytes": stat.st_size, "modified_ns": stat.st_mtime_ns})
+
+            target = restore_serving.restore(root, publish_current=True, validator=validate)
+            validate(root / "tiles/current/serving.json")
+            self.assertEqual((root / "tiles/current/serving.json").resolve(), target)
+            self.assertEqual(source.read_bytes(), before)
+            with self.assertRaisesRegex(ValueError, "overwrite"):
+                restore_serving.restore(root, publish_current=True, validator=validate)
+
+    def test_restoration_refuses_validation_failure_and_existing_current(self):
+        for existing in (False, True):
+            with self.subTest(existing=existing), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp).resolve()
+                data = record(root / "data.bin", relative="data.bin")
+                source = write_json(
+                    root / "tiles/generations/fixture/serving.json",
+                    {
+                        "pinned_files": {
+                            "/invented/data.bin": {"bytes": data["bytes"], "modified_ns": 0}
+                        }
+                    },
+                )
+                config = record(
+                    source, source.read_bytes(), relative="tiles/generations/fixture/serving.json"
+                )
+                selection = write_json(
+                    root / "serving-selection.json",
+                    {"original_root": "/invented", "generation": "tiles/generations/fixture"},
+                )
+                chosen = record(
+                    selection, selection.read_bytes(), relative="serving-selection.json"
+                )
+                write_json(
+                    root / "_cloud_storage/inventory.json", {"files": [data, config, chosen]}
+                )
+                before = source.read_bytes()
+                current = root / "tiles/current"
+                if existing:
+                    current.symlink_to("missing-selection", target_is_directory=True)
+
+                def reject(path):
+                    raise ValueError("Invented invalid serving configuration")
+
+                with self.assertRaises(ValueError):
+                    restore_serving.restore(root, publish_current=True, validator=reject)
+                if existing:
+                    self.assertEqual(current.readlink(), Path("missing-selection"))
+                else:
+                    self.assertFalse(current.exists() or current.is_symlink())
+                self.assertEqual(source.read_bytes(), before)
 
     def test_comparison_executes_actual_sql_and_uses_verified_exports(self):
         import duckdb

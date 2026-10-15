@@ -8,13 +8,16 @@ import subprocess
 import sys
 from pathlib import Path
 
-from cloud_storage import digest, input_plan
+from cloud_storage import LOOKUP_PINS, digest, input_plan
 
 
 def check(root):
     plan = input_plan(root)
     for item in plan:
-        if not item.get("expected_sha256") and item["path"] != "acquisition/current.json":
+        if not item.get("expected_sha256") and item["path"] not in {
+            "acquisition/current.json",
+            LOOKUP_PINS,
+        }:
             raise ValueError("Preflight requires checksum-pinned acquisition inputs")
         if item.get("expected_sha256") and digest(root / item["path"]) != item["expected_sha256"]:
             raise ValueError("Acquisition checksum mismatch")
