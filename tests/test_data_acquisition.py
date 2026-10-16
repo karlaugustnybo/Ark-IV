@@ -132,7 +132,17 @@ class DataAcquisitionTests(unittest.TestCase):
                 "Siberia",
             },
         )
-        self.assertFalse(is_due(source, {"release": "v1c"}, False))
+        self.assertFalse(
+            is_due(
+                source,
+                {
+                    "release": "v1c",
+                    "files": [{**item, "bytes": item["expected_bytes"]} for item in files],
+                },
+                False,
+            )
+        )
+        self.assertTrue(is_due(source, {"release": "v1c", "files": files[:4]}, False))
         self.assertTrue(is_due(source, {"release": "v1b"}, False))
         self.assertTrue(is_due(source, {"release": "v1c"}, True))
 
@@ -291,6 +301,28 @@ class DataAcquisitionTests(unittest.TestCase):
                 side_effect=AssertionError("current release must not download"),
             ):
                 self.assertEqual(update_public(args, catalogue), 0)
+            # An expanded inventory at the same release must acquire only additions.
+            extra = root / "hybas_lake_af.zip"
+            shutil.copy2(archives[0], extra)
+            with inventory_path.open("a") as handle:
+                handle.write(
+                    "\n[[files]]\n"
+                    f'logical_name = "{extra.name}"\n'
+                    f"expected_bytes = {extra.stat().st_size}\n"
+                    f'download_url = "{extra.as_uri()}"\n'
+                )
+            from ark_pipeline.cli.sources_acquire import download
+
+            with unittest.mock.patch(
+                "ark_pipeline.cli.sources_acquire.download", wraps=download
+            ) as downloads:
+                self.assertEqual(update_public(args, catalogue), 0)
+                self.assertEqual(downloads.call_count, 1)
+            updated = load_manifest(root)["sources"][source.id]
+            self.assertEqual(len(updated["files"]), 3)
+            for old in record["files"]:
+                self.assertIn(old, updated["files"])
+                self.assertTrue((root / old["path"]).is_file())
 
     def test_sync_registers_staged_manual_source_only_after_authorization(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -326,11 +358,19 @@ class DataAcquisitionTests(unittest.TestCase):
             for recipe, mode in (("data-build", "download"), ("data-update", "update")):
                 completed = subprocess.run(
                     ["just", recipe, "--root", temporary, "--workers", "3", "--dry-run"],
-                    check=True, capture_output=True, text=True,
-                    env={**os.environ, "UV_NO_SYNC": "1", "UV_CACHE_DIR": str(Path(temporary) / "uv-cache")},
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    env={
+                        **os.environ,
+                        "UV_NO_SYNC": "1",
+                        "UV_CACHE_DIR": str(Path(temporary) / "uv-cache"),
+                    },
                 )
                 plan = json.loads(completed.stdout)
-                self.assertEqual(plan["commands"][0][1:4], ["-m", "ark_pipeline.cli.sources_sync", mode])
+                self.assertEqual(
+                    plan["commands"][0][1:4], ["-m", "ark_pipeline.cli.sources_sync", mode]
+                )
                 self.assertEqual(plan["commands"][-1], ["just", "data-tiles"])
                 self.assertEqual(plan["resources"]["workers"], 3)
                 self.assertFalse((Path(temporary) / "derived").exists())
@@ -360,6 +400,92 @@ class FakeIucnApi:
 
 
 class IucnCatalogTests(unittest.TestCase):
+    def test_pagination_requires_stable_exact_unique_totals_and_preserves_output(self):
+        cases = [
+            ([([1], 3), ([], 3)], "incomplete"),
+            ([([1], 3), ([2], 4)], "changed"),
+            ([([1, 2], 1)], "exceeds"),
+            ([([1], 3), ([1], 3)], "repeated"),
+        ]
+        for pages, message in cases:
+            with self.subTest(message=message), tempfile.TemporaryDirectory() as folder:
+                class Api(FakeIucnApi):
+                    def get(self, endpoint, query=None):
+                        if endpoint == "taxa/kingdom":
+                            return {"kingdoms": ["ANIMALIA"]}, {}
+                        if endpoint.endswith("ANIMALIA"):
+                            ids, total = pages[query["page"] - 1]
+                            return {"assessments": [{"assessment_id": i} for i in ids]}, {
+                                "total-count": str(total)
+                            }
+                        return super().get(endpoint, query)
+
+                output, metadata = Path(folder) / "catalog.jsonl", Path(folder) / "metadata.json"
+                output.write_text("previous catalogue")
+                metadata.write_text("previous metadata")
+                with self.assertRaisesRegex(ValueError, message):
+                    download_catalogue(Api(), output, metadata, None, None)
+                self.assertEqual(output.read_text(), "previous catalogue")
+                self.assertEqual(metadata.read_text(), "previous metadata")
+
+    def test_duplicate_rows_reconcile_uniquely_and_missing_total_uses_empty_page(self):
+        for advertised in (True, False):
+            with self.subTest(advertised=advertised), tempfile.TemporaryDirectory() as folder:
+                class Api(FakeIucnApi):
+                    def get(self, endpoint, query=None):
+                        if endpoint == "taxa/kingdom":
+                            return {"kingdoms": ["ANIMALIA"]}, {}
+                        if endpoint.endswith("ANIMALIA"):
+                            ids = {1: [1], 2: [1, 2], 3: []}[query["page"]]
+                            return {"assessments": [{"assessment_id": i} for i in ids]}, (
+                                {"total-count": "2"} if advertised else {}
+                            )
+                        return super().get(endpoint, query)
+
+                result = download_catalogue(Api(), Path(folder) / "catalog", Path(folder) / "meta", None, None)
+                self.assertEqual(result["rows"], 2)
+                self.assertEqual(result["advertised_totals_by_kingdom"], {"ANIMALIA": 2 if advertised else None})
+
+    def test_verified_current_catalogue_reuses_but_legacy_completion_is_refreshed(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            previous, metadata = root / "old.jsonl", root / "old.metadata.json"
+            download_catalogue(FakeIucnApi(), previous, metadata, None, None)
+            class VersionOnly(FakeIucnApi):
+                def get(self, endpoint, query=None):
+                    if endpoint != "information/red_list_version":
+                        raise AssertionError("verified catalogue must reuse")
+                    return super().get(endpoint, query)
+
+            reused = download_catalogue(VersionOnly(), root / "new.jsonl", root / "new.metadata.json", previous, metadata)
+            self.assertTrue(reused["reused"])
+            self.assertEqual(previous.read_bytes(), (root / "new.jsonl").read_bytes())
+            legacy = json.loads(metadata.read_text())
+            legacy["schema_version"] = 1
+            # Write a separate path; current reuse may be a hard link.
+            legacy_path = root / "legacy.metadata.json"
+            legacy_path.write_text(json.dumps(legacy))
+            refreshed = download_catalogue(FakeIucnApi(), root / "refresh.jsonl", root / "refresh.metadata.json", previous, legacy_path)
+            self.assertFalse(refreshed["reused"])
+
+    def test_catalogue_release_drift_preserves_selected_output(self):
+        class Api(FakeIucnApi):
+            versions = 0
+            def get(self, endpoint, query=None):
+                if endpoint == "information/red_list_version":
+                    self.versions += 1
+                    return {"red_list_version": "2099-1" if self.versions == 1 else "2099-2"}, {}
+                return super().get(endpoint, query)
+
+        with tempfile.TemporaryDirectory() as folder:
+            output, metadata = Path(folder) / "catalog", Path(folder) / "metadata"
+            output.write_text("previous catalogue")
+            metadata.write_text("previous metadata")
+            with self.assertRaisesRegex(ValueError, "release changed"):
+                download_catalogue(Api(), output, metadata, None, None)
+            self.assertEqual(output.read_text(), "previous catalogue")
+            self.assertEqual(metadata.read_text(), "previous metadata")
+
     def test_response_helpers_fail_closed_on_ambiguous_shapes(self) -> None:
         self.assertEqual(only_list({"assessments": [1]}, ("assessments",)), [1])
         self.assertEqual(kingdom_name({"kingdom_name": "FUNGI"}), "FUNGI")

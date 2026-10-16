@@ -336,3 +336,43 @@ Module paths changed during repository cleanup; the `just` command names remain
 stable. Code fingerprints deliberately invalidate old checkpoints and receipts
 when affected code changes. Preserve the old outputs, and let normal validation
 decide what can be reused; do not modify receipts to bypass these checks.
+
+### Exact-ID metadata reconciliation
+
+`serving_metadata` recovers source-scoped spatial labels and affirmative realm
+attributes, then runs the shared exact-ID reconciliation stage before downstream
+serving builds. `serving_prepare` forwards `--iucn-metadata-mode` (`auto` by
+default), `--iucn-details-dir`, and `--reviewed-evidence-path` through their
+`GLOBAL_IUCN_METADATA_MODE`, `GLOBAL_IUCN_DETAILS_DIR`, and
+`GLOBAL_IUCN_REVIEWED_EVIDENCE_PATH` environment equivalents.
+
+`auto` reuses a complete matching-release cache or acquires missing queued IDs
+with the configured IUCN token. `cache-only` requires coverage and makes no API
+requests. `off` explicitly leaves metadata unresolved. Conflicting registered
+spatial releases or stale cache endpoint/release identities fail. Raw retrieval
+and reviewed ecosystem evidence remain private. Reviewed evidence defaults to
+`config/iucn_reviewed_ecosystem_evidence.json` when available; an absent file
+leaves ecosystem gaps unresolved. Selected evidence identity participates in
+preparation checkpoint compatibility and is pinned during reconciliation.
+
+For offline repair, run `uv run python -m
+ark_pipeline.cli.reconcile_species_metadata --input-dir <dimension>
+--details-dir <completed-intake> --output-dir <separate-dimension>`; optional
+`--expected-release` and `--reviewed-evidence-path` constrain the evidence.
+This does not rebuild spatial membership, scores, tiles or databases. Publication
+replaces species, systems and report with backups and rollback on replacement
+failure. Serving refreshes, direct species builds and standalone repairs finish
+both Parquet files and the report in isolation before selecting the dimension.
+Failed intake, reconciliation, report serialization or publication retains the
+previous three files. Collected detail hashes and selected reviewed-evidence
+identity (including absence) are rechecked throughout publication. Managed
+reconciliation and serving also pin acquisition registration, including absence,
+before reading source releases and recheck it before final report serialization
+and before/after every selected replacement. Direct source-backed builds retain
+the same registration guard through their final selection. Three file
+renames do not provide an atomic snapshot for concurrent readers; coordinate
+readers with the metadata writer. Legacy packs without acquisition registration
+retain placeholders when optional spatial recovery is unavailable; present
+registrations require an explicit `validation_status: passed`; matching file
+checksums alone do not establish validation. Species IDs, pinned categories,
+sequencing traits and existing realms are checked before publication.

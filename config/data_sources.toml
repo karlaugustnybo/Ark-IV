@@ -76,7 +76,7 @@ interval_days = 28
 required = false
 official_url = "https://api.iucnredlist.org/"
 terms_url = "https://www.iucnredlist.org/terms/terms-of-use"
-token_env = "IUCN_REDLIST_KEY"
+token_env = "IUCN_REDLIST_API_KEY"
 output_file = "iucn_assessment_catalog.jsonl"
 metadata_file = "iucn_assessment_catalog.metadata.json"
 command = ["uv", "run", "python", "ark_pipeline/cli/sources_download_iucn.py", "{output}", "--previous", "{previous}", "--previous-metadata", "{previous_metadata}"]
@@ -121,7 +121,7 @@ archive_required_suffixes = [".shp", ".dbf", ".shx"]
 [[sources]]
 id = "goat-species"
 provider = "Genomes on a Tree"
-description = "Current GoaT Eukaryota lineage, including ENA additions, and required sequencing-evidence export."
+description = "Current GoaT Eukaryota lineage, including ENA additions, with sequencing evidence, GoaT-native IUCN redlist status, and conservation/sample analysis attributes."
 access = "public-command"
 update_policy = "monthly"
 interval_days = 28
@@ -131,7 +131,7 @@ terms_url = "https://github.com/genomehubs/goat-data/blob/main/LICENSE"
 output_file = "tol_species_all_ranks.tsv"
 command = ["bun", "ark_pipeline/cli/sources_download_goat.mjs", "{output}"]
 column_requirements = [
-  { file = "tol_species_all_ranks.tsv", columns = ["taxon_id", "taxon_rank", "scientific_name", "species", "genus", "family", "order", "class", "phylum", "kingdom", "domain", "assembly_level", "bioproject", "busco_completeness", "ebp_standard_criteria", "in_progress", "insdc_submitted", "published", "resampling_required", "sample_acquired", "sample_available", "sample_collected", "sequencing_status", "sequencing_status_ebp", "other_priority", "family_representative"] },
+  { file = "tol_species_all_ranks.tsv", columns = ["taxon_id", "taxon_rank", "scientific_name", "species", "genus", "family", "order", "class", "phylum", "kingdom", "domain", "assembly_level", "bioproject", "busco_completeness", "ebp_standard_criteria", "in_progress", "insdc_submitted", "published", "resampling_required", "sample_acquired", "sample_available", "sample_collected", "sequencing_status", "sequencing_status_ebp", "other_priority", "family_representative", "redlist_category", "redlist_population_trend", "redlist_scopes", "country_list", "cites_category", "conservation_list", "biosample", "sra_accession", "run_accession", "sex_determination", "ploidy", "c_value", "long_list", "in_assembly", "insdc_open", "open", "total_runs", "reads", "assembly_date", "submitted", "genome_size_kmer", "genome_size_draft", "mitochondrion_assembly_span", "mitochondrion_gc_percent", "plastid_assembly_span", "plastid_gc_percent", "number_acquired", "field_provenance_json"] },
 ]
 
 [[sources]]

@@ -46,6 +46,11 @@ def parser() -> argparse.ArgumentParser:
     )
     result.add_argument("--crosswalk-mode", choices=("refresh", "require-current"), default="require-current",
                         help="Rebuild matches automatically, or require the supplied crosswalk to be current.")
+    result.add_argument("--iucn-details-dir", type=Path, default=os.environ.get("GLOBAL_IUCN_DETAILS_DIR"))
+    result.add_argument("--iucn-metadata-mode", choices=("auto", "cache-only", "off"),
+                        default=os.environ.get("GLOBAL_IUCN_METADATA_MODE", "auto"))
+    result.add_argument("--reviewed-evidence-path", type=Path,
+                        default=os.environ.get("GLOBAL_IUCN_REVIEWED_EVIDENCE_PATH"))
     result.add_argument("--tiles", action="store_true", help="Continue through a resumable full PMTiles build.")
     result.add_argument("--ui", choices=("auto", "rich", "plain"), default="auto", help="Live Rich dashboard in a terminal; plain output when redirected.")
     result.add_argument("--fresh", action="store_true", help="Start fresh dashboard history; production outputs still undergo normal reuse validation.")
@@ -102,6 +107,7 @@ def preparation_plan(args: argparse.Namespace) -> tuple[list[list[str]], dict[st
     ))
     environment = {
         "GLOBAL_DATA_ROOT": str(root),
+        "GLOBAL_IUCN_METADATA_MODE": args.iucn_metadata_mode,
         "GLOBAL_H3_ROOT": str(h3_root),
         "GLOBAL_CROSSWALK_PATH": str(crosswalk),
         "GLOBAL_PREVIEW_ROOT": str(preview_root.expanduser().resolve()),
@@ -109,6 +115,10 @@ def preparation_plan(args: argparse.Namespace) -> tuple[list[list[str]], dict[st
         "DUCKDB_MEMORY_LIMIT": os.environ.get("DUCKDB_MEMORY_LIMIT") or default_duckdb_memory_limit(),
         "DUCKDB_SCRATCH_DIR": str(Path(os.environ.get("DUCKDB_SCRATCH_DIR") or root / "scratch/spatial").expanduser().resolve()),
     }
+    if args.iucn_details_dir:
+        environment["GLOBAL_IUCN_DETAILS_DIR"] = str(args.iucn_details_dir.expanduser().resolve())
+    if args.reviewed_evidence_path:
+        environment["GLOBAL_IUCN_REVIEWED_EVIDENCE_PATH"] = str(args.reviewed_evidence_path.expanduser().resolve())
     return commands, environment
 
 
@@ -136,9 +146,12 @@ def main(argv: list[str] | None = None) -> int:
                 names.extend(["boundaries", "metadata", "coarse_db", "coarse_cache", "fine_metrics", "prepared_inputs"]
                              if command == ["just", "global-prepare"] else ["tiles"] if command == ["just", "data-tiles"] else mapping[command[2]])
             run_output = report_path.parent / "runs" / (iso_now().replace(":", "-") + "-" + uuid.uuid4().hex[:8])
+            from ark_pipeline.builders.iucn_metadata import evidence_identity
+
             identity = {"mode": "full", "commands": commands, "environment": overrides,
                         "profile": load_spatial_profile(args.profile).digest, "code": pipeline_code(REPOSITORY_ROOT),
-                        "sources": source_identity(args.root.expanduser().resolve())}
+                        "sources": source_identity(args.root.expanduser().resolve()),
+                        "reviewed_evidence": evidence_identity(args.reviewed_evidence_path)}
             if not args.fresh:
                 run_output = find_checkpoint(report_path.parent / "runs", identity) or run_output
             run_output.mkdir(parents=True, exist_ok=True)

@@ -28,9 +28,14 @@ TAXONOMIC_NAME_CLASSES = (
     "scientific name",
     "synonym",
     "equivalent name",
-    "includes",
-    "in-part",
 )
+GOAT_REDLIST_COLUMNS = (
+    "redlist_category",
+    "redlist_population_trend",
+    "redlist_scopes",
+    "field_provenance_json",
+)
+IUCN_SYSTEMS_COLUMN = "systems"
 
 
 def parse_args() -> argparse.Namespace:
@@ -122,6 +127,47 @@ def main() -> None:
     merged_dmp = sql_path(args.ncbi_taxdump_dir / "merged.dmp")
     delnodes_dmp = sql_path(args.ncbi_taxdump_dir / "delnodes.dmp")
 
+    with args.goat_species.open("r", encoding="utf8") as handle:
+        goat_header = [name.strip().strip('"') for name in
+                       handle.readline().rstrip("\n").split("\t")]
+    # The bulk export already carries lineage for taxa newer than the pinned
+    # NCBI dump. Older exports remain supported with typed empty columns.
+    goat_lineage_select = ''.join(
+        f", nullif(trim(\"{rank}\"), '') AS export_{rank}" if rank in goat_header
+        else f', NULL::VARCHAR AS export_{rank}'
+        for rank in ('species', 'genus', 'family', 'order', 'class', 'phylum', 'kingdom', 'domain')
+    )
+    goat_has_redlist = all(column in goat_header for column in GOAT_REDLIST_COLUMNS)
+    goat_redlist_select = ""
+    if goat_has_redlist:
+        goat_redlist_select = ",\n            " + ",\n            ".join(
+            str(column) for column in GOAT_REDLIST_COLUMNS
+        )
+        stage("GoaT export carries native redlist columns; SIS provenance bridge enabled")
+    else:
+        stage(
+            "GoaT export predates redlist columns; SIS provenance bridge "
+            "disabled for this run"
+        )
+
+    with args.iucn_assessments.open("r", encoding="utf8") as handle:
+        assessments_header = [
+            name.strip().strip('"') for name in
+            handle.readline().rstrip("\n").split(",")
+        ]
+    assessments_has_systems = IUCN_SYSTEMS_COLUMN in assessments_header
+    assessments_systems_select = (
+        f",\n            {IUCN_SYSTEMS_COLUMN} AS iucn_systems"
+        if assessments_has_systems else ",\n            NULL::VARCHAR AS iucn_systems"
+    )
+    if assessments_has_systems:
+        stage("IUCN assessments carry realm systems; iucn_systems column enabled")
+    else:
+        stage(
+            "IUCN assessments lack a systems column; realm systems are only "
+            "available by joining the assessment file directly"
+        )
+
     stage("Loading IUCN, GoaT, and NCBI source tables")
     con.execute(
         f"""
@@ -151,7 +197,7 @@ def main() -> None:
             redlistCategory AS iucn_redlist_category,
             yearPublished::INTEGER AS iucn_year_published,
             assessmentDate AS iucn_assessment_date,
-            scopes AS iucn_scopes
+            scopes AS iucn_scopes{assessments_systems_select}
         FROM read_csv_auto(
             '{iucn_assessments}', header=true, all_varchar=true
         );
@@ -177,7 +223,7 @@ def main() -> None:
             sequencing_status,
             sequencing_status_ebp,
             other_priority,
-            family_representative
+            family_representative{goat_redlist_select}{goat_lineage_select}
         FROM read_csv(
             '{goat_species}', delim='\\t', header=true, all_varchar=true
         ) WHERE lower(trim(taxon_rank)) = 'species';
@@ -311,6 +357,19 @@ def main() -> None:
         GROUP BY iucn_sis_id, ncbi_taxid;
         """
     )
+
+    con.execute("""
+        CREATE TABLE partial_candidates AS
+        SELECT DISTINCT i.iucn_sis_id, g.ncbi_taxid,
+            n.name_txt AS evidence_name,
+            'NCBI_' || upper(replace(n.name_class, '-', '_')) AS evidence_method,
+            7 AS method_priority
+        FROM iucn i
+        JOIN ncbi_names n USING (name_norm)
+        JOIN goat g USING (ncbi_taxid)
+        WHERE n.name_class IN ('includes', 'in-part')
+          AND g.ncbi_taxid_numeric IS NOT NULL;
+    """)
 
     if args.gbif_bridge_json:
         bridge_path = sql_path(args.gbif_bridge_json)
@@ -449,6 +508,114 @@ def main() -> None:
         """
     )
 
+    stage("Parsing GoaT-native redlist statuses and SIS provenance")
+    if not goat_has_redlist:
+        con.execute(
+            """
+            CREATE TABLE goat_redlist (
+                ncbi_taxid VARCHAR,
+                goat_redlist_category VARCHAR,
+                goat_redlist_population_trend VARCHAR,
+                goat_redlist_scopes VARCHAR,
+                goat_redlist_status_source VARCHAR,
+                goat_redlist_source_date VARCHAR,
+                goat_iucn_source_slug VARCHAR,
+                goat_iucn_sis_id BIGINT,
+                goat_iucn_assessment_id BIGINT,
+                goat_iucn_sis_ids BIGINT[],
+                goat_iucn_raw_values JSON
+            );
+            CREATE TABLE sis_candidates (
+                iucn_sis_id BIGINT,
+                ncbi_taxid VARCHAR,
+                evidence_name VARCHAR,
+                evidence_method VARCHAR,
+                method_priority INTEGER
+            );
+            """
+        )
+    else:
+        con.execute(
+            """
+            CREATE TABLE goat_redlist AS
+            WITH provenance AS (
+            SELECT
+                g.ncbi_taxid,
+                g.ncbi_taxid_numeric,
+                nullif(trim(g.redlist_category), '') AS goat_redlist_category,
+                nullif(trim(g.redlist_population_trend), '') AS goat_redlist_population_trend,
+                nullif(trim(g.redlist_scopes), '') AS goat_redlist_scopes,
+                json_extract_string(g.field_provenance_json,
+                    '$.redlist_category.aggregation_source')
+                    AS goat_redlist_status_source,
+                json_extract(g.field_provenance_json,
+                    '$.redlist_category.rawValues') AS goat_iucn_raw_values
+            FROM goat g
+            WHERE g.ncbi_taxid_numeric IS NOT NULL
+              AND nullif(trim(g.redlist_category), '') IS NOT NULL
+              AND coalesce(json_valid(trim(g.field_provenance_json)), false)
+        )
+        , raw_identities AS (
+            SELECT p.ncbi_taxid,
+                json_extract_string(r.value, '$.metadata.source.slug') AS slug,
+                json_extract_string(r.value, '$.metadata.source.date') AS source_date
+            FROM provenance p, json_each(p.goat_iucn_raw_values) r
+        ), parsed AS (
+            SELECT *,
+                CASE WHEN regexp_matches(coalesce(slug, ''), '^[0-9]+/[0-9]+$')
+                    AND try_cast(split_part(slug, '/', 1) AS BIGINT) > 0
+                    AND try_cast(split_part(slug, '/', 2) AS BIGINT) > 0
+                    THEN try_cast(split_part(slug, '/', 1) AS BIGINT) END AS sis_id,
+                CASE WHEN regexp_matches(coalesce(slug, ''), '^[0-9]+/[0-9]+$')
+                    AND try_cast(split_part(slug, '/', 1) AS BIGINT) > 0
+                    AND try_cast(split_part(slug, '/', 2) AS BIGINT) > 0
+                    THEN try_cast(split_part(slug, '/', 2) AS BIGINT) END AS assessment_id
+            FROM raw_identities
+        ), identities AS (
+            SELECT ncbi_taxid,
+                list_sort(list(DISTINCT sis_id) FILTER (WHERE sis_id IS NOT NULL))
+                    AS goat_iucn_sis_ids,
+                CASE WHEN count(DISTINCT sis_id) = 1 THEN min(sis_id) END AS goat_iucn_sis_id,
+                CASE WHEN count(DISTINCT sis_id) = 1 AND count(DISTINCT assessment_id) = 1
+                    THEN min(assessment_id) END AS goat_iucn_assessment_id,
+                CASE WHEN count(DISTINCT slug) = 1 THEN min(slug) END AS goat_iucn_source_slug,
+                CASE WHEN count(DISTINCT source_date) = 1 THEN min(source_date) END
+                    AS goat_redlist_source_date
+            FROM parsed GROUP BY ncbi_taxid
+        )
+        SELECT p.*, ids.* EXCLUDE(ncbi_taxid)
+        FROM provenance p LEFT JOIN identities ids USING(ncbi_taxid);
+
+        -- Identifier-based bridge: GoaT's IUCN Red List provenance records the
+        -- IUCN species-concept SIS ID that GoaT itself matched to the TaxID.
+        -- These IDs are used as deterministic evidence, never as name evidence.
+        CREATE TABLE sis_candidates AS
+        SELECT
+            i.iucn_sis_id,
+            r.ncbi_taxid,
+            g.goat_scientific_name AS evidence_name,
+            'GOAT_REDLIST_SIS_PROVENANCE' AS evidence_method,
+            6 AS method_priority
+        FROM iucn i
+        JOIN goat_redlist r ON list_contains(r.goat_iucn_sis_ids, i.iucn_sis_id)
+        JOIN goat g ON g.ncbi_taxid = r.ncbi_taxid
+        WHERE r.goat_redlist_status_source = 'direct'
+          AND g.ncbi_taxid_numeric IS NOT NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM exact_candidates e
+              WHERE e.iucn_sis_id = i.iucn_sis_id
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM bridge_candidates b
+              WHERE b.iucn_sis_id = i.iucn_sis_id
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM fuzzy_candidates f
+              WHERE f.iucn_sis_id = i.iucn_sis_id
+          );
+        """
+    )
+
     stage("Reconstructing NCBI lineage for all candidate TaxIDs")
     con.execute(
         """
@@ -457,7 +624,11 @@ def main() -> None:
         UNION
         SELECT DISTINCT ncbi_taxid FROM bridge_candidates
         UNION
-        SELECT DISTINCT ncbi_taxid FROM fuzzy_candidates;
+        SELECT DISTINCT ncbi_taxid FROM fuzzy_candidates
+        UNION
+        SELECT DISTINCT ncbi_taxid FROM sis_candidates
+        UNION
+        SELECT DISTINCT ncbi_taxid FROM partial_candidates;
 
         CREATE TABLE candidate_lineage_long AS
         WITH RECURSIVE walk(seed_taxid, ncbi_taxid, parent_taxid, taxon_rank, depth) AS (
@@ -549,22 +720,24 @@ def main() -> None:
         CREATE TABLE candidate_lineage AS
         SELECT
             c.ncbi_taxid,
-            coalesce(n.ncbi_species, g.species, g.scientific_name) AS ncbi_species,
-            coalesce(n.ncbi_genus, g.genus) AS ncbi_genus,
-            coalesce(n.ncbi_family, g.family) AS ncbi_family,
-            coalesce(n.ncbi_order, g."order") AS ncbi_order,
-            coalesce(n.ncbi_class, g."class") AS ncbi_class,
-            coalesce(n.ncbi_phylum, g.phylum) AS ncbi_phylum,
-            coalesce(n.ncbi_kingdom, g.kingdom) AS ncbi_kingdom,
-            coalesce(n.ncbi_domain, g.domain) AS ncbi_domain,
+            coalesce(n.ncbi_species, g.species, g.scientific_name, e.export_species) AS ncbi_species,
+            coalesce(n.ncbi_genus, g.genus, e.export_genus) AS ncbi_genus,
+            coalesce(n.ncbi_family, g.family, e.export_family) AS ncbi_family,
+            coalesce(n.ncbi_order, g."order", e.export_order) AS ncbi_order,
+            coalesce(n.ncbi_class, g."class", e.export_class) AS ncbi_class,
+            coalesce(n.ncbi_phylum, g.phylum, e.export_phylum) AS ncbi_phylum,
+            coalesce(n.ncbi_kingdom, g.kingdom, e.export_kingdom) AS ncbi_kingdom,
+            coalesce(n.ncbi_domain, g.domain, e.export_domain) AS ncbi_domain,
             CASE
-                WHEN n.ncbi_taxid IS NOT NULL THEN 'NCBI_TAXDUMP'
-                WHEN g.ncbi_taxid IS NOT NULL THEN 'GOAT_API'
+                WHEN n.ncbi_family IS NOT NULL THEN 'NCBI_TAXDUMP'
+                WHEN g.family IS NOT NULL THEN 'GOAT_API'
+                WHEN e.export_family IS NOT NULL THEN 'GOAT_EXPORT'
                 ELSE NULL
             END AS lineage_source
         FROM candidate_taxids c
         LEFT JOIN candidate_lineage_ncbi n USING (ncbi_taxid)
-        LEFT JOIN goat_lineages g USING (ncbi_taxid);
+        LEFT JOIN goat_lineages g USING (ncbi_taxid)
+        LEFT JOIN goat e USING (ncbi_taxid);
         """
     )
 
@@ -613,12 +786,49 @@ def main() -> None:
                 [f.candidate_name_source] AS all_exact_evidence,
                 NULL::VARCHAR AS gbif_bridge_concept_key
             FROM fuzzy_candidates f
+
+            UNION ALL
+
+            SELECT
+                s.iucn_sis_id,
+                s.ncbi_taxid,
+                s.evidence_name,
+                s.evidence_method,
+                s.method_priority,
+                NULL::BIGINT AS edit_distance,
+                NULL::DOUBLE AS name_similarity,
+                ['GOAT_REDLIST_SIS_SLUG'] AS all_exact_evidence,
+                NULL::VARCHAR AS gbif_bridge_concept_key
+            FROM sis_candidates s
+
+            UNION ALL
+            SELECT p.iucn_sis_id, p.ncbi_taxid, p.evidence_name,
+                p.evidence_method, p.method_priority,
+                0 AS edit_distance, 1.0::DOUBLE AS name_similarity,
+                [p.evidence_method] AS all_exact_evidence,
+                NULL::VARCHAR AS gbif_bridge_concept_key
+            FROM partial_candidates p
         ),
-        enriched AS (
+        combined AS (
+            -- Multiple evidence routes to one TaxID corroborate one concept.
+            SELECT iucn_sis_id, ncbi_taxid,
+                first(candidate_name ORDER BY method_priority) AS candidate_name,
+                first(evidence_method ORDER BY method_priority) AS evidence_method,
+                min(method_priority) AS method_priority,
+                first(edit_distance ORDER BY method_priority) AS edit_distance,
+                first(name_similarity ORDER BY method_priority) AS name_similarity,
+                list_sort(list_distinct(flatten(list(all_exact_evidence)))) AS all_exact_evidence,
+                first(gbif_bridge_concept_key ORDER BY gbif_bridge_concept_key NULLS LAST)
+                    AS gbif_bridge_concept_key
+            FROM unioned
+            GROUP BY iucn_sis_id, ncbi_taxid
+        ),
+        raw_enriched AS (
             SELECT
                 u.*,
                 g.goat_scientific_name,
                 l.* EXCLUDE(ncbi_taxid),
+                sr.ncbi_taxid IS NOT NULL AS sis_confirmed,
                 (
                     (i.iucn_genus IS NOT NULL AND l.ncbi_genus IS NOT NULL
                         AND lower(i.iucn_genus) = lower(l.ncbi_genus))::INTEGER
@@ -643,10 +853,38 @@ def main() -> None:
                     + (i.iucn_phylum IS NOT NULL AND l.ncbi_phylum IS NOT NULL
                         AND lower(i.iucn_phylum) <> lower(l.ncbi_phylum))::INTEGER
                 ) AS lineage_conflicts
-            FROM unioned u
+            FROM combined u
             JOIN iucn i USING (iucn_sis_id)
             JOIN goat g USING (ncbi_taxid)
             LEFT JOIN candidate_lineage l USING (ncbi_taxid)
+            LEFT JOIN goat_redlist sr
+              ON sr.ncbi_taxid = u.ncbi_taxid
+             AND sr.goat_iucn_sis_id = u.iucn_sis_id
+             AND sr.goat_redlist_status_source = 'direct'
+        ),
+        compatibility AS (
+            SELECT a.iucn_sis_id, a.ncbi_taxid,
+                bool_or(lower(s.scientific_name)=lower(i.iucn_class)) AS compatible_class,
+                bool_or(lower(s.scientific_name)=lower(i.iucn_phylum)) AS compatible_phylum
+            FROM raw_enriched a JOIN iucn i USING(iucn_sis_id)
+            JOIN candidate_lineage_long l ON l.seed_taxid=a.ncbi_taxid
+            JOIN ncbi_scientific_names s ON s.ncbi_taxid=l.ncbi_taxid
+            GROUP BY 1,2
+        ),
+        enriched AS (
+            -- Rank shifts are compatible only with a proven scientific-name
+            -- ancestor. Apply before ranking candidates and writing review data.
+            SELECT a.* EXCLUDE(lineage_conflicts),
+                a.lineage_conflicts AS raw_lineage_conflicts,
+                coalesce(c.compatible_class,false) AS class_ancestor_compatible,
+                coalesce(c.compatible_phylum,false) AS phylum_ancestor_compatible,
+                a.lineage_conflicts
+                  - (i.iucn_class IS NOT NULL AND a.ncbi_class IS NOT NULL AND lower(a.ncbi_class)<>lower(i.iucn_class)
+                     AND coalesce(c.compatible_class,false))::INTEGER
+                  - (i.iucn_phylum IS NOT NULL AND a.ncbi_phylum IS NOT NULL AND lower(a.ncbi_phylum)<>lower(i.iucn_phylum)
+                     AND coalesce(c.compatible_phylum,false))::INTEGER AS lineage_conflicts
+            FROM raw_enriched a JOIN iucn i USING(iucn_sis_id)
+            LEFT JOIN compatibility c USING(iucn_sis_id,ncbi_taxid)
         )
         SELECT
             *,
@@ -714,7 +952,7 @@ def main() -> None:
             FROM all_candidates c
             JOIN iucn i USING (iucn_sis_id)
             WHERE c.candidate_rank = 1
-              AND (c.method_priority = 5 OR c.candidate_count > 1)
+              AND (c.method_priority IN (5, 7) OR c.candidate_count > 1)
             ORDER BY c.iucn_sis_id
         ) TO '{sql_path(output_dir / "gbif_review_input.json")}'
             (FORMAT JSON, ARRAY true);
@@ -781,6 +1019,11 @@ def main() -> None:
                   AND c.lineage_agreements >= 2
                   AND c.lineage_conflicts <= 1
                   THEN true
+                WHEN c.sis_confirmed
+                  AND c.candidate_count = 1
+                  AND c.lineage_agreements >= 2
+                  AND c.lineage_conflicts <= 1
+                  THEN true
                 ELSE false
             END AS accepted,
             CASE
@@ -789,10 +1032,13 @@ def main() -> None:
                 WHEN c.method_priority IN (2, 3) THEN 'B'
                 WHEN c.method_priority = 4 THEN 'B'
                 WHEN c.method_priority = 5 THEN 'C'
+                WHEN c.method_priority = 6 THEN 'B'
                 ELSE 'D'
             END AS confidence_tier,
             CASE
                 WHEN c.method_priority <= 3 AND c.candidate_count = 1
+                    THEN 'deterministic'
+                WHEN c.method_priority = 6 AND c.candidate_count = 1
                     THEN 'deterministic'
                 ELSE 'AI-review (GPT-5.6 Sol)'
             END AS reviewer
@@ -831,6 +1077,7 @@ def main() -> None:
             a.iucn_year_published,
             a.iucn_assessment_date,
             a.iucn_scopes,
+            a.iucn_systems,
             c.ncbi_taxid AS matched_ncbi_species_taxid,
             c.goat_scientific_name,
             c.ncbi_species,
@@ -847,13 +1094,21 @@ def main() -> None:
             c.candidate_count,
             c.lineage_agreements,
             c.lineage_conflicts,
+            c.raw_lineage_conflicts,
+            c.class_ancestor_compatible,
+            c.phylum_ancestor_compatible,
             c.edit_distance,
             c.name_similarity,
             c.gbif_confirmed,
             c.gbif_iucn_source_id_confirmed,
             c.gbif_bridge_concept_key AS gbif_accepted_concept_key,
             c.candidate_name AS matched_evidence_name,
-            c.all_exact_evidence AS evidence_sources,
+            CASE
+                WHEN coalesce(c.sis_confirmed, false)
+                    THEN list_concat(c.all_exact_evidence, ['GOAT_REDLIST_SIS_SLUG'])
+                ELSE c.all_exact_evidence
+            END AS evidence_sources,
+            coalesce(c.sis_confirmed, false) AS goat_iucn_sis_confirmed,
             CASE WHEN c.ncbi_taxid IS NULL THEN u.ncbi_taxid END
                 AS review_candidate_ncbi_taxid,
             CASE WHEN c.ncbi_taxid IS NULL THEN u.goat_scientific_name END
@@ -913,16 +1168,61 @@ def main() -> None:
                     THEN 'NCBI_SYNONYM'
                 WHEN b.match_method = 'GBIF_ACCEPTED_NAME_BRIDGE'
                     THEN 'GBIF_CORROBORATED_ACCEPTED_NAME'
-                WHEN b.match_method = 'AI_NEAR_NAME_REVIEW'
+                WHEN b.match_method = 'AI_NEAR_NAME_REVIEW' AND b.gbif_confirmed
                     THEN 'GBIF_CORROBORATED_NEAR_NAME'
+                WHEN b.match_method = 'AI_NEAR_NAME_REVIEW' AND b.goat_iucn_sis_confirmed
+                    THEN 'GOAT_SIS_CORROBORATED_NEAR_NAME'
+                WHEN b.match_method = 'GOAT_REDLIST_SIS_PROVENANCE'
+                    THEN 'GOAT_REDLIST_SIS_PROVENANCE'
                 ELSE 'OTHER_REVIEWED_LINK'
             END AS taxonomic_concept_relation,
             (
                 b.match_status = 'MATCHED'
                 AND cardinality.iucn_taxon_count = 1
-            ) AS safe_for_automatic_species_trait_transfer
+                AND coalesce(len(gr.goat_iucn_sis_ids), 0) <= 1
+            ) AS safe_for_automatic_species_trait_transfer,
+            gr.goat_redlist_category,
+            gr.goat_redlist_population_trend,
+            gr.goat_redlist_scopes,
+            gr.goat_redlist_status_source,
+            gr.goat_redlist_source_date,
+            gr.goat_iucn_source_slug,
+            gr.goat_iucn_sis_id,
+            gr.goat_iucn_assessment_id,
+            gr.goat_iucn_sis_ids,
+            gr.goat_iucn_raw_values,
+            CASE
+                WHEN gr.goat_iucn_sis_id IS NULL THEN false
+                ELSE gr.goat_iucn_sis_id = b.iucn_sis_id
+            END AS goat_redlist_sis_id_agrees,
+            CASE
+                WHEN b.iucn_redlist_category IS NULL
+                    OR gr.goat_redlist_category IS NULL THEN NULL
+                ELSE CASE upper(trim(b.iucn_redlist_category))
+                    WHEN 'LEAST CONCERN' THEN 'LC'
+                    WHEN 'NEAR THREATENED' THEN 'NT'
+                    WHEN 'VULNERABLE' THEN 'VU'
+                    WHEN 'ENDANGERED' THEN 'EN'
+                    WHEN 'CRITICALLY ENDANGERED' THEN 'CR'
+                    WHEN 'EXTINCT IN THE WILD' THEN 'EW'
+                    WHEN 'EXTINCT' THEN 'EX'
+                    WHEN 'DATA DEFICIENT' THEN 'DD'
+                    WHEN 'NOT EVALUATED' THEN 'NE'
+                    WHEN 'LC' THEN 'LC'
+                    WHEN 'NT' THEN 'NT'
+                    WHEN 'VU' THEN 'VU'
+                    WHEN 'EN' THEN 'EN'
+                    WHEN 'CR' THEN 'CR'
+                    WHEN 'EW' THEN 'EW'
+                    WHEN 'EX' THEN 'EX'
+                    WHEN 'DD' THEN 'DD'
+                    WHEN 'NE' THEN 'NE'
+                    END = upper(trim(gr.goat_redlist_category))
+            END AS goat_redlist_category_agrees
         FROM crosswalk_base b
-        LEFT JOIN cardinality USING (matched_ncbi_species_taxid);
+        LEFT JOIN cardinality USING (matched_ncbi_species_taxid)
+        LEFT JOIN goat_redlist gr
+          ON gr.ncbi_taxid = coalesce(b.matched_ncbi_species_taxid, b.review_candidate_ncbi_taxid);
 
         COPY crosswalk TO '{sql_path(output_dir / "iucn_goat_crosswalk.parquet")}'
             (FORMAT PARQUET, COMPRESSION ZSTD);
@@ -1003,9 +1303,30 @@ def main() -> None:
           AND candidate_count = 1
           AND NOT accepted
           AND lineage_agreements = 1
-          AND lineage_conflicts = 4
+          AND raw_lineage_conflicts = 4
         """
     ).fetchone()[0]
+    sis_bridge_rows, sis_confirmed_rows = con.execute(
+        """
+        SELECT
+            count(*) FILTER (
+                WHERE match_status = 'MATCHED'
+                  AND match_method = 'GOAT_REDLIST_SIS_PROVENANCE'),
+            count(*) FILTER (
+                WHERE match_status = 'MATCHED'
+                  AND goat_iucn_sis_confirmed
+                  AND match_method <> 'GOAT_REDLIST_SIS_PROVENANCE')
+        FROM crosswalk
+        """
+    ).fetchone()
+    goat_redlist_rows, goat_redlist_agree_rows = con.execute(
+        """
+        SELECT
+            count(*) FILTER (WHERE goat_redlist_category IS NOT NULL),
+            count(*) FILTER (WHERE goat_redlist_category_agrees)
+        FROM crosswalk
+        """
+    ).fetchone()
 
     stage("Calculating checksums and build manifest")
     manifest = {
@@ -1013,7 +1334,9 @@ def main() -> None:
         "reviewer": REVIEWER,
         "policy": (
             "Deterministic exact current/synonym links first; AI review only "
-            "accepts a uniquely best near-name candidate with compatible lineage."
+            "accepts a uniquely best near-name candidate with compatible lineage; "
+            "Unambiguous GoaT redlist SIS provenance corroborates unique candidates and "
+            "bridges otherwise unlinked IUCN species."
         ),
         "counts": {
             "iucn_taxa": total,
@@ -1026,6 +1349,10 @@ def main() -> None:
             "rows_in_many_to_one_relationships": many_to_one_rows,
             "safe_for_automatic_species_trait_transfer": safe_trait_rows,
             "rejected_cross_kingdom_or_deep_lineage_homonyms": rejected_homonyms,
+            "goat_redlist_sis_bridge_rows": sis_bridge_rows,
+            "goat_redlist_sis_confirmed_rows": sis_confirmed_rows,
+            "rows_with_goat_native_redlist_status": goat_redlist_rows,
+            "goat_native_redlist_agrees_with_iucn": goat_redlist_agree_rows,
         },
         "breakdown": [
             {
@@ -1102,6 +1429,10 @@ Generated: {manifest["generated_at_utc"]}
 
 - IUCN species reviewed: {total:,}
 - Accepted IUCN SIS → GoaT/NCBI links: {matched:,} ({100 * matched / total:.2f}%)
+- GoaT redlist SIS-provenance bridges: {sis_bridge_rows:,}
+- Unique links corroborated by GoaT redlist SIS provenance: {sis_confirmed_rows:,}
+- Accepted rows carrying GoaT's own redlist status: {goat_redlist_rows:,}
+- GoaT-native statuses agreeing with the IUCN category: {goat_redlist_agree_rows:,}
 - No plausible GoaT/NCBI candidate: {manifest["counts"]["unmatched"] - con.execute("SELECT count(*) FROM crosswalk WHERE match_status = 'REVIEW_UNRESOLVED'").fetchone()[0]:,}
 - Candidate retained but unresolved: {con.execute("SELECT count(*) FROM crosswalk WHERE match_status = 'REVIEW_UNRESOLVED'").fetchone()[0]:,}
 - Deep-lineage homonyms rejected: {rejected_homonyms:,}
@@ -1113,8 +1444,16 @@ Generated: {manifest["generated_at_utc"]}
 Deterministic exact current-name and authoritative NCBI synonym links were
 considered first, but still required compatible lineage. Ambiguous and
 near-name candidates were reviewed under the `{REVIEWER}` policy and accepted
-only when independently corroborated by an exact GBIF/Catalogue of Life species
-concept and compatible GoaT/NCBI lineage.
+only with compatible GoaT/NCBI lineage and corroboration by an exact
+GBIF/Catalogue of Life species concept or a unique direct native SIS identity.
+Every native raw identity is inspected;
+multiple SIS concepts stay unresolved and disable automatic trait transfer.
+Near-name relations distinguish SIS-only from independent GBIF corroboration.
+GoaT's own redlist attribute keeps
+the IUCN SIS ID of the species concept it ingested; that recorded identifier
+is used as deterministic corroboration for a uniquely best candidate and as a
+bridge only for IUCN rows with no other candidate, always under the same
+lineage-agreement guard.
 
 No candidate was forced merely to increase coverage. `NO_GOAT_NCBI_CANDIDATE`
 means the supplied GoaT species export has no defensible species TaxID for that

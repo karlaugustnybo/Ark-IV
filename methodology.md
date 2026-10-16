@@ -200,8 +200,16 @@ technical debt against the [pipeline requirements](docs/reference/data_pipeline_
 
 The matcher normalizes case and whitespace, restricts GoaT candidates to species
 rank, generates current-name and authoritative synonym matches, reconstructs
-lineage, ranks candidates, and writes accepted and unresolved decisions
+lineage, combines evidence per distinct candidate TaxID, ranks candidates, and writes accepted and unresolved decisions
 separately. Names alone are not sufficient biological evidence of equivalence.
+NCBI `includes` and `in-part` relationships are partial concepts, retained as
+review evidence rather than equivalent synonyms. Alone they leave the accepted
+ID null and cannot transfer species-level DNA, EBP, or resampling traits.
+Corroborating evidence for the same TaxID does not create another candidate;
+competing TaxIDs retain the ambiguity guards. Class/phylum rank shifts reduce
+conflicts only when the supplied label is an actual scientific-name ancestor in
+the registered NCBI lineage. Exported GoaT lineage can fill gaps for taxa absent
+from the pinned NCBI dump, with its source recorded separately.
 
 The executable acceptance branches in `crosswalk_match.py` are:
 
@@ -211,6 +219,7 @@ The executable acceptance branches in `crosswalk_match.py` are:
 | Exact-name/synonym branch with optional external validation | `gbif_confirmed` true, at least two lineage agreements and at most one conflict |
 | GBIF accepted-name bridge | At least two lineage agreements, at most one conflict, and either a unique candidate or an agreement advantage of at least two over the runner-up |
 | Near-name candidate | External confirmation, edit distance at most two, similarity at least 0.94, at least two lineage agreements, at most one conflict |
+| SIS-provenance bridge or corroboration | Direct GoaT Red List provenance records the row's IUCN SIS ID, the candidate set has one distinct TaxID, and the lineage guard holds |
 | Insufficient evidence | Accepted ID remains null; candidate evidence is retained for review |
 
 All automatic branches now enforce the same minimum lineage evidence and
@@ -220,7 +229,8 @@ the unresolved queue. It improves consistency but does not establish match
 precision, which still requires independent review.
 
 `safe_for_automatic_species_trait_transfer` means an accepted match maps to only
-one IUCN species within the supplied crosswalk. It protects against detected
+one IUCN species within the supplied crosswalk and has accepted equivalence
+evidence rather than a partial-name relationship alone. It protects against detected
 split/lump relationships; it does not prove that the match is correct or that
 an assembly belongs to the same biological concept. The label `AI-review
 (GPT-5.6 Sol)` records the implemented review-policy label, not independent
@@ -232,6 +242,13 @@ coverage of 126,285/171,604 species (73.59%) is therefore not the expected
 coverage of a fresh deterministic run, and neither percentage estimates match
 precision. A stratified independently reviewed reference set is still needed.
 See the [crosswalk history and workflow](docs/pipeline/06_iucn_goat_global_crosswalk.md).
+
+GoaT native `redlist_category`, `redlist_population_trend`, and `redlist_scopes`
+are retained alongside their per-field origin and recorded SIS/assessment IDs.
+Only direct identifier provenance may bridge or corroborate a unique candidate;
+ancestry-derived values are not species identity evidence. Category agreement
+is an audit signal, not independent identity evidence or a replacement for the
+IUCN assessment. Legacy exports remain supported with empty native fields.
 
 The audited September benchmark crosswalk, whose IUCN/GoaT hashes match the
 registered sources, contains 122,392 accepted links among 171,604 IUCN IDs
@@ -514,6 +531,23 @@ Species present in H3 lists but absent from metadata are retained as explicit
 GoaT-data-deficient status. This preserves relationships, but does not recover
 missing biology. All-system richness can contain placeholders with no
 terrestrial, freshwater or marine classification.
+
+Registered spatial rows can recover labels, family and affirmative system flags
+for those exact source IDs. Conflicting names/families/categories remain empty
+and are reported. Spatial threat labels are retained separately; they do not
+replace an assessment or `Not Assessed`. No realm is inferred from archive names.
+Missing affirmative ecosystem evidence is distinct from missing taxonomy.
+
+Optional completed IUCN API intake can enrich the same SIS ID with one exact
+global assessment. Existing assessment identities/categories remain pinned,
+including historical assessments; latest-global lookup applies only to IDs
+without an assessment. Returned taxon, assessment and scope identities must
+agree. Names and synonyms select investigations, never merge identities or
+transfer DNA, EBP or resampling evidence. Original system memberships remain.
+Reviewed habitat/ecology evidence is a private input, pinned to exact IDs and
+text or taxon name/authority plus assessment-source provenance. Its selected
+path/checksum is recorded and checked for changes; a missing file supplies no
+affirmative evidence. The optional file is not part of this code release.
 
 Systems are species-level labels. Assessment text beginning with `Freshwater`
 is normalized to `Freshwater`; `Terrestrial` and `Marine` are retained.
