@@ -40,3 +40,14 @@ stage-based CLI names and artifact-based builders.
 Historical profiling harnesses and raw reports mentioned in these documents are
 kept under local-only `archive/research/`, not in the GitHub code release. Current
 validation lives in `tests/`; use `just data-benchmark` for new end-to-end timings.
+
+## Research plans and evaluation
+
+These documents propose investigations; they are not implementation specifications
+or evidence of a validated global dataset. Optional unmerged work is identified in
+the roadmap and serving guide.
+
+- [Mentor-facing roadmap](roadmap-mini.md)
+- [GBIF–IUCN concordance proposal](GBIF%E2%80%93IUCN%20Concordance%20Extension%20Idea.md)
+- [Remaining performance hypotheses](performance/next_large_gains.md)
+- [Optimization evaluation method](performance/pipeline_optimization.md)
