@@ -167,16 +167,18 @@ export class MapPerformanceMonitor {
     this.now = options.now ?? (() => performance.now());
     this.requestFrame = options.requestFrame ?? ((callback) => requestAnimationFrame(callback));
     this.cancelFrame = options.cancelFrame ?? ((handle) => cancelAnimationFrame(handle));
-    this.createLongTaskObserver = options.createLongTaskObserver ?? ((callback) => {
-      if (typeof PerformanceObserver === 'undefined') return null;
-      try {
-        const observer = new PerformanceObserver(callback);
-        observer.observe({ entryTypes: ['longtask'] });
-        return observer;
-      } catch {
-        return null;
-      }
-    });
+    this.createLongTaskObserver =
+      options.createLongTaskObserver ??
+      ((callback) => {
+        if (typeof PerformanceObserver === 'undefined') return null;
+        try {
+          const observer = new PerformanceObserver(callback);
+          observer.observe({ entryTypes: ['longtask'] });
+          return observer;
+        } catch {
+          return null;
+        }
+      });
   }
 
   start(): void {
@@ -270,14 +272,8 @@ export class MapPerformanceMonitor {
     if (sample.fineTilesLoading) this.loadingFrameCount += 1;
     this.minFineTileCount = Math.min(this.minFineTileCount, sample.fineTileCount);
     this.maxFineTileCount = Math.max(this.maxFineTileCount, sample.fineTileCount);
-    this.minBasemapPixelRatio = Math.min(
-      this.minBasemapPixelRatio,
-      sample.basemapPixelRatio
-    );
-    this.maxBasemapPixelRatio = Math.max(
-      this.maxBasemapPixelRatio,
-      sample.basemapPixelRatio
-    );
+    this.minBasemapPixelRatio = Math.min(this.minBasemapPixelRatio, sample.basemapPixelRatio);
+    this.maxBasemapPixelRatio = Math.max(this.maxBasemapPixelRatio, sample.basemapPixelRatio);
     this.minCellPixelRatio = Math.min(this.minCellPixelRatio, sample.cellPixelRatio);
     this.maxCellPixelRatio = Math.max(this.maxCellPixelRatio, sample.cellPixelRatio);
     if (this.previousSample) {

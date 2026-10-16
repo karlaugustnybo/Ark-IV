@@ -17,7 +17,12 @@ async function get<T>(path: string, params?: URLSearchParams, options?: RequestI
     let message = `${response.status} ${response.statusText}`;
     try {
       const body: unknown = await response.json();
-      if (typeof body === 'object' && body !== null && 'detail' in body && typeof body.detail === 'string') {
+      if (
+        typeof body === 'object' &&
+        body !== null &&
+        'detail' in body &&
+        typeof body.detail === 'string'
+      ) {
         message = body.detail;
       }
     } catch {
@@ -45,7 +50,7 @@ export const api = {
       { signal }
     ),
   cell: (h3Index: string, params: URLSearchParams, signal?: AbortSignal) =>
-    get<CellDetailsResponse>(
-      `/api/cells/${encodeURIComponent(h3Index)}/species`, params, { signal }
-    )
+    get<CellDetailsResponse>(`/api/cells/${encodeURIComponent(h3Index)}/species`, params, {
+      signal
+    })
 };

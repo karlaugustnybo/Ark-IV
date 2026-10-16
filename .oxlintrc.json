@@ -1,0 +1,11 @@
+{
+  "$schema": "./frontend/node_modules/oxlint/configuration_schema.json",
+  "plugins": ["typescript", "unicorn", "oxc"],
+  "categories": { "correctness": "error" },
+  "ignorePatterns": [
+    "**/node_modules/**",
+    "frontend/.svelte-kit/**",
+    "frontend/build/**",
+    "frontend/src/lib/api/schema.d.ts"
+  ]
+}

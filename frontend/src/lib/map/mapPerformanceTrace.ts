@@ -92,8 +92,10 @@ function measureFrameCadence(): Promise<MapPerformanceTraceEnvironment> {
         cadenceSampleCount: frameTimes.length,
         baselineFrameMs,
         estimatedRefreshHz: baselineFrameMs ? rounded(1000 / baselineFrameMs) : 0,
-        supports60FpsBudget: document.visibilityState === 'visible' &&
-          frameTimes.length >= 8 && baselineFrameMs <= FRAME_BUDGET_MS + 2
+        supports60FpsBudget:
+          document.visibilityState === 'visible' &&
+          frameTimes.length >= 8 &&
+          baselineFrameMs <= FRAME_BUDGET_MS + 2
       });
     };
     const onFrame: FrameRequestCallback = (timestamp) => {
@@ -111,10 +113,7 @@ function throwIfDisposed(isDisposed: () => boolean) {
   if (isDisposed()) throw new Error('Map performance trace was cancelled');
 }
 
-async function waitForFineGuard(
-  isFineGuardReady: () => boolean,
-  isDisposed: () => boolean
-) {
+async function waitForFineGuard(isFineGuardReady: () => boolean, isDisposed: () => boolean) {
   const startedAt = performance.now();
   while (!isFineGuardReady()) {
     throwIfDisposed(isDisposed);

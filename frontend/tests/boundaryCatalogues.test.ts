@@ -8,11 +8,18 @@ async function freshStore() {
 }
 
 const preview = {
-  id: 'municipality', name: 'Preview', short_name: 'Local areas', status: 'ready',
-  catalog_url: '/preview.json', group: 'Political', relationship: 'single'
+  id: 'municipality',
+  name: 'Preview',
+  short_name: 'Local areas',
+  status: 'ready',
+  catalog_url: '/preview.json',
+  group: 'Political',
+  relationship: 'single'
 };
 const global = {
-  ...preview, name: 'Global ADM2', available_parent_codes: ['DNK', 'USA'],
+  ...preview,
+  name: 'Global ADM2',
+  available_parent_codes: ['DNK', 'USA'],
   catalog_partition_url: '/data/adm2-catalogs/{parent}.json',
   catalog_url: '/data/adm2-catalogs/all.json'
 };
@@ -24,9 +31,10 @@ test('global installation fetches only selected country names and caches them', 
     requests.push(url);
     if (url.endsWith('boundary-frameworks.json')) return Response.json({ frameworks: [preview] });
     if (url.endsWith('framework.json')) return Response.json(global);
-    if (url.endsWith('/usa.json')) return Response.json({ features: [
-      { code: 'county-1', name: 'County', parent_code: 'USA', boundary_type: 'ADM2' }
-    ] });
+    if (url.endsWith('/usa.json'))
+      return Response.json({
+        features: [{ code: 'county-1', name: 'County', parent_code: 'USA', boundary_type: 'ADM2' }]
+      });
     throw new Error(`Unexpected geometry or worldwide request: ${url}`);
   }) as typeof fetch;
   try {
@@ -45,10 +53,14 @@ test('global installation fetches only selected country names and caches them', 
 for (const missing of ['404', 'spa-html']) {
   test(`a code-only checkout keeps the preview when optional ADM2 assets return ${missing}`, async () => {
     const original = globalThis.fetch;
-    globalThis.fetch = (async (url: string) => url.endsWith('boundary-frameworks.json')
-      ? Response.json({ frameworks: [preview] })
-      : missing === '404' ? new Response('', { status: 404 })
-        : new Response('<html>app</html>', { headers: { 'content-type': 'text/html' } })) as typeof fetch;
+    globalThis.fetch = (async (url: string) =>
+      url.endsWith('boundary-frameworks.json')
+        ? Response.json({ frameworks: [preview] })
+        : missing === '404'
+          ? new Response('', { status: 404 })
+          : new Response('<html>app</html>', {
+              headers: { 'content-type': 'text/html' }
+            })) as typeof fetch;
     try {
       const store = await freshStore();
       expect((await store.loadBoundaryFrameworks())[0].name).toBe('Preview');

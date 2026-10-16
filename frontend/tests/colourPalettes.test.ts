@@ -11,16 +11,22 @@ import {
 describe('map colour palettes', () => {
   test('provides accessible alternatives to the original palette', () => {
     expect(colourPalettes.map(({ id }) => id)).toEqual(['turbo', 'viridis', 'cividis', 'inferno']);
-    expect(colourPalettes.filter(({ accessible }) => accessible).map(({ id }) => id))
-      .toEqual(['viridis', 'cividis', 'inferno']);
+    expect(colourPalettes.filter(({ accessible }) => accessible).map(({ id }) => id)).toEqual([
+      'viridis',
+      'cividis',
+      'inferno'
+    ]);
   });
 
   test('builds complete RGBA lookup tables for every palette', () => {
     for (const palette of colourPalettes) {
       expect(colourPaletteLuts[palette.id]).toHaveLength(256);
-      expect(colourPaletteLuts[palette.id].every((colour) =>
-        colour.length === 4 && colour.every((channel) => channel >= 0 && channel <= 255)
-      )).toBe(true);
+      expect(
+        colourPaletteLuts[palette.id].every(
+          (colour) =>
+            colour.length === 4 && colour.every((channel) => channel >= 0 && channel <= 255)
+        )
+      ).toBe(true);
     }
   });
 
