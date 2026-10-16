@@ -57,16 +57,19 @@ acquisition and score surfaces.
 
 ### Validate H3 aggregation assumptions
 
-**Priority:** P0 · **Status:** Implemented; taxonomy validation pending
+**Priority:** P0 · **Status:** Boundary-contact repair, taxonomy validation and scientific calibration pending
 
-The implementation is now checked: resolution 7 uses polygon any-touch
-membership, including edge/vertex contact; resolution 3 uses distinct parents
-of included fine cells. Neither is a point-observation or whole-cell occupancy
+The intended resolution-7 policy is polygon any-touch membership, including
+edge/vertex contact. Main still has the known SPA-002 boundary-contact omission;
+the repair is available in optional [PR4](https://github.com/karlaugustnybo/Ark-IV/pull/4),
+not merged main. Resolution 3 uses distinct parents of included fine cells.
+Neither is a point-observation or whole-cell occupancy
 claim. Large v3 ranges may be simplified before intersection; 2.5-degree
 computational tiles are separate from that approximation. The antimeridian
 hole-placement bug is fixed.
 
-Remaining P0 work is scientific calibration after that fix: measure per-species
+Remaining P0 work includes the boundary-contact repair and scientific calibration
+after the geometry fixes: measure per-species
 omitted/added cells and local effects against an unsimplified reference with the
 same v3 row policy, agree acceptance limits, and rebuild the timing fixture to
 include v3-only eligible rows. Review planar repair-area thresholds and the
@@ -731,14 +734,16 @@ layer deferred in [Add IUCN point data](#add-iucn-point-data); see A01 and A06.
 
 **Priority:** P0 · **Status:** Investigation
 
-Resolution-7 membership currently uses any-touch polygon contact, including
-edge and vertex touching. The rule is defensible, exactly implemented, and
-documented — but it imposes an arbitrary spatialization decision on small,
+The intended resolution-7 membership rule is any-touch polygon contact, including
+edge and vertex touching. Main still omits some exact boundary contacts (SPA-002);
+optional [PR4](https://github.com/karlaugustnybo/Ark-IV/pull/4) provides the repair.
+The intended rule is defensible and documented, but it imposes an arbitrary
+spatialization decision on small,
 narrow, and coastal ranges, and produces a systematic edge effect.
 Investigate the scientific sensitivity to alternative membership rules on a
 representative benchmark subset:
 
-- any intersection (current rule);
+- any intersection (intended current policy, with exact-contact repair required);
 - cell centroid inside the range polygon;
 - at least 10% of the cell polygon overlapping the range;
 - at least 25% cell-polygon overlap.
