@@ -50,8 +50,7 @@
 <footer class="site-footer">
   <p>
     Ark-<i>IV</i> · Conservation prioritisation powered by IUCN and GoaT data ·
-    <a href="https://github.com/karlaugustnybo/DIKUs-Ark" target="_blank" rel="noreferrer"
-      >Source (AGPL-3.0-only)</a
+    <a href="https://github.com/karlaugustnybo/DIKUs-Ark" target="_blank" rel="noreferrer">Source</a
     >
   </p>
 </footer>
