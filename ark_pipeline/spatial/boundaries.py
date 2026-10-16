@@ -5,13 +5,17 @@ from __future__ import annotations
 import json
 from functools import lru_cache
 from pathlib import Path
+from threading import Lock
 
 import h3
+import shapely
 from shapely.affinity import translate
 from shapely.geometry import Point, Polygon, box, shape
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import unary_union
 from shapely.strtree import STRtree
+
+COARSE_MEMBERSHIP_CACHE_SIZE = h3.get_num_cells(3)
 
 
 def h3_ring_polygon(coordinates: list[list[float]]) -> Polygon:
@@ -80,12 +84,21 @@ class JurisdictionIndex:
         }
         self._geometries = [shape(feature["geometry"]) for feature in features]
         self._tree = STRtree(self._geometries)
+        # Each boundary is tested against many cells across several exports.
+        # GEOS can reuse its segment index without changing intersection semantics.
+        shapely.prepare(self._geometries)
+        # GEOS prepared predicates mutate internal segment-intersection state.
+        # The cached catalogue is shared by concurrent dynamic tile requests;
+        # serialize its predicates to prevent native crashes (GEOS issue #825).
+        self._predicate_lock = Lock()
+        self._coarse_codes: dict[str, tuple[str, ...]] = {}
 
     def code_for_point(self, latitude: float, longitude: float) -> str:
         point = Point(longitude, latitude)
-        for index in self._tree.query(point):
-            if self._geometries[index].covers(point):
-                return self.codes[index]
+        with self._predicate_lock:
+            for index in self._tree.query(point):
+                if self._geometries[index].covers(point):
+                    return self.codes[index]
         return ""
 
     def code_for_cell(self, h3_index: str) -> str:
@@ -94,13 +107,27 @@ class JurisdictionIndex:
 
     def codes_for_cell(self, h3_index: str) -> tuple[str, ...]:
         """Return every boundary touched by the H3 cell polygon."""
+        with self._predicate_lock:
+            return self._codes_for_cell(h3_index)
+
+    def _codes_for_cell(self, h3_index: str) -> tuple[str, ...]:
+        coarse = h3.get_resolution(h3_index) == 3
+        if coarse:
+            cached = self._coarse_codes.get(h3_index)
+            if cached is not None:
+                return cached
         cell = cell_geometry(h3_index)
         indexes = sorted(int(index) for index in self._tree.query(cell))
-        return tuple(
+        codes = tuple(
             self.codes[index]
             for index in indexes
             if self._geometries[index].intersects(cell)
         )
+        # Only the small coarse grid is reused across exports. Never retain the
+        # millions of fine-cell lookups, and keep caches local to each catalogue.
+        if coarse and len(self._coarse_codes) < COARSE_MEMBERSHIP_CACHE_SIZE:
+            self._coarse_codes[h3_index] = codes
+        return codes
 
 
 @lru_cache(maxsize=8)

@@ -95,7 +95,8 @@ The coordinator:
 2. Skips public sources that are still within their update interval.
 3. Uses HTTP validators when the provider supplies reliable ones.
 4. Compares versioned inventories, such as HydroBASINS v1c, with the registered
-   release and downloads only when they differ.
+   release and required filenames, refreshing when the release differs or required
+   inventory files are absent from the manifest.
 5. Checks the configured IUCN release against the registered IUCN sources.
 6. Automatically validates and registers a newly staged authorized IUCN
    release.
@@ -121,9 +122,11 @@ For IUCN, the configured inventories currently describe Red List 2026-1:
 - the authorized assessment and taxonomy tables.
 
 HydroSHEDS HydroBASINS geometry is a separate public source: standard revision
-v1c, all nine regions, levels 1-12. Its server does not provide useful stable
-HTTP validators, so its versioned inventory is authoritative. Once v1c is
-registered, both commands report it as `current` without network transfer.
+v1c, standard and customized-with-lakes archives for all nine regions, levels
+1-12. Its server does not provide useful stable HTTP validators, so its versioned
+inventory is authoritative. Both commands report a complete eighteen-file v1c
+inventory as `current` without network transfer; a nine-file standard-only
+manifest is refreshed at the same provider release.
 
 Interrupted or invalid downloads never replace a working manifest. Rerunning
 the same command resumes the workflow from its recorded state and reports one

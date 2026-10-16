@@ -16,6 +16,7 @@ required_sources = [
   "iucn-spatial",
   "iucn-spatial-tables",
   "hydrobasins",
+  "hydrobasins-iucn-islands",
   "goat-species",
   "ncbi-taxonomy",
   "gbif-backbone",
@@ -108,13 +109,26 @@ allowed_suffixes = [".zip"]
 [[sources]]
 id = "hydrobasins"
 provider = "HydroSHEDS"
-description = "HydroBASINS v1c standard basin polygons, levels 1-12, for all nine regions used by IUCN hybas_id tables."
+description = "HydroBASINS v1c standard and customized-with-lakes polygons, levels 1-12, for all nine regions used by IUCN hybas_id tables."
 access = "public-download"
 update_policy = "when-provider-releases"
 required = true
 official_url = "https://www.hydrosheds.org/products/hydrobasins"
 terms_url = "https://data.hydrosheds.org/file/technical-documentation/HydroSHEDS_TechDoc_v1_4.pdf"
 inventory_file = "config/hydrobasins_v1c.toml"
+allowed_suffixes = [".zip"]
+archive_required_suffixes = [".shp", ".dbf", ".shx"]
+
+[[sources]]
+id = "hydrobasins-iucn-islands"
+provider = "IUCN"
+description = "IUCN HydroBASINS level 8 base geometry including added islands in the 100000000 ID namespace, shared across basin levels."
+access = "browser-assisted"
+update_policy = "when-provider-releases"
+required = true
+official_url = "https://www.iucnredlist.org/resources/spatialtoolsanddata"
+terms_url = "https://www.iucnredlist.org/terms/terms-of-use"
+inventory_file = "config/hydrobasins_iucn_islands_2023-08.toml"
 allowed_suffixes = [".zip"]
 archive_required_suffixes = [".shp", ".dbf", ".shx"]
 

@@ -25,7 +25,39 @@ not buffered or counted as repeated observations. Eligible HydroBASINS table
 rows are deduplicated to `(hybas_id, species)` out of core. The numeric basin ID
 selects its region and level; only referenced geometry FIDs are decoded, each
 basin is covered once with the polygon any-touch kernel, and all 14 relationship
-tables reuse that basin-cell index. A referenced ID missing from v1c is fatal.
+tables reuse that basin-cell index. Customized-with-lakes polygons take precedence
+for shared IDs, with standard v1c fallback. Separately inventoried IUCN island
+IDs use exact-ID lookup in their base layer. Requested IDs are reconciled before
+H3 coverage starts. Missing geometry is fatal by default; an explicitly selected
+`exclude-with-audit` missingness policy emits partial coverage counts and a local
+`hydrobasins/missing_relationships.parquet` with every omitted source relationship.
+A partial receipt cannot satisfy the strict profile. See the
+[methodology](../../methodology.md#hydrobasins-relationships) for denominators and limits.
+
+Two opt-in schema-4 profiles make this policy explicit:
+`config/spatial_semantics_iucn_richness_v3_partial_basins.toml` retains seasons
+1, 2, 3 and 5; `config/spatial_semantics_iucn_richness_v3_with_passage_partial_basins.toml`
+also admits passage (4). Both retain the v3 geometry kernel, repair and bounded
+simplification settings. Select the profile explicitly with `spatial_pairs --profile`;
+the strict default is unchanged. Use separate output roots and build/serve matching
+profile generations. Profile identities prevent reuse across these choices.
+Missing basin relationships remain audited coverage gaps; these configurations do
+not establish complete biological coverage or change an existing serving generation.
+Public distribution of generated data still requires the publication-policy review.
+
+For an authorized local exact-ID audit without H3 filling:
+
+```bash
+uv run python -m ark_pipeline.cli.sources_check_hydrobasins --root /path/to/authorized-data --relations-root /path/to/normalized-pairs --output /path/to/local-audit.json
+```
+
+The checker returns exit code 2 when IDs remain missing. Inputs and reports stay
+local under the publication policy; inventory URLs do not grant redistribution rights.
+
+Normal `just download` and `just update` acquisition refresh a registered
+HydroBASINS snapshot when required inventory files are missing, including upgrades
+from nine standard archives to all eighteen standard and lake archives within the
+same `v1c` release. Complete same-release inventories remain current.
 
 The row policy follows IUCN's published 2021+ richness selection: Presence
 codes 1 and 4, Origin codes 1, 2 and 6, and Seasonality codes 1, 2, 3 and 5.
@@ -117,10 +149,11 @@ sets of species relationships.
 
 Each polygon, point, and relationship archive has a content-addressed receipt covering its input checksum,
 semantic profile, relevant code, geometry dependency versions, schemas, and
-output checksums. HydroBASINS relationship receipts additionally bind the nine
-regional geometry archives. A readable Parquet file without a matching receipt
-is rebuilt. Polygon rows retain row-sized audits; tabular sources reconcile all
-rows into decision counts, and referenced basins retain per-geometry audits.
+output checksums. HydroBASINS relationship receipts additionally bind the registered
+standard, customized-with-lakes and island geometry archives. A readable Parquet
+file without a matching receipt is rebuilt. Polygon rows retain row-sized audits;
+tabular sources reconcile all rows into decision counts, and referenced basins
+retain per-geometry audits.
 
 After all configured archives pass, aggregate pairs into serving lists:
 

@@ -13,6 +13,7 @@ import time
 import tomllib
 import zipfile
 from collections import Counter
+from collections.abc import Iterable
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from dataclasses import dataclass
 from pathlib import Path
@@ -301,6 +302,16 @@ def hydrobasin_files(data_root: Path, manifest: dict[str, Any]) -> list[dict[str
         }
         for item in source.get("files", [])
     ]
+    islands = manifest.get("sources", {}).get("hydrobasins-iucn-islands")
+    if islands is not None:
+        if islands.get("validation_status") != "passed":
+            raise ValueError("hydrobasins-iucn-islands is not registered with passed validation")
+        records.extend(
+            {**item, "resolved_path": resolve_input(data_root, item["path"]),
+             "release": islands.get("release"), "source_id": "hydrobasins-iucn-islands",
+             "format": "basin-geometry"}
+            for item in islands.get("files", [])
+        )
     if not records:
         raise ValueError("hydrobasins contains no files")
     return sorted(records, key=lambda item: item["logical_name"])
@@ -421,6 +432,16 @@ def inspect_supplemental_archive(
     }
 
 
+def resolve_hydrobasin_id_field(fields: Iterable[str], *, layer: str) -> str:
+    """Require one HYBAS_ID field and preserve its spelling for Arrow lookup."""
+    matches = [str(field) for field in fields if str(field).casefold() == "hybas_id"]
+    if not matches:
+        raise ValueError(f"{layer}: missing HYBAS_ID")
+    if len(matches) != 1:
+        raise ValueError(f"{layer}: ambiguous HYBAS_ID fields: {', '.join(matches)}")
+    return matches[0]
+
+
 def inspect_hydrobasin_archive(
     record: dict[str, Any], *, deep: bool
 ) -> dict[str, Any]:
@@ -436,13 +457,16 @@ def inspect_hydrobasin_archive(
     if not errors:
         try:
             available = pyogrio.list_layers(path)
-            if len(available) != 12:
-                errors.append(f"expected 12 HydroBASINS levels, found {len(available)}")
+            expected_layers = 1 if record.get("source_id") == "hydrobasins-iucn-islands" else 12
+            if len(available) != expected_layers:
+                errors.append(f"expected {expected_layers} HydroBASINS levels, found {len(available)}")
             for layer_name, listed_geometry_type in available:
                 info = pyogrio.read_info(path, layer=str(layer_name))
                 layer_errors = []
-                if "HYBAS_ID" not in set(info["fields"]):
-                    layer_errors.append("missing HYBAS_ID")
+                try:
+                    resolve_hydrobasin_id_field(info["fields"], layer=str(layer_name))
+                except ValueError as error:
+                    layer_errors.append(str(error).removeprefix(f"{layer_name}: "))
                 if info.get("crs") != "EPSG:4326":
                     layer_errors.append(f"expected EPSG:4326, found {info.get('crs')}")
                 if "Polygon" not in str(info.get("geometry_type")):
@@ -574,10 +598,12 @@ def spatial_code_fingerprint() -> str:
             Path(__file__),
             REPOSITORY_ROOT / "ark_pipeline/spatial/coverage.py",
             REPOSITORY_ROOT / "ark_pipeline/spatial/boundaries.py",
+            REPOSITORY_ROOT / "ark_pipeline/spatial/simplification.py",
             REPOSITORY_ROOT / "ark_pipeline/spatial/tile_parallel.py",
             REPOSITORY_ROOT / "config/data_sources.toml",
             _configured_inventory_path("iucn-spatial-tables"),
             _configured_inventory_path("hydrobasins"),
+            _configured_inventory_path("hydrobasins-iucn-islands"),
             REPOSITORY_ROOT / "ark_pipeline/runtime/provenance.py",
         ]
     )
@@ -1384,11 +1410,33 @@ def normalize_hydrobasin_archive(
 def _hybas_region_level(hybas_id: int) -> tuple[int, int]:
     if hybas_id <= 0:
         raise ValueError(f"invalid HYBAS_ID: {hybas_id}")
+    # IUCN's added islands use a separate ID namespace, shared across levels.
+    # Resolve their exact IDs from the IUCN layer; never infer a continent/level.
+    if 100_000_000 <= hybas_id < 200_000_000:
+        return 0, 0
     region = hybas_id // 1_000_000_000
     level = (hybas_id // 10_000_000) % 100
     if region not in HYDROBASIN_REGION_CODES or not 1 <= level <= 12:
         raise ValueError(f"unsupported HYBAS_ID encoding: {hybas_id}")
     return region, level
+
+
+def hydrobasin_records_by_code(records: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    """Order exact-ID sources: lake first, standard fallback, separate islands."""
+    by_code = {
+        code: sorted(
+            (record for record in records
+             if f"hybas_{code}_" in record["logical_name"].lower()
+             or f"hybas_lake_{code}_" in record["logical_name"].lower()),
+            key=lambda record: ("hybas_lake_" not in record["logical_name"].lower(), record["logical_name"]),
+        )
+        for code in HYDROBASIN_REGION_CODES.values()
+    }
+    by_code["islands"] = [
+        record for record in records
+        if record.get("source_id") == "hydrobasins-iucn-islands"
+    ]
+    return by_code
 
 
 def _hybas_id_digest(ids: list[int]) -> str:
@@ -1418,6 +1466,39 @@ def _flush_basin_cells(
     cell_chunks.clear()
     basin_ids.clear()
     return count
+
+
+MISSING_BASIN_SCHEMA = pa.schema([
+    ("source_archive", pa.string()), ("hybas_id", pa.int64()),
+    ("iucn_sis_id", pa.int64()), ("reason", pa.string()),
+])
+
+
+def write_missing_basin_relationships(relation_paths, missing_ids, target, *, memory_limit, threads):
+    """Persist every omitted normalized relationship with its source archive."""
+    temporary = target.with_suffix(".parquet.tmp")
+    temporary.unlink(missing_ok=True)
+    with duckdb.connect() as connection:
+        connection.execute(f"SET memory_limit='{memory_limit}'")
+        connection.execute(f"SET threads={int(threads)}")
+        connection.register("missing_ids", pa.table({"hybas_id": pa.array(sorted(missing_ids), type=pa.int64())}))
+        queries = [
+            f"SELECT '{path.parent.name.replace(chr(39), chr(39) * 2)}'::VARCHAR AS source_archive, "
+            "r.hybas_id::BIGINT AS hybas_id, r.iucn_sis_id::BIGINT AS iucn_sis_id, "
+            "'missing_geometry'::VARCHAR AS reason "
+            f"FROM read_parquet('{_sql_path(path)}') r JOIN missing_ids USING(hybas_id)"
+            for path in relation_paths
+        ]
+        connection.execute(f"COPY ({' UNION ALL '.join(queries)}) TO '{_sql_path(temporary)}' (FORMAT PARQUET, COMPRESSION ZSTD)")
+        counts = connection.execute(
+            "SELECT count(*), count(DISTINCT (hybas_id, iucn_sis_id)), "
+            "count(DISTINCT iucn_sis_id) FROM read_parquet(?)", [str(temporary)]
+        ).fetchone()
+    os.replace(temporary, target)
+    return {"missing_geometry_basins": len(missing_ids),
+            "omitted_source_relationships": counts[0],
+            "omitted_distinct_relationships": counts[1],
+            "affected_species": counts[2]}
 
 
 def build_hydrobasin_index(
@@ -1459,10 +1540,17 @@ def build_hydrobasin_index(
     audit_path = index_dir / "basin_audit.parquet"
     receipt_path = index_dir / "receipt.json"
     outputs = {"cells": cells_path, "audit": audit_path}
+    partial = profile.raw.get("hydrobasin_coverage", {}).get("missing_geometry_policy", "error") == "exclude-with-audit"
+    missing_path = index_dir / "missing_relationships.parquet"
+    if partial:
+        outputs["missing_relationships"] = missing_path
+
     schemas = {
         "cells": _schema_signature(BASIN_CELL_SCHEMA),
         "audit": _schema_signature(BASIN_AUDIT_SCHEMA),
     }
+    if partial:
+        schemas["missing_relationships"] = _schema_signature(MISSING_BASIN_SCHEMA)
     identity = {
         "stage_schema_version": 1,
         "semantic_profile": {"id": profile.profile_id, "sha256": profile.digest},
@@ -1473,6 +1561,7 @@ def build_hydrobasin_index(
         "hydrobasins": [
             {
                 "release": record["release"],
+                "source_id": record.get("source_id", "hydrobasins"),
                 "logical_name": record["logical_name"],
                 "bytes": record["bytes"],
                 "sha256": record["sha256"],
@@ -1486,6 +1575,11 @@ def build_hydrobasin_index(
         },
         "schemas": schemas,
     }
+    if partial:
+        identity["relationship_inputs"] = [
+            {"source_archive": path.parent.name, "sha256": sha256(path)}
+            for path in relation_paths
+        ]
     if not force and receipt_is_current(receipt_path, identity, outputs, schemas):
         receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
         return {"status": "reused", "path": cells_path, **receipt["totals"]}
@@ -1493,25 +1587,55 @@ def build_hydrobasin_index(
     by_region_level: dict[tuple[int, int], set[int]] = {}
     for hybas_id in requested_ids:
         by_region_level.setdefault(_hybas_region_level(hybas_id), set()).add(hybas_id)
-    by_code = {
-        code: next(
-            (
-                record
-                for record in basin_records
-                if f"hybas_{code}_" in record["logical_name"].lower()
-            ),
-            None,
-        )
-        for code in HYDROBASIN_REGION_CODES.values()
-    }
+    by_code = hydrobasin_records_by_code(basin_records)
     required_codes = {
-        HYDROBASIN_REGION_CODES[region] for region, _ in by_region_level
+        HYDROBASIN_REGION_CODES[region] for region, _ in by_region_level if region
     }
+    if (0, 0) in by_region_level:
+        required_codes.add("islands")
     missing_sources = [
-        code for code in sorted(required_codes) if by_code.get(code) is None
+        code for code in sorted(required_codes) if not by_code.get(code)
     ]
     if missing_sources:
         raise ValueError("missing HydroBASINS regions: " + ", ".join(missing_sources))
+
+    # Reconcile IDs before starting expensive polygon-to-H3 coverage. Provider
+    # tables can reference islands absent even from their published base layers.
+    missing_ids = set(requested_ids)
+    id_columns: dict[tuple[Path, str], str] = {}
+    for (region, level), wanted in sorted(by_region_level.items()):
+        code = HYDROBASIN_REGION_CODES[region] if region else "islands"
+        for record in by_code[code]:
+            remaining = wanted & missing_ids
+            if not remaining:
+                break
+            prefix = "hybas_lake" if "hybas_lake_" in record["logical_name"].lower() else "hybas"
+            layer = Path(record["logical_name"]).stem if not region else f"{prefix}_{code}_lev{level:02d}_v1c"
+            id_column = resolve_hydrobasin_id_field(
+                pyogrio.read_info(record["resolved_path"], layer=layer)["fields"],
+                layer=layer,
+            )
+            id_columns[(record["resolved_path"], layer)] = id_column
+            _, identifiers = pyogrio.read_arrow(
+                record["resolved_path"], layer=layer, columns=[id_column], read_geometry=False,
+            )
+            matched = identifiers[id_column].filter(pc.is_in(
+                identifiers[id_column], value_set=pa.array(sorted(remaining), type=identifiers[id_column].type),
+            )).to_pylist()
+            if len(matched) != len(set(matched)):
+                raise ValueError(f"{layer}: duplicate HYBAS_ID values in geometry source")
+            missing_ids.difference_update(matched)
+    if missing_ids and not partial:
+        sample = ", ".join(map(str, sorted(missing_ids)[:10]))
+        raise ValueError(
+            f"{len(missing_ids)} referenced HYBAS_ID values are absent from acquired basin geometries; "
+            f"sample: {sample}. Reconcile inputs before running H3 coverage."
+        )
+
+    pending_missing_path = index_dir / "missing_relationships.pending.parquet"
+    missing_totals = write_missing_basin_relationships(
+        relation_paths, missing_ids, pending_missing_path, memory_limit=memory_limit, threads=threads
+    ) if partial else {}
 
     temporary_cells = cells_path.with_suffix(".parquet.tmp")
     temporary_audit = audit_path.with_suffix(".parquet.tmp")
@@ -1524,108 +1648,113 @@ def build_hydrobasin_index(
     basin_ids: list[int] = []
     audit_rows: list[dict[str, Any]] = []
     buffered_cells = output_cells = completed = 0
-    unresolved = set(requested_ids)
+    unresolved = set(requested_ids) - missing_ids
     try:
         for (region, level), wanted in sorted(by_region_level.items()):
-            code = HYDROBASIN_REGION_CODES[region]
-            record = by_code[code]
-            assert record is not None
-            layer = f"hybas_{code}_lev{level:02d}_v1c"
-            metadata, identifiers = pyogrio.read_arrow(
-                record["resolved_path"],
-                layer=layer,
-                columns=["HYBAS_ID"],
-                read_geometry=False,
-                return_fids=True,
-            )
-            fid_name = metadata["fid_column"]
-            source_ids = identifiers["HYBAS_ID"].to_numpy(zero_copy_only=False)
-            selected = pc.is_in(
-                identifiers["HYBAS_ID"],
-                value_set=pa.array(
-                    sorted(wanted), type=identifiers["HYBAS_ID"].type
-                ),
-            )
-            selected_ids = source_ids[np.asarray(selected, dtype=np.bool_)]
-            if len(selected_ids) != len(set(map(int, selected_ids))):
-                raise ValueError(f"{layer}: duplicate HYBAS_ID values in geometry source")
-            fids = identifiers[fid_name].filter(selected).to_numpy(
-                zero_copy_only=False
-            )
-            for start in range(0, len(fids), profile.geometry_batch_rows):
-                _, table = pyogrio.read_arrow(
+            code = HYDROBASIN_REGION_CODES[region] if region else "islands"
+            for record in by_code[code]:
+                remaining = wanted & unresolved
+                if not remaining:
+                    break
+                prefix = "hybas_lake" if "hybas_lake_" in record["logical_name"].lower() else "hybas"
+                layer = (Path(record["logical_name"]).stem if not region
+                         else f"{prefix}_{code}_lev{level:02d}_v1c")
+                id_column = id_columns[(record["resolved_path"], layer)]
+                metadata, identifiers = pyogrio.read_arrow(
                     record["resolved_path"],
                     layer=layer,
-                    columns=["HYBAS_ID"],
-                    fids=fids[start : start + profile.geometry_batch_rows],
-                    return_fids=False,
+                    columns=[id_column],
+                    read_geometry=False,
+                    return_fids=True,
                 )
-                geometry_name = "wkb_geometry"
-                ids = table["HYBAS_ID"].to_numpy(zero_copy_only=False).astype(
-                    np.int64, copy=False
+                fid_name = metadata["fid_column"]
+                source_ids = identifiers[id_column].to_numpy(zero_copy_only=False)
+                selected = pc.is_in(
+                    identifiers[id_column],
+                    value_set=pa.array(
+                        sorted(remaining), type=identifiers[id_column].type
+                    ),
                 )
-                work = [
-                    (
-                        wkb,
-                        {
-                            "id": f"hybas:{int(hybas_id)}",
-                            "source_kind": "hydrobasin",
-                        },
+                selected_ids = source_ids[np.asarray(selected, dtype=np.bool_)]
+                if len(selected_ids) != len(set(map(int, selected_ids))):
+                    raise ValueError(f"{layer}: duplicate HYBAS_ID values in geometry source")
+                fids = identifiers[fid_name].filter(selected).to_numpy(
+                    zero_copy_only=False
+                )
+                for start in range(0, len(fids), profile.geometry_batch_rows):
+                    _, table = pyogrio.read_arrow(
+                        record["resolved_path"],
+                        layer=layer,
+                        columns=[id_column],
+                        fids=fids[start : start + profile.geometry_batch_rows],
+                        return_fids=False,
                     )
-                    for hybas_id, wkb in zip(ids, table[geometry_name].to_pylist())
-                ]
-                results = (
-                    _process_bounded(executor, work)
-                    if executor is not None
-                    else ((index, _polyfill_wkb(wkb)) for index, wkb in enumerate(work))
-                )
-                for index, result in results:
-                    hybas_id = int(ids[index])
-                    if isinstance(result, GeometryWorkerFailure):
-                        raise GeometryCoverageError(
-                            f"HYBAS_ID {hybas_id} failed: {result.message}"
+                    geometry_name = "wkb_geometry"
+                    ids = table[id_column].to_numpy(zero_copy_only=False).astype(
+                        np.int64, copy=False
+                    )
+                    work = [
+                        (
+                            wkb,
+                            {
+                                "id": f"hybas:{int(hybas_id)}",
+                                "source_kind": "hydrobasin",
+                            },
                         )
-                    if not isinstance(result, GeometryWorkerSuccess):
-                        raise TypeError("worker returned an invalid basin coverage result")
-                    coverage = result.coverage
-                    unresolved.discard(hybas_id)
-                    completed += 1
-                    output_cells += int(coverage.cells.size)
-                    cell_chunks.append(coverage.cells)
-                    basin_ids.append(hybas_id)
-                    buffered_cells += int(coverage.cells.size)
-                    audit_rows.append(
-                        {
-                            "hybas_id": hybas_id,
-                            "region": code,
-                            "level": level,
-                            "original_valid": coverage.repair.original_valid,
-                            "repair_method": coverage.repair.method,
-                            "validity_issue": coverage.repair.original_validity_issue,
-                            "relative_planar_area_change": coverage.repair.relative_planar_area_change,
-                            "candidate_cells": coverage.candidate_cells,
-                            "output_cells": int(coverage.cells.size),
-                            "geometry_wall_seconds": result.wall_seconds,
-                            "decision_simplification_applied": coverage.decision_simplification_applied,
-                            "decision_simplification_bound_metres": coverage.decision_simplification_bound_metres,
-                            "decision_simplification_audit": json.dumps(
-                                coverage.decision_simplification_audit
-                            ),
-                        }
+                        for hybas_id, wkb in zip(ids, table[geometry_name].to_pylist())
+                    ]
+                    results = (
+                        _process_bounded(executor, work)
+                        if executor is not None
+                        else ((index, _polyfill_wkb(wkb)) for index, wkb in enumerate(work))
                     )
-                    if buffered_cells >= profile.pair_write_rows:
-                        _flush_basin_cells(cells_writer, cell_chunks, basin_ids)
-                        buffered_cells = 0
-                    if len(audit_rows) >= profile.geometry_batch_rows:
-                        _flush_rows(audit_writer, audit_rows, BASIN_AUDIT_SCHEMA)
-                    emit(
-                        "work",
-                        overall=True,
-                        phase="HydroBASINS geometry → H3",
-                        completed=completed,
-                        total=len(requested_ids),
-                        unit="referenced basins",
-                    )
+                    for index, result in results:
+                        hybas_id = int(ids[index])
+                        if isinstance(result, GeometryWorkerFailure):
+                            raise GeometryCoverageError(
+                                f"HYBAS_ID {hybas_id} failed: {result.message}"
+                            )
+                        if not isinstance(result, GeometryWorkerSuccess):
+                            raise TypeError("worker returned an invalid basin coverage result")
+                        coverage = result.coverage
+                        unresolved.discard(hybas_id)
+                        completed += 1
+                        output_cells += int(coverage.cells.size)
+                        cell_chunks.append(coverage.cells)
+                        basin_ids.append(hybas_id)
+                        buffered_cells += int(coverage.cells.size)
+                        audit_rows.append(
+                            {
+                                "hybas_id": hybas_id,
+                                "region": code,
+                                "level": level,
+                                "original_valid": coverage.repair.original_valid,
+                                "repair_method": coverage.repair.method,
+                                "validity_issue": coverage.repair.original_validity_issue,
+                                "relative_planar_area_change": coverage.repair.relative_planar_area_change,
+                                "candidate_cells": coverage.candidate_cells,
+                                "output_cells": int(coverage.cells.size),
+                                "geometry_wall_seconds": result.wall_seconds,
+                                "decision_simplification_applied": coverage.decision_simplification_applied,
+                                "decision_simplification_bound_metres": coverage.decision_simplification_bound_metres,
+                                "decision_simplification_audit": json.dumps(
+                                    coverage.decision_simplification_audit
+                                ),
+                            }
+                        )
+                        if buffered_cells >= profile.pair_write_rows:
+                            _flush_basin_cells(cells_writer, cell_chunks, basin_ids)
+                            buffered_cells = 0
+                        if len(audit_rows) >= profile.geometry_batch_rows:
+                            _flush_rows(audit_writer, audit_rows, BASIN_AUDIT_SCHEMA)
+                        emit(
+                            "work",
+                            overall=True,
+                            phase="HydroBASINS geometry → H3",
+                            completed=completed,
+                            total=len(requested_ids),
+                            unit="referenced basins",
+                        )
         _flush_basin_cells(cells_writer, cell_chunks, basin_ids)
         _flush_rows(audit_writer, audit_rows, BASIN_AUDIT_SCHEMA)
     except Exception:
@@ -1633,24 +1762,31 @@ def build_hydrobasin_index(
         audit_writer.close()
         temporary_cells.unlink(missing_ok=True)
         temporary_audit.unlink(missing_ok=True)
+        pending_missing_path.unlink(missing_ok=True)
         raise
     cells_writer.close()
     audit_writer.close()
     if unresolved:
         temporary_cells.unlink(missing_ok=True)
         temporary_audit.unlink(missing_ok=True)
+        pending_missing_path.unlink(missing_ok=True)
         sample = ", ".join(map(str, sorted(unresolved)[:10]))
         raise ValueError(
             f"{len(unresolved)} referenced HYBAS_ID values are absent from HydroBASINS v1c; sample: {sample}"
         )
     os.replace(temporary_cells, cells_path)
     os.replace(temporary_audit, audit_path)
+    if partial:
+        os.replace(pending_missing_path, missing_path)
     totals = {
+        "coverage_status": "partial-missing-basin-geometries" if missing_ids else "complete",
+        "covered_basins": completed,
+        **missing_totals,
         "referenced_basins": len(requested_ids),
         "output_basin_cells": output_cells,
         "levels": sorted({level for _, level in by_region_level}),
         "regions": sorted(
-            {HYDROBASIN_REGION_CODES[region] for region, _ in by_region_level}
+            {HYDROBASIN_REGION_CODES[region] if region else "islands" for region, _ in by_region_level}
         ),
     }
     receipt = _supplemental_receipt(

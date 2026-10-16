@@ -340,12 +340,35 @@ not point count, sampling intensity, or local abundance.
 
 Eligible IUCN table rows are first reduced to distinct `(hybas_id, IUCN SIS ID)`
 relationships with DuckDB's spillable sort. The numeric HydroBASINS identifier
-encodes region and Pfafstetter level. For every referenced region/level, the
+normally encodes region and Pfafstetter level. IUCN-added island IDs in the
+100000000–199999999 namespace are resolved by exact ID from its separately
+inventoried base layer, without inferring a region or basin level. The
+customized-with-lakes layer takes precedence for shared IDs, with standard
+v1c polygons as fallback. This retains provider distribution units; it does
+not infer habitat suitability or clip marine/terrestrial ranges.
+Each layer must have exactly one case-insensitive `HYBAS_ID` field. Inspection,
+the checker and the builder preserve its actual spelling for Arrow reads;
+missing or ambiguous key fields fail before coverage outputs are published.
+For every referenced region/level, the
 pipeline scans only the small DBF identifier/FID columns, then asks GDAL for the
 WKB of referenced FIDs. Each referenced HydroBASINS v1c polygon is covered once
 with the same any-touch polygon kernel and cached as `(hybas_id, H3 cell)`.
 Species pairs are produced by a native DuckDB join to that reusable basin index.
-Missing referenced IDs fail the stage instead of silently dropping species.
+Requested IDs are reconciled before H3 filling; duplicate requested IDs in a
+selected source layer fail. Missing referenced IDs fail by default. A profile
+may explicitly set `hydrobasin_coverage.missing_geometry_policy` to
+`exclude-with-audit`. That mode records every omitted source relationship in
+`missing_relationships.parquet`, plus source/distinct relationship and affected
+species counts, referenced/covered/missing basin counts, and an explicit partial
+coverage status. Missing geometry is unresolved coverage, never absence evidence.
+The receipt binds the profile, source inventories, requested IDs, output schemas
+and hashes; partial receipts additionally bind relationship-table hashes.
+The read-only `sources_check_hydrobasins` CLI reports exact-ID and nonempty
+polygon coverage with distinct basin/species denominators using the same lake-first
+exact-ID selection. Standard-only inventory counts remain separate diagnostics;
+a present but unusable lake row is unresolved even when standard has a polygon.
+The checker does not perform
+H3 filling or establish biological accuracy. Its reports remain local.
 
 ### Repair policy
 
@@ -463,7 +486,14 @@ tested tail polygons, but that is a measured sample rather than a global proof.
 | Fallback | Try `preserve_topology=True`, then retain original if rejected | Whole-geometry fallback |
 
 Shapely uses Douglas–Peucker simplification, and topology preservation adds
-checks against collapses and ring intersections.
+checks against collapses and ring intersections. The fallback groups potentially
+interacting rings using expanded short-section envelopes for geometries with
+at least 256 rings and a bounding-box area of at least 3000 square degrees.
+It reconstructs the original polygon/component structure and applies the same
+validity and component-count acceptance guards. Smaller cases retain the
+whole-geometry topology-preserving operation. Synthetic comparisons check
+equivalent outputs for interacting holes, nested islands, remote components
+and irregular clusters; they do not establish global equivalence or speedup.
 [Shapely simplification](https://shapely.readthedocs.io/en/stable/reference/shapely.simplify.html).
 The fast candidate may remove holes while preserving the number of outer
 components. Equal component count does not establish that each original

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -117,34 +119,47 @@ class DataAcquisitionTests(unittest.TestCase):
         assert inventory is not None
         files = inventory["files"]
         self.assertEqual(inventory["release"], "v1c")
-        self.assertEqual(len(files), 9)
-        self.assertEqual(
-            {item["region"] for item in files},
-            {
-                "Africa",
-                "Arctic",
-                "Asia",
-                "Australia",
-                "Europe",
-                "Greenland",
-                "North America",
-                "South America",
-                "Siberia",
-            },
-        )
-        self.assertFalse(
-            is_due(
-                source,
-                {
-                    "release": "v1c",
-                    "files": [{**item, "bytes": item["expected_bytes"]} for item in files],
-                },
-                False,
-            )
-        )
-        self.assertTrue(is_due(source, {"release": "v1c", "files": files[:4]}, False))
-        self.assertTrue(is_due(source, {"release": "v1b"}, False))
-        self.assertTrue(is_due(source, {"release": "v1c"}, True))
+        self.assertEqual(inventory["format"], "standard-and-customized-with-lakes")
+        self.assertEqual(inventory["levels"], "01-12")
+        regions = {
+            "af": "Africa",
+            "ar": "Arctic",
+            "as": "Asia",
+            "au": "Australia",
+            "eu": "Europe",
+            "gr": "Greenland",
+            "na": "North America",
+            "sa": "South America",
+            "si": "Siberia",
+        }
+        expected_files = {
+            f"hybas_{prefix}{code}_lev01-12_v1c.zip": (region, kind)
+            for prefix, kind in (("", "standard"), ("lake_", "customized_with_lakes"))
+            for code, region in regions.items()
+        }
+        self.assertEqual(len(files), 18)
+        self.assertEqual({item["logical_name"] for item in files}, set(expected_files))
+        self.assertEqual(len({item["provider_filename"] for item in files}), 18)
+        for item in files:
+            with self.subTest(archive=item["logical_name"]):
+                region, kind = expected_files[item["logical_name"]]
+                self.assertEqual(item["region"], region)
+                self.assertEqual(item["provider_filename"], item["logical_name"])
+                self.assertEqual(
+                    item["download_url"],
+                    f"https://data.hydrosheds.org/file/hydrobasins/{kind}/{item['logical_name']}",
+                )
+                self.assertGreater(item["expected_bytes"], 0)
+        self.assertEqual(required_file_names(source), set(expected_files))
+        self.assertTrue(source.get("required"))
+        self.assertIn("hydrobasins", catalogue.profiles["authorized"]["required_sources"])
+        complete_record = {"release": "v1c", "files": [
+            {"logical_name": item["logical_name"], "bytes": item["expected_bytes"]}
+            for item in files
+        ]}
+        self.assertFalse(is_due(source, complete_record, False))
+        self.assertTrue(is_due(source, {**complete_record, "release": "v1b"}, False))
+        self.assertTrue(is_due(source, complete_record, True))
 
     def test_manual_registration_copies_validates_and_detects_changes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -323,6 +338,118 @@ class DataAcquisitionTests(unittest.TestCase):
             for old in record["files"]:
                 self.assertIn(old, updated["files"])
                 self.assertTrue((root / old["path"]).is_file())
+
+    def test_same_release_inventory_expansion_refreshes_normal_sync_modes(self) -> None:
+        configured = load_catalogue(Path("config/data_sources.toml")).sources["hydrobasins"]
+        inventory = source_inventory(configured)
+        assert inventory is not None
+        names = [item["logical_name"] for item in inventory["files"]]
+        standard_names = [name for name in names if not name.startswith("hybas_lake_")]
+        self.assertEqual(len(standard_names), 9)
+        self.assertEqual(len(names), 18)
+
+        def synthetic_download(source, previous, destination, *, url=None):
+            with zipfile.ZipFile(destination, "w") as archive:
+                for suffix in (".shp", ".dbf", ".shx"):
+                    archive.writestr(f"synthetic{suffix}", "fixture")
+            return {"url": url}
+
+        for mode in ("download", "update"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                inventory_path = root / "inventory.toml"
+
+                def write_inventory(logical_names):
+                    inventory_path.write_text(
+                        'schema_version = 1\nrelease = "v1c"\n'
+                        + "".join(
+                            f'[[files]]\nlogical_name = "{name}"\n'
+                            f'download_url = "https://synthetic.invalid/{name}"\n'
+                            for name in logical_names
+                        ),
+                        encoding="utf-8",
+                    )
+
+                source = Source({**configured.values, "inventory_file": str(inventory_path)})
+                catalogue = Catalogue(
+                    sources={source.id: source},
+                    profiles={"authorized": {"required_sources": [source.id]}},
+                )
+                args = argparse.Namespace(
+                    root=root, source=[source.id], force=False, dry_run=False,
+                )
+                write_inventory(standard_names)
+                with unittest.mock.patch(
+                    "ark_pipeline.cli.sources_acquire.download", side_effect=synthetic_download,
+                ):
+                    self.assertEqual(update_public(args, catalogue), 0)
+                old_manifest = load_manifest(root)
+                old_record = old_manifest["sources"][source.id]
+                old_files = {item["logical_name"] for item in old_record["files"]}
+                self.assertEqual(old_files, set(standard_names))
+                old_paths = [root / item["path"] for item in old_record["files"]]
+                old_bytes = [path.read_bytes() for path in old_paths]
+
+                write_inventory(names)
+                self.assertTrue(is_due(source, old_record, False))
+                with unittest.mock.patch(
+                    "ark_pipeline.cli.sources_sync.load_catalogue", return_value=catalogue,
+                ), unittest.mock.patch(
+                    "ark_pipeline.cli.sources_acquire.download", side_effect=synthetic_download,
+                ) as downloads, contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(sync_main([mode, "--root", str(root)]), 0)
+                downloaded_names = {call.args[2].name for call in downloads.call_args_list}
+                self.assertTrue((set(names) - old_files).issubset(downloaded_names))
+                self.assertTrue(downloaded_names.issubset(set(names)))
+                record = load_manifest(root)["sources"][source.id]
+                self.assertEqual(record["release"], "v1c")
+                self.assertEqual({item["logical_name"] for item in record["files"]}, set(names))
+                self.assertEqual([path.read_bytes() for path in old_paths], old_bytes)
+                with unittest.mock.patch("builtins.print"):
+                    self.assertEqual(doctor(
+                        argparse.Namespace(root=root, profile="authorized", deep=True, output=None),
+                        catalogue,
+                    ), 0)
+                complete_manifest = load_manifest(root)
+                with unittest.mock.patch(
+                    "ark_pipeline.cli.sources_sync.load_catalogue", return_value=catalogue,
+                ), unittest.mock.patch(
+                    "ark_pipeline.cli.sources_acquire.download",
+                    side_effect=AssertionError("complete inventory must stay current"),
+                ), contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(sync_main([mode, "--root", str(root)]), 0)
+                self.assertEqual(load_manifest(root), complete_manifest)
+
+    def test_inventory_freshness_checks_all_required_names_and_preserves_policies(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            inventory_path = Path(temporary) / "inventory.toml"
+            inventory_path.write_text(
+                'schema_version = 1\nred_list_version = "test-1"\n'
+                '[[files]]\nlogical_name = "inventory.csv"\n', encoding="utf-8",
+            )
+            source = Source({
+                "id": "another-provider", "inventory_file": str(inventory_path),
+                "required_files": ["additional.csv"], "update_policy": "pinned-discontinued",
+            })
+            complete = {"release": "test-1", "files": [
+                {"logical_name": name} for name in ("inventory.csv", "additional.csv", "extra.csv")
+            ]}
+            self.assertFalse(is_due(source, complete, False))
+            self.assertTrue(is_due(source, complete, True))
+            self.assertTrue(is_due(source, {**complete, "release": "test-0"}, False))
+            for names in ([], ["inventory.csv"], ["additional.csv"]):
+                self.assertTrue(is_due(source, {"release": "test-1", "files": [
+                    {"logical_name": name} for name in names
+                ]}, False))
+            pinned = Source({"id": "no-inventory", "update_policy": "pinned-discontinued"})
+            self.assertFalse(is_due(pinned, {}, False))
+            self.assertTrue(is_due(pinned, {}, True))
+            self.assertTrue(is_due(pinned, None, False))
+            monthly = Source({"id": "monthly", "interval_days": 28})
+            with unittest.mock.patch("ark_pipeline.cli.sources_acquire.age_days", return_value=27):
+                self.assertFalse(is_due(monthly, {}, False))
+            with unittest.mock.patch("ark_pipeline.cli.sources_acquire.age_days", return_value=28):
+                self.assertTrue(is_due(monthly, {}, False))
 
     def test_sync_registers_staged_manual_source_only_after_authorization(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
