@@ -28,4 +28,4 @@
   </div>
 </nav>
 {@render children()}
-<footer class="site-footer"><p>Ark-<i>IV</i> · Conservation prioritisation powered by IUCN and GoaT data · <a href="https://github.com/karlaugustnybo/DIKUs-Ark" target="_blank" rel="noreferrer">Source (AGPL-3.0-only)</a></p></footer>
+<footer class="site-footer"><p>Ark-<i>IV</i> · Conservation prioritisation powered by IUCN and GoaT data · <a href="https://github.com/karlaugustnybo/DIKUs-Ark" target="_blank" rel="noreferrer">Source (CC0-1.0)</a></p></footer>

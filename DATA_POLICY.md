@@ -5,9 +5,9 @@ access does not automatically grant redistribution rights, and a derived file
 can remain restricted when it exposes row-level values, geometry, identifiers,
 or rankings from its inputs.
 
-The repository's `AGPL-3.0-only` licence applies to Ark-IV application code,
-not to input datasets or generated data artifacts. It cannot supply rights
-that a data provider has not granted.
+The repository's `CC0-1.0` dedication applies to Ark-IV application code, not
+to input datasets or generated data artifacts. It cannot supply rights that
+a data provider has not granted.
 
 This policy is a conservative engineering control, not legal advice. Re-check
 provider terms and written permissions before every public data release.
@@ -75,10 +75,15 @@ to return only permitted non-reconstructable results.
 
 ## Automated guard
 
-`just release-check` inspects tracked and non-ignored files in the prospective
-commit. It rejects common data formats (including Arrow and PMTiles), files
-under `data/`, known restricted database paths, likely credentials, and files
-near GitHub's size limit.
+`just release-check` inspects stage-0 indexed blobs and modes, including files
+missing from the worktree. Required documents and boundary attribution are
+validated against that same prospective commit. Unresolved index entries and
+symlinks require review and fail the check. It separately scans non-ignored
+untracked files conservatively before staging; unstaged edits to tracked files
+are not part of the prospective commit. Credential patterns are scanned in
+bounded chunks for every candidate, including large allowed assets. It rejects
+common data formats (including Arrow and PMTiles), files under `data/`, known
+restricted database paths, likely credentials, and files near GitHub's size limit.
 
 `just release-history-check` additionally checks every local Git ref for the
 two databases removed during the 2026-09-04 history cleanup. This is a

@@ -52,7 +52,7 @@ Ark-IV uses HydroBASINS standard level 1–12 polygons locally to resolve IUCN
 apply and that the HydroBASINS license is the agreement in its technical
 documentation. A generated basin-cell index or basin-derived serving snapshot
 must therefore be reviewed under that agreement rather than assumed to inherit
-the application's AGPL licence.
+the application's CC0 dedication.
 
 - Product and citation guidance: https://www.hydrosheds.org/products/hydrobasins
 - Current site terms: https://www.hydrosheds.org/terms-of-use
@@ -129,11 +129,13 @@ Voyager basemap is used under CARTO's applicable terms.
 
 Copyright (C) 2026 Ark-IV contributors.
 
-Ark-IV's application code is offered under the GNU Affero General Public
-License v3.0 only (`AGPL-3.0-only`); see `LICENSE`. This grant covers project
-code only. It does not relicense datasets, generated data artifacts, tutorial
-media owned by third parties, or third-party software. Existing contributors'
-agreement to apply AGPL to their contributions remains a publication gate.
+Ark-IV's application code is dedicated to the public domain under the CC0 1.0
+Universal Public Domain Dedication (`CC0-1.0`); see `LICENSE`. This dedication
+covers project code only. It does not relicense datasets, generated data
+artifacts, tutorial media owned by third parties, or third-party software.
+Each existing contributor must agree to dedicate their contribution under
+CC0-1.0; see `docs/publication_checklist.md`. Future contributors are asked to
+do the same.
 
 Third-party software dependencies retain the licences declared by their
 packages and lockfiles.

@@ -2,7 +2,7 @@
   "name": "ark-iv-frontend",
   "private": true,
   "version": "1.0.0",
-  "license": "AGPL-3.0-only",
+  "license": "CC0-1.0",
   "packageManager": "bun@1.3.9",
   "type": "module",
   "scripts": {
