@@ -232,6 +232,15 @@ class BenchmarkRunnerTests(unittest.TestCase):
             self.assertTrue(any("Resumed after interruption" in warning for warning in report["warnings"]))
             self.assertTrue(all(s["status"] == "passed" for s in report["stages"]))
             self.assertTrue((output / "tiles/current/priorities.pmtiles").is_file())
+            prepared = json.loads((output / "prepared-inputs.json").read_text())
+            crosswalk = (output / "crosswalk/current/iucn_goat_crosswalk.parquet").resolve(strict=True)
+            self.assertEqual(prepared["files"]["crosswalk"], {
+                "path": str(crosswalk), "bytes": crosswalk.stat().st_size, "sha256": sha256(crosswalk)})
+            for records in prepared["parts"].values():
+                receipt = json.loads(Path(records["receipt"]["path"]).read_text())
+                self.assertEqual(prepared["metric_identity"], receipt["identity"]["metadata"])
+            publication = json.loads((output / "tiles/current/receipt.json").read_text())
+            self.assertEqual(publication["identity"]["prepared"], prepared)
             self.assertTrue((output / "benchmark-report.md").is_file())
             events = [json.loads(line) for line in (output / "progress.jsonl").read_text().splitlines()]
             self.assertEqual(sum(e["kind"] == "geometry_done" for e in events), 4)
