@@ -31,6 +31,9 @@ class SpeciesRow:
     threat_score: float
     dna_level: str
     priority: float
+    metadata_status: str = "assessed"
+    spatial_redlist_category: str | None = None
+    iucn_assessment_latest: bool | None = None
 
 
 @dataclass
@@ -61,6 +64,8 @@ class SpeciesCellsResponse:
     species_name: str
     resolution: int
     cells: list[str] = field(default_factory=list)
+    include_passage: bool = False
+    passage_available: bool = False
 
 
 @dataclass
@@ -74,6 +79,9 @@ class CellSpeciesRow:
     family: str
     redlist_category: str
     dna_level: str
+    metadata_status: str = "assessed"
+    spatial_redlist_category: str | None = None
+    iucn_assessment_latest: bool | None = None
 
 
 @dataclass
@@ -105,4 +113,18 @@ class CellDetailsResponse:
     resolution: int
     boundaries: list[CellBoundaryMembership] = field(default_factory=list)
     species: list[CellSpeciesRow] = field(default_factory=list)
-    stats: CellStats = field(default_factory=CellStats)
+    stats: CellStats | None = field(default_factory=CellStats)
+    species_data_unavailable: bool = False
+
+
+@dataclass
+class CoverageProfile:
+    id: str
+    label: str
+    available: bool
+
+
+@dataclass
+class CoverageProfilesResponse:
+    selected: str
+    profiles: list[CoverageProfile]

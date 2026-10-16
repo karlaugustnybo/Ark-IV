@@ -305,7 +305,7 @@ def plan(args) -> tuple[dict, list[dict], dict]:
     own("lists")
     if args.municipality is None:
         own("boundaries")
-    add("metadata", [*python, "ark_pipeline.cli.serving_metadata", "--root", root, "--h3-root", h3, "--crosswalk", crosswalk, "--output-dir", output / "species"])
+    add("metadata", [*python, "ark_pipeline.cli.serving_metadata", "--root", root, "--h3-root", h3, "--crosswalk", crosswalk, "--output-dir", output / "species", "--profile", profile_path])
     add("coarse_db", [sys.executable, "ark_pipeline/builders/source_database.py", "--target", output / "source.duckdb", "--overwrite", "--resolutions", "3",
                       "--species-parquet", species, "--species-systems-parquet", systems, "--h3-res3", h3 / "h3_res3_species_global_merged.parquet",
                       "--crosswalk", crosswalk, "--defer-lossless-validation"])
@@ -314,7 +314,8 @@ def plan(args) -> tuple[dict, list[dict], dict]:
                          "--species-systems", systems, "--output-dir", output / "metrics", "--scratch-dir", output / "scratch/metrics",
                          "--memory-limit", args.memory_limit, "--no-progress"])
     add("prepared_inputs", [*python, "ark_pipeline.cli.serving_tiles", "record", "--h3-root", h3, "--parts-dir", output / "metrics", "--build-duckdb", output / "build.duckdb",
-                            "--species", species, "--species-systems", systems, "--metadata-template", output / "coarse-tiles/map-metadata.json", "--output", output / "prepared-inputs.json"])
+                            "--species", species, "--species-systems", systems, "--crosswalk", crosswalk,
+                            "--metadata-template", output / "coarse-tiles/map-metadata.json", "--output", output / "prepared-inputs.json"])
     add("tiles", [*python, "ark_pipeline.cli.serving_tiles", "build", "--prepared-inputs", output / "prepared-inputs.json", "--output-dir", output / "tiles",
                   "--scratch-dir", output / "scratch/tiles", *[value for key, path in boundaries.items() for value in ("--" + key.replace("_", "-"), path)]])
     paths = {"DATA_DIR": output, "SOURCE_DUCKDB_PATH": output / "source.duckdb", "BUILD_DUCKDB_PATH": output / "build.duckdb",
@@ -322,9 +323,13 @@ def plan(args) -> tuple[dict, list[dict], dict]:
              "MAP_METADATA_PATH": output / "coarse-tiles/map-metadata.json", "VALIDATION_REPORT_PATH": output / "build-validation.json",
              "SOURCE_VALIDATION_REPORT_PATH": output / "source-validation.json", "DUCKDB_SCRATCH_DIR": output / "scratch/duckdb",
              "H3_RES3_PARQUET": h3 / "h3_res3_species_global_merged.parquet", "H3_ID_CROSSWALK_PATH": crosswalk,
-             "GLOBAL_DATA_ROOT": root, "GLOBAL_H3_ROOT": h3, "GLOBAL_CROSSWALK_PATH": crosswalk, "GLOBAL_PREVIEW_ROOT": output}
+             "GLOBAL_DATA_ROOT": root, "GLOBAL_H3_ROOT": h3, "GLOBAL_CROSSWALK_PATH": crosswalk, "GLOBAL_PREVIEW_ROOT": output, "SPATIAL_PROFILE": profile_path}
     env = {**{key: str(value) for key, value in paths.items()}, **resources.environment(), "DUCKDB_MEMORY_LIMIT": args.memory_limit,
            **{BOUNDARY_ENV[key]: path for key, path in boundaries.items()}}
+    config["serving_contract"] = "dynamic-h3-v1"
+    for stage in stages:
+        if stage["name"] == "tiles":
+            stage["serving_contract"] = "dynamic-h3-v1"
     return config, stages, env
 
 
@@ -432,7 +437,8 @@ def run(args) -> dict:
                     elif dashboard.forecast.base.get(planned["name"]) is not None:
                         projected_stages.append({"name": planned["name"], "wall_seconds": dashboard.forecast.base[planned["name"]]})
                 projection = estimate(projected_stages, json.loads((output / "population.json").read_text()),
-                                      json.loads((output / "pairs-report.json").read_text()), json.loads((output / "lists-report.json").read_text()))
+                                      json.loads((output / "pairs-report.json").read_text()), json.loads((output / "lists-report.json").read_text()),
+                                      serving_contract=config["serving_contract"])
                 if len(projected_stages) == len(stages):
                     dashboard.global_estimate = projection["total_seconds"]
                 report["live_projection"] = projection
@@ -445,7 +451,7 @@ def run(args) -> dict:
         lists = json.loads((output / "lists-report.json").read_text())
         report["workload"] = {"raw_pairs": pairs["pair_rows"], "eligible_polygons": population["eligible_polygons"],
                               **{key: lists[key] for key in ("res3_cells", "res3_relationships", "res7_cells", "res7_relationships")}}
-        report["estimate"] = estimate(report["stages"], population, pairs, lists)
+        report["estimate"] = estimate(report["stages"], population, pairs, lists, serving_contract=config["serving_contract"])
         report["status"] = "passed"
     except (Exception, KeyboardInterrupt) as error:
         report.update(status="interrupted" if isinstance(error, KeyboardInterrupt) else "failed", error=str(error) or "Interrupted")

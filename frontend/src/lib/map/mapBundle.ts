@@ -1,3 +1,4 @@
+import { withCoverageProfile } from '$lib/map/coverageProfile';
 import { config } from '$lib/config';
 
 export type ScoreDomain = { min: number; max: number };
@@ -21,6 +22,8 @@ export type MapMetadata = {
   res7_delivery?: string;
   tile_layout?: string;
   tile_schema_version?: number;
+  archive_version?: string;
+  coverage_profile?: string;
   jurisdiction_assignment?: string;
   jurisdiction_score_domains?: Record<string, Record<string, ScoreDomain>>;
   boundary_assignment?: string;
@@ -85,7 +88,7 @@ async function loadCoarseSnapshot(descriptor: CoarseSnapshotDescriptor): Promise
   // against the metadata endpoint, not the frontend page origin (the Vite
   // development server and API deliberately run on different ports).
   const metadataUrl = new URL(config.mapMetadataUrl, window.location.href);
-  const snapshotUrl = new URL(descriptor.url, metadataUrl);
+  const snapshotUrl = withCoverageProfile(new URL(descriptor.url, metadataUrl).toString());
   const [initialResponse, arrow] = await Promise.all([
     fetch(snapshotUrl),
     import('apache-arrow')

@@ -228,6 +228,9 @@
         {/each}
       </dl>
     </section>
+    {#if $cellDetails.species_data_unavailable}
+      <p role="status">Species records for this fine cell are unavailable. Aggregate map scores remain available.</p>
+    {:else}
     <div class="cell-stats">
       {#each [
         ['Total species', $cellDetails.stats?.total ?? 0], ['Critically Endangered', $cellDetails.stats?.CR ?? 0],
@@ -248,6 +251,7 @@
     </div>
     <SpeciesDataTable rows={visible} {sort} {order} loading={$cellLoading} onSort={changeSort} emptyMessage={cellSearch.trim() || redlistFilters.length || dnaFilters.length ? 'No species match these filters.' : 'No species records for this cell.'} />
     <div class="pagination" id="cell-pagination"><span class="page-info"><strong>{scored.length.toLocaleString()}</strong> of {($cellDetails.species ?? []).length.toLocaleString()} species · Page {page} of {pages}</span><div class="pagination-buttons"><button class="btn-secondary" disabled={page === 1} on:click={() => page--}>Previous</button><button class="btn-secondary" disabled={page === pages} on:click={() => page++}>Next</button></div></div>
+    {/if}
   {/if}
 </section>
 

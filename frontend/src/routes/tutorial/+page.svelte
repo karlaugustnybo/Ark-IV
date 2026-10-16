@@ -1,3 +1,7 @@
+<script lang="ts">
+  import { withCoverageProfile } from '$lib/map/coverageProfile';
+</script>
+
 <svelte:head><title>Tutorial · Ark-IV</title></svelte:head>
 
 <main class="main-content">
@@ -26,6 +30,6 @@
       <tr><td><strong>Mouse drag</strong></td><td>Pan the map</td></tr><tr><td><strong>Mouse scroll / pinch</strong></td><td>Zoom in or out</td></tr><tr><td><strong>Click cell</strong></td><td>Open its species details</td></tr><tr><td><strong>System buttons</strong></td><td>Switch between all, terrestrial, freshwater, and marine layers</td></tr>
     </tbody></table></div></div>
 
-    <footer class="tutorial-footer"><p><strong>Ready to explore?</strong> Start with the <a href="/table">table</a> or jump to the <a href="/map">map</a>.</p></footer>
+    <footer class="tutorial-footer"><p><strong>Ready to explore?</strong> Start with the <a href={withCoverageProfile('/table')}>table</a> or jump to the <a href={withCoverageProfile('/map')}>map</a>.</p></footer>
   </div>
 </main>

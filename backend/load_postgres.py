@@ -36,17 +36,42 @@ async def load() -> None:
         await connection.execute((ROOT / "backend" / "schema.sql").read_text())
         async with connection.transaction():
             await connection.execute(
-                "TRUNCATE cell_species, cell_species_lists, species_cells, cell_boundaries, species_systems, "
+                "TRUNCATE species_passage_cells, cell_species, cell_species_lists, species_cells, cell_boundaries, species_systems, "
                 "species, app_stats CASCADE"
             )
             species_columns = [
-                "gbif_accepted_id", "iucn_sis_id", "iucn_assessment_id",
-                "gbif_taxon_id", "goat_taxon_id", "species_name", "family", "redlist_category",
-                "has_dna_species_level", "genus_has_dna", "family_has_dna",
+                "gbif_accepted_id",
+                "iucn_sis_id",
+                "iucn_assessment_id",
+                "gbif_taxon_id",
+                "goat_taxon_id",
+                "species_name",
+                "family",
+                "redlist_category",
+                "has_dna_species_level",
+                "genus_has_dna",
+                "family_has_dna",
                 "goat_data_deficient",
-                "edge_group_name", "has_ebp_criteria_evidence",
+                "edge_group_name",
+                "has_ebp_criteria_evidence",
             ]
-            await connection.copy_records_to_table("species", records=rows(settings.export_dir / "species.parquet", species_columns), columns=species_columns)
+            available = set(
+                pq.ParquetFile(settings.export_dir / "species.parquet").schema_arrow.names
+            )
+            species_columns += [
+                column
+                for column in (
+                    "metadata_status",
+                    "spatial_redlist_category",
+                    "iucn_assessment_latest",
+                )
+                if column in available
+            ]
+            await connection.copy_records_to_table(
+                "species",
+                records=rows(settings.export_dir / "species.parquet", species_columns),
+                columns=species_columns,
+            )
             system_columns = ["gbif_accepted_id", "system"]
             await connection.copy_records_to_table(
                 "species_systems",
@@ -56,9 +81,7 @@ async def load() -> None:
             list_columns = ["h3_index", "resolution", "species_ids"]
             await connection.copy_records_to_table(
                 "cell_species_lists",
-                records=rows(
-                    settings.export_dir / "cell_species_lists.parquet", list_columns
-                ),
+                records=rows(settings.export_dir / "cell_species_lists.parquet", list_columns),
                 columns=list_columns,
             )
             species_cells_path = settings.export_dir / "species_cells_res3.parquet"
@@ -68,6 +91,14 @@ async def load() -> None:
                     "species_cells",
                     records=rows(species_cells_path, species_cell_columns),
                     columns=species_cell_columns,
+                )
+            passage_path = settings.export_dir / "species_passage_cells_res3.parquet"
+            if passage_path.is_file():
+                columns = ["gbif_accepted_id", "resolution", "h3_indexes"]
+                await connection.copy_records_to_table(
+                    "species_passage_cells",
+                    records=rows(passage_path, columns),
+                    columns=columns,
                 )
             # HTTP cell details use the compact species_ids arrays above. The
             # expanded relation can contain millions to billions of rows and is
@@ -83,12 +114,22 @@ async def load() -> None:
             boundaries_path = settings.export_dir / "cell_boundaries.parquet"
             if boundaries_path.is_file():
                 source_boundary_columns = [
-                    "h3_index", "resolution", "admin0", "admin1",
-                    "municipality", "eez", "conservation_framework",
+                    "h3_index",
+                    "resolution",
+                    "admin0",
+                    "admin1",
+                    "municipality",
+                    "eez",
+                    "conservation_framework",
                 ]
                 target_boundary_columns = [
-                    "h3_index", "resolution", "admin0_codes", "admin1_codes",
-                    "municipality_codes", "eez_codes", "conservation_framework_codes",
+                    "h3_index",
+                    "resolution",
+                    "admin0_codes",
+                    "admin1_codes",
+                    "municipality_codes",
+                    "eez_codes",
+                    "conservation_framework_codes",
                 ]
                 await connection.copy_records_to_table(
                     "cell_boundaries",

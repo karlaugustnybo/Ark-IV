@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { withCoverageProfile } from '$lib/map/coverageProfile';
   import { onMount } from 'svelte';
   import { get } from 'svelte/store';
   import { H3HexagonLayer, MVTLayer } from '@deck.gl/geo-layers';
@@ -19,7 +20,7 @@
     selectedH3Resolution
   } from '$lib/stores/map';
   import { colourPaletteLuts, type ColourPaletteId } from '$lib/map/colourPalettes';
-  import { selectedSpecies, speciesHighlight, speciesHighlightGradient, type SelectedSpecies } from '$lib/stores/species';
+  import { includePassage, passageAvailable, selectedSpecies, speciesHighlight, speciesHighlightGradient, type SelectedSpecies } from '$lib/stores/species';
   import { api } from '$lib/api/client';
   import { weights } from '$lib/stores/weights';
   import {
@@ -599,7 +600,7 @@
         fineRequestCount += 1;
         const url = `${config.apiBaseUrl}/api/tiles/res7/${index.z}/${index.x}/${index.y}` +
           `?system=${system}&v=${dynamicTileVersion}${jurisdictionQuery}`;
-        const response = await fetch(url);
+        const response = await fetch(withCoverageProfile(url));
         if (!response.ok) {
           throw new Error(`Unable to load resolution-7 tile (${response.status})`);
         }
@@ -861,7 +862,7 @@
       return;
     }
     speciesHighlight.set({ status: 'loading', count: 0, resolution: 3 });
-    const cacheKey = species.gbif_accepted_id;
+    const cacheKey = `${species.gbif_accepted_id}:${get(includePassage)}`;
     const cached = speciesDistributionCache.get(cacheKey);
     if (cached) {
       speciesDistributionCache.delete(cacheKey);
@@ -875,9 +876,11 @@
       const response = await api.speciesCells(
         species.gbif_accepted_id,
         currentResolution,
-        controller.signal
+        controller.signal,
+        get(includePassage)
       );
       if (requestId !== speciesRequestId) return;
+      passageAvailable.set(response.passage_available ?? false);
       const distribution = {
         resolution: response.resolution as 3 | 7,
         cells: response.cells ?? []
@@ -970,8 +973,8 @@
       useSystemDomain(currentSystem);
       if (disposed) return;
 
-      const tileUrl = metadata.tile_schema_version
-        ? `${config.tileUrl}${config.tileUrl.includes('?') ? '&' : '?'}v=${metadata.tile_schema_version}`
+      const tileUrl = metadata.archive_version
+        ? `${config.tileUrl}${config.tileUrl.includes('?') ? '&' : '?'}v=${metadata.archive_version}`
         : config.tileUrl;
       archive = new PMTiles(tileUrl);
       fineTileCoordinator = new FineTileCoordinator({
@@ -1343,6 +1346,9 @@
         selectedSpecies.subscribe((species) => {
           currentSpecies = species;
           if (subscriptionsReady) void loadSpeciesDistribution(species);
+        }),
+        includePassage.subscribe(() => {
+          if (subscriptionsReady) void loadSpeciesDistribution(currentSpecies);
         }),
         speciesHighlightGradient.subscribe((enabled) => {
           currentSpeciesGradient = enabled;

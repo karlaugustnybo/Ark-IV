@@ -186,6 +186,14 @@ Tippecanoe threads. Metric threads per worker and the tile query helper default
 to one; explicit stage overrides remain available. `--memory-limit` controls
 DuckDB memory per process, not total memory or native geometry allocations.
 
+The default `dynamic-h3-v1` tile projection uses resolution-3 feature counts,
+including the global H3 coarse-cell cap; fine-cell counts do not scale coarse
+compilation time. Legacy static archive estimates use coarse plus fine features.
+Saved estimates record their serving contract. Full-build forecasts omit tile
+priors without a compatible estimate contract, including older dynamic-tagged
+reports that used the static workload model. These remain planning calculations,
+not measured global runtimes.
+
 ## Census optimization measurement
 
 On 2026-09-03, the previous WKB/Shapely census and the native envelope census

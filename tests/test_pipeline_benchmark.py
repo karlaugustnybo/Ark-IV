@@ -100,6 +100,36 @@ class BenchmarkModelTests(unittest.TestCase):
         self.assertEqual(result["missing_size_bins"], [1])
         self.assertEqual(result["stages"][1]["estimated_seconds"], 5)
 
+    def test_dynamic_tiles_ignore_fine_counts_and_saved_full_prior_is_coarse_only(self):
+        from ark_pipeline.runtime.forecasts import Forecast
+        from tests.test_pipeline_dashboard import RESOURCES
+
+        pairs = {'pair_rows': 1000, 'write_seconds': 1, 'observations': [
+            {'size_bin': 0, 'kernel_seconds': 1, 'output_pairs': 1000, 'forced_extreme': False}]}
+        population = {'size_bin_counts': [100000]}
+        stages = [{'name': 'tiles', 'wall_seconds': 10, 'serving_contract': 'dynamic-h3-v1'}]
+        projections = []
+        for fine in (1000, 100000):
+            lists = {'res3_cells': 1000, 'res3_relationships': 1000,
+                     'res7_cells': fine, 'res7_relationships': fine}
+            result = estimate(stages, population, pairs, lists)
+            self.assertEqual(result['projected_workload']['res3_cells'], h3.get_num_cells(3))
+            tile = result['stages'][0]
+            self.assertAlmostEqual(tile['estimated_seconds'], 10 * h3.get_num_cells(3) / 1000)
+            projections.append(tile['scenario_seconds'])
+            provisional = estimate([{'name': 'tiles', 'wall_seconds': 10}], population, pairs, lists,
+                                   serving_contract='dynamic-h3-v1')
+            self.assertEqual(provisional['stages'][0], tile)
+            prior = {'serving_contract': 'dynamic-h3-v1', 'estimate': result,
+                     'resources': RESOURCES, 'stages': stages}
+            self.assertEqual(Forecast(prior, RESOURCES, 'full').base['tiles'], tile['estimated_seconds'])
+            # Pre-fix estimates carried only the report tag and must not seed full ETA.
+            old_estimate = {key: value for key, value in result.items() if key != 'serving_contract'}
+            self.assertNotIn('tiles', Forecast({**prior, 'estimate': old_estimate}, RESOURCES, 'full').base)
+            static = estimate([{'name': 'tiles', 'wall_seconds': 10}], population, pairs, lists)
+            self.assertGreater(static['stages'][0]['estimated_seconds'], tile['estimated_seconds'])
+        self.assertEqual(projections[0], projections[1])
+
     def test_census_includes_extremes_and_h3_projection_is_capped(self):
         pairs = self.observations()
         lists = {"res3_cells": 1, "res3_relationships": 3, "res7_cells": 10, "res7_relationships": 100}
@@ -195,11 +225,22 @@ class BenchmarkRunnerTests(unittest.TestCase):
             self.assertEqual(before, snapshot())
             self.assertEqual(report["estimate"]["status"], "planning-estimate")
             self.assertGreater(report["estimate"]["total_seconds"], 0)
+            self.assertEqual(report["estimate"]["serving_contract"], "dynamic-h3-v1")
+            self.assertEqual(report["live_projection"]["serving_contract"], "dynamic-h3-v1")
             self.assertEqual(len(report["stages"]), 11)
             self.assertEqual(report["stages"][:2], interrupted["stages"])
             self.assertTrue(any("Resumed after interruption" in warning for warning in report["warnings"]))
             self.assertTrue(all(s["status"] == "passed" for s in report["stages"]))
             self.assertTrue((output / "tiles/current/priorities.pmtiles").is_file())
+            prepared = json.loads((output / "prepared-inputs.json").read_text())
+            crosswalk = (output / "crosswalk/current/iucn_goat_crosswalk.parquet").resolve(strict=True)
+            self.assertEqual(prepared["files"]["crosswalk"], {
+                "path": str(crosswalk), "bytes": crosswalk.stat().st_size, "sha256": sha256(crosswalk)})
+            for records in prepared["parts"].values():
+                receipt = json.loads(Path(records["receipt"]["path"]).read_text())
+                self.assertEqual(prepared["metric_identity"], receipt["identity"]["metadata"])
+            publication = json.loads((output / "tiles/current/receipt.json").read_text())
+            self.assertEqual(publication["identity"]["prepared"], prepared)
             self.assertTrue((output / "benchmark-report.md").is_file())
             events = [json.loads(line) for line in (output / "progress.jsonl").read_text().splitlines()]
             self.assertEqual(sum(e["kind"] == "geometry_done" for e in events), 4)
@@ -208,7 +249,7 @@ class BenchmarkRunnerTests(unittest.TestCase):
             self.assertTrue(any(e["stage"] == "tiles" and e["kind"] == "detail" for e in events))
             stream_work = [e for e in events if e["stage"] == "tiles" and e["kind"] == "work"]
             self.assertTrue(stream_work)
-            self.assertTrue(all(e["scope"] == "phase" and e["total"] == report["workload"]["res3_cells"] + report["workload"]["res7_cells"]
+            self.assertTrue(all(e["scope"] == "phase" and e["total"] == report["workload"]["res3_cells"]
                                 for e in stream_work))
             self.assertTrue(any(e["stage"] == "tiles" and e["kind"] == "phase" for e in events))
             coarse_metadata = json.loads((output / "coarse-tiles/map-metadata.json").read_text())
@@ -226,7 +267,7 @@ class BenchmarkRunnerTests(unittest.TestCase):
                             for row in pq.read_table(part, columns=["h3_index"]).to_pylist()}
             self.assertEqual(metric_cells, {h3.int_to_str(cell) for cell, _ in expected})
             tile_report = json.loads((output / "tiles/current/build-report.json").read_text())
-            self.assertEqual(tile_report["features"], report["workload"]["res3_cells"] + report["workload"]["res7_cells"])
+            self.assertEqual(tile_report["features"], report["workload"]["res3_cells"])
             # The memory-aware default may select one worker. Its inline kernel
             # path must preserve exactly the same pairs as process-pool mode.
             serial = root / "serial-pairs"

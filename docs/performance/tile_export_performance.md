@@ -12,8 +12,9 @@ just data-prepare --tiles
 ```
 
 This pins one source generation, aggregates the pairs, builds species metadata
-and coarse/fine metrics, records the verified preparation, and creates the static
-map. A reviewed crosswalk matching the source snapshots is required.
+and coarse/fine metrics, records the verified preparation, and creates the coarse
+archive with dynamic fine serving. A reviewed crosswalk matching the source
+snapshots is required.
 To resume only the final export, use `just data-tiles` (also exposed as
 `just global-res7-tiles`). It reads `GLOBAL_PREVIEW_ROOT/prepared-inputs.json`,
 so no separate manual `GLOBAL_H3_ROOT` handoff is needed for tile export.
@@ -23,11 +24,16 @@ The final files are:
 ```text
 GLOBAL_PREVIEW_ROOT/tiles/current/priorities.pmtiles
 GLOBAL_PREVIEW_ROOT/tiles/current/map-metadata.json
+GLOBAL_PREVIEW_ROOT/tiles/current/serving.json
 GLOBAL_PREVIEW_ROOT/tiles/current/build-report.json
 ```
 
 `current` is an atomic symlink to an immutable generation. Consumers needing
-both files across multiple requests should resolve/pin the generation path.
+related files across multiple requests should resolve/pin the generation path.
+The optional `just data-tiles --static-fine` archive publishes its PMTiles,
+metadata and report under `GLOBAL_PREVIEW_ROOT/tiles/static/current/`, with
+separate generations and receipts. It preserves the selected dynamic bundle
+and does not supply a dynamic `serving.json` for managed startup or SQL loading.
 Deployment and database loading remain separate. The old low-level
 `ark_pipeline.builders.fine_metrics tiles` command remains available for diagnostics; its
 direct output is not managed by these receipts.

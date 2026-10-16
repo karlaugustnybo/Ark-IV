@@ -83,6 +83,8 @@ def prepared_fixture(root: Path):
         "family_has_dna": True, "goat_data_deficient": False,
     }]), species)
     pq.write_table(pa.table({"gbif_accepted_id": ["1"], "system": ["Terrestrial"]}), systems)
+    crosswalk = root / "crosswalk.parquet"
+    pq.write_table(pa.table({"iucn_sis_id": [1]}), crosswalk)
     # Different H3 base cells in the same web tile exercise merging shards.
     cells = ["873e9a68affffff", "875869a48ffffff"]
     coarse = sorted({h3.cell_to_parent(cell, 3) for cell in cells})
@@ -92,6 +94,11 @@ def prepared_fixture(root: Path):
     ], schema=LIST_SCHEMA), coarse_source)
     metric_args = SimpleNamespace(species=species, species_systems=systems)
     with duckdb.connect(str(root / "build.duckdb")) as connection:
+        connection.execute("CREATE TABLE SpecInfo AS SELECT * FROM read_parquet(?)", [str(species)])
+        connection.execute("CREATE TABLE SpecSystems AS SELECT * FROM read_parquet(?)", [str(systems)])
+        connection.execute("""CREATE TABLE H3Res3Species AS SELECT lower(to_hex(h3_cell)) AS h3_index,
+            list_transform(species_ids, value -> cast(value AS VARCHAR)) AS gbif_ids FROM read_parquet(?)""",
+            [str(coarse_source)])
         prepare_species(connection, species, systems)
         for cell in cells:
             name = f"base_{h3.get_base_cell_number(cell)}.parquet"
@@ -109,12 +116,12 @@ def prepared_fixture(root: Path):
     template.write_text(json.dumps({key: {system.lower(): {"min": 0, "max": 1} for system in SYSTEMS}
                                     for key in ("score_domains", "species_normalized_score_domains")}))
     record_args = SimpleNamespace(h3_root=h3_root, parts_dir=parts, species=species,
-                                  species_systems=systems, build_duckdb=root / "build.duckdb",
+                                  species_systems=systems, crosswalk=crosswalk, build_duckdb=root / "build.duckdb",
                                   metadata_template=template, output=root / "prepared.json")
     record_prepared(record_args)
     boundaries = root / "boundaries.json"
     boundary_fixture(boundaries)
-    options = ["build", "--prepared-inputs", str(record_args.output), "--output-dir", str(root / "tiles"),
+    options = ["build", "--static-fine", "--prepared-inputs", str(record_args.output), "--output-dir", str(root / "tiles"),
                "--scratch-dir", str(root / "scratch")]
     for key in BOUNDARIES:
         options.extend(["--" + key.replace("_", "-"), str(boundaries)])
@@ -131,7 +138,7 @@ class TilePublicationTests(unittest.TestCase):
             args.checkpoint_shards = True
             report = build(args)
             self.assertEqual(report["features"], 4)
-            current = root / "tiles/current"
+            current = root / "tiles/static/current"
             first = current.resolve()
             metadata = json.loads((current / "map-metadata.json").read_text())
             self.assertEqual(metadata["complete_resolutions"], [3, 7])
@@ -202,12 +209,12 @@ class TilePublicationTests(unittest.TestCase):
                 report = build(args)
                 self.assertEqual(report["compilation"]["features"], 4)
                 self.assertTrue(build(args)["reused"])
-            previous = (root / "tiles/current").resolve()
+            previous = (root / "tiles/static/current").resolve()
             args.admin0.write_text(args.admin0.read_text() + "\n")
             with patch("ark_pipeline.cli.serving_tiles.stream_query", side_effect=ValueError("stream failed")):
                 with self.assertRaisesRegex(ValueError, "stream failed"):
                     build(args)
-            self.assertEqual((root / "tiles/current").resolve(), previous)
+            self.assertEqual((root / "tiles/static/current").resolve(), previous)
 
     def test_source_changes_and_incomplete_coverage_are_rejected(self):
         with tempfile.TemporaryDirectory() as temporary:

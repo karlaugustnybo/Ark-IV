@@ -248,6 +248,7 @@ global-prepare: global-build-preview global-res7-aggregate
       --build-duckdb data/global/build.duckdb \
       --species data/global/species/species.parquet \
       --species-systems data/global/species/species_systems.parquet \
+      --crosswalk "{{ global_crosswalk_path }}" \
       --metadata-template data/global/tiles/map-metadata.json \
       --output "{{ global_preview_root }}/prepared-inputs.json"
 
@@ -287,8 +288,8 @@ global-db-configure:
 # Load the compact global preview exports into the separate preview database.
 [group('05 - Serving stages')]
 global-db-load:
-    DATABASE_URL='{{ global_database_url }}' EXPORT_DIR=./data/global/exports \
-      uv run python -m backend.load_postgres
+    DATABASE_URL='{{ global_database_url }}' uv run python -m ark_pipeline.cli.map_serving load \
+      --config "${GLOBAL_SERVING_CONFIG:-{{ global_preview_root }}/tiles/current/serving.json}"
 
 # Resume global resolution-7 aggregation; stale metric schemas rebuild automatically.
 [positional-arguments]
@@ -302,7 +303,7 @@ global-res7-aggregate *args:
       --scratch-dir "{{ global_preview_root }}/scratch" \
       --memory-limit "${DUCKDB_MEMORY_LIMIT:-750MB}" "$@"
 
-# Resume a full PMTiles snapshot from the exact recorded preparation generation.
+# Prepare coarse PMTiles and dynamic fine H3 serving from recorded inputs.
 [positional-arguments]
 [group('02 - Data workflow')]
 data-tiles *args:
@@ -311,7 +312,7 @@ data-tiles *args:
       --output-dir "{{ global_preview_root }}/tiles" \
       --scratch-dir "{{ global_preview_root }}/scratch/tippecanoe" "$@"
 
-# Compatibility alias for the managed static snapshot build.
+# Compatibility alias for managed map serving.
 [group('05 - Serving stages')]
 global-res7-tiles: data-tiles
 
@@ -326,22 +327,8 @@ data-boundaries:
 global-start:
     #!/usr/bin/env zsh
     set -euo pipefail
-    source_parts="{{ global_h3_root }}/res7_merged_parts"
-    aggregate_parts="{{ global_preview_root }}/res7_aggregates"
-    test -d "$source_parts" || {
-      print -u2 "Global resolution-7 source partitions are unavailable: $source_parts"
-      exit 1
-    }
-    test -d "$aggregate_parts" || {
-      print -u2 "Global resolution-7 aggregate partitions are unavailable: $aggregate_parts"
-      exit 1
-    }
-    DATABASE_URL='{{ global_database_url }}' \
-      SOURCE_DUCKDB_PATH=./data/global/source.duckdb \
-      BUILD_DUCKDB_PATH=./data/global/build.duckdb \
-      EXPORT_DIR=./data/global/exports TILE_DIR=./data/global/tiles \
-      PMTILES_PATH=./data/global/tiles/priorities.pmtiles \
-      MAP_METADATA_PATH=./data/global/tiles/map-metadata.json \
-      RES7_PARTS_DIR="$source_parts" \
-      RES7_AGGREGATE_PARTS_DIR="$aggregate_parts" \
-      just serve
+    source_args=(--preview-root "{{ global_preview_root }}")
+    if [[ -n "${GLOBAL_SERVING_CONFIG:-}" ]]; then
+      source_args=(--config "$GLOBAL_SERVING_CONFIG")
+    fi
+    DATABASE_URL='{{ global_database_url }}' uv run python -m ark_pipeline.cli.map_serving start "${source_args[@]}"
