@@ -1,3 +1,4 @@
+import { withCoverageProfile } from '$lib/map/coverageProfile';
 import {
   PUBLIC_API_BASE_URL,
   PUBLIC_BASEMAP_URL,
@@ -8,6 +9,6 @@ import {
 export const config = {
   apiBaseUrl: PUBLIC_API_BASE_URL,
   basemapUrl: PUBLIC_BASEMAP_URL,
-  mapMetadataUrl: PUBLIC_MAP_METADATA_URL,
-  tileUrl: PUBLIC_TILE_URL
+  mapMetadataUrl: withCoverageProfile(PUBLIC_MAP_METADATA_URL),
+  tileUrl: withCoverageProfile(PUBLIC_TILE_URL)
 };

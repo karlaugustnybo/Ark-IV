@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { withCoverageProfile } from '$lib/map/coverageProfile';
   import { onMount } from 'svelte';
   import '../app.css';
   import { preloadMapBundle, preloadMapBundleInIdleTime } from '$lib/map/mapBundle';
@@ -27,17 +28,9 @@
 </svelte:head>
 
 <nav class="site-navbar">
-  <div class="nav-left"><a class="nav-brand" href="/">Ark-<i>IV</i></a></div>
+  <div class="nav-left"><a class="nav-brand" href={withCoverageProfile('/')}>Ark-<i>IV</i></a></div>
   <div class="nav-right" role="navigation" aria-label="Main">
-    <a href="/table"><span>Table</span></a><a
-      href="/map"
-      onclick={navigateToPreloadedMap}
-      onpointerenter={warmMap}
-      onfocus={warmMap}
-      onpointerdown={warmMap}><span>Map</span></a
-    ><a href="/tutorial"><span>Tutorial</span></a><a href="/about-data"
-      ><span>About the Data</span></a
-    >
+    <a href={withCoverageProfile('/table')}><span>Table</span></a><a href={withCoverageProfile('/map')} onclick={navigateToPreloadedMap} onpointerenter={warmMap} onfocus={warmMap} onpointerdown={warmMap}><span>Map</span></a><a href={withCoverageProfile('/tutorial')}><span>Tutorial</span></a><a href={withCoverageProfile('/about-data')}><span>About the Data</span></a>
   </div>
 </nav>
 {@render children()}

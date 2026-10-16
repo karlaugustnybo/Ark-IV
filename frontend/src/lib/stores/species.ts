@@ -24,3 +24,6 @@ export const speciesHighlight = writable<SpeciesHighlightState>({
   resolution: 3
 });
 export const speciesHighlightGradient = writable(false);
+
+export const includePassage = writable(false);
+export const passageAvailable = writable(false);

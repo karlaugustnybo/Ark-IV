@@ -304,6 +304,9 @@
         {/each}
       </dl>
     </section>
+    {#if $cellDetails.species_data_unavailable}
+      <p role="status">Species records for this fine cell are unavailable. Aggregate map scores remain available.</p>
+    {:else}
     <div class="cell-stats">
       {#each [['Total species', $cellDetails.stats?.total ?? 0], ['Critically Endangered', $cellDetails.stats?.CR ?? 0], ['Endangered', $cellDetails.stats?.EN ?? 0], ['Vulnerable', $cellDetails.stats?.VU ?? 0], ['Near Threatened', $cellDetails.stats?.NT ?? 0], ['Data Deficient', $cellDetails.stats?.DD ?? 0], ['Least Concern', $cellDetails.stats?.LC ?? 0], ['Missing species DNA', $cellDetails.stats?.missing_species_dna ?? 0], ['Missing genus DNA', $cellDetails.stats?.missing_genus_dna ?? 0], ['Missing family DNA', $cellDetails.stats?.missing_family_dna ?? 0], ['GoaT data deficient', $cellDetails.stats?.goat_data_deficient ?? 0]] as stat}
         <div class="stat-card">
@@ -365,6 +368,7 @@
         >
       </div>
     </div>
+    {/if}
   {/if}
 </section>
 

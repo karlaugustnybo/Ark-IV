@@ -2,7 +2,7 @@
   "info": {
     "title": "Ark-IV API",
     "version": "1.0.0",
-    "description": "Typed serving API for species and H3 cell details. Coarse map data uses PMTiles and fine global cells use cached on-demand tiles."
+    "description": "Typed serving API for species and H3 cell details. Coarse map data uses Arrow/PMTiles and fine global cells use cached on-demand tiles. coverage_profile selects matching SQL and map artifacts. Score weights and threat/DNA products must be finite. Cell IDs must be valid H3 cells matching resolution; nonempty ecosystem filters must be canonical."
   },
   "openapi": "3.1.0",
   "servers": [
@@ -11,10 +11,104 @@
     }
   ],
   "paths": {
+    "/api/coverage-profiles": {
+      "get": {
+        "summary": "CoverageProfiles",
+        "operationId": "getCoverageProfiles",
+        "parameters": [
+          {
+            "name": "coverage_profile",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "resident",
+                "with-passage"
+              ],
+              "default": "resident"
+            },
+            "required": false,
+            "deprecated": false,
+            "allowEmptyValue": false,
+            "allowReserved": false
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Request fulfilled, document follows",
+            "headers": {},
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoverageProfilesResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request syntax or unsupported method",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "status_code": {
+                      "type": "integer"
+                    },
+                    "detail": {
+                      "type": "string"
+                    },
+                    "extra": {
+                      "additionalProperties": {},
+                      "type": [
+                        "null",
+                        "object",
+                        "array"
+                      ]
+                    }
+                  },
+                  "type": "object",
+                  "required": [
+                    "detail",
+                    "status_code"
+                  ],
+                  "description": "Validation Exception",
+                  "examples": [
+                    {
+                      "status_code": 400,
+                      "detail": "Bad Request",
+                      "extra": {}
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "deprecated": false
+      }
+    },
     "/api/health": {
       "get": {
         "summary": "Health",
         "operationId": "getHealth",
+        "parameters": [
+          {
+            "name": "coverage_profile",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "resident",
+                "with-passage"
+              ],
+              "default": "resident"
+            },
+            "required": false,
+            "deprecated": false,
+            "allowEmptyValue": false,
+            "allowReserved": false
+          }
+        ],
         "responses": {
           "200": {
             "description": "Request fulfilled, document follows",
@@ -23,6 +117,44 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request syntax or unsupported method",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "status_code": {
+                      "type": "integer"
+                    },
+                    "detail": {
+                      "type": "string"
+                    },
+                    "extra": {
+                      "additionalProperties": {},
+                      "type": [
+                        "null",
+                        "object",
+                        "array"
+                      ]
+                    }
+                  },
+                  "type": "object",
+                  "required": [
+                    "detail",
+                    "status_code"
+                  ],
+                  "description": "Validation Exception",
+                  "examples": [
+                    {
+                      "status_code": 400,
+                      "detail": "Bad Request",
+                      "extra": {}
+                    }
+                  ]
                 }
               }
             }
@@ -35,6 +167,24 @@
       "get": {
         "summary": "Stats",
         "operationId": "getStats",
+        "parameters": [
+          {
+            "name": "coverage_profile",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "resident",
+                "with-passage"
+              ],
+              "default": "resident"
+            },
+            "required": false,
+            "deprecated": false,
+            "allowEmptyValue": false,
+            "allowReserved": false
+          }
+        ],
         "responses": {
           "200": {
             "description": "Request fulfilled, document follows",
@@ -43,6 +193,44 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/StatsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request syntax or unsupported method",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "status_code": {
+                      "type": "integer"
+                    },
+                    "detail": {
+                      "type": "string"
+                    },
+                    "extra": {
+                      "additionalProperties": {},
+                      "type": [
+                        "null",
+                        "object",
+                        "array"
+                      ]
+                    }
+                  },
+                  "type": "object",
+                  "required": [
+                    "detail",
+                    "status_code"
+                  ],
+                  "description": "Validation Exception",
+                  "examples": [
+                    {
+                      "status_code": 400,
+                      "detail": "Bad Request",
+                      "extra": {}
+                    }
+                  ]
                 }
               }
             }
@@ -358,6 +546,22 @@
             "deprecated": false,
             "allowEmptyValue": false,
             "allowReserved": false
+          },
+          {
+            "name": "coverage_profile",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "resident",
+                "with-passage"
+              ],
+              "default": "resident"
+            },
+            "required": false,
+            "deprecated": false,
+            "allowEmptyValue": false,
+            "allowReserved": false
           }
         ],
         "responses": {
@@ -444,6 +648,22 @@
             "deprecated": false,
             "allowEmptyValue": false,
             "allowReserved": false
+          },
+          {
+            "name": "coverage_profile",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "resident",
+                "with-passage"
+              ],
+              "default": "resident"
+            },
+            "required": false,
+            "deprecated": false,
+            "allowEmptyValue": false,
+            "allowReserved": false
           }
         ],
         "responses": {
@@ -520,6 +740,34 @@
             "schema": {
               "type": "integer",
               "default": 3
+            },
+            "required": false,
+            "deprecated": false,
+            "allowEmptyValue": false,
+            "allowReserved": false
+          },
+          {
+            "name": "include_passage",
+            "in": "query",
+            "schema": {
+              "type": "boolean",
+              "default": false
+            },
+            "required": false,
+            "deprecated": false,
+            "allowEmptyValue": false,
+            "allowReserved": false
+          },
+          {
+            "name": "coverage_profile",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "resident",
+                "with-passage"
+              ],
+              "default": "resident"
             },
             "required": false,
             "deprecated": false,
@@ -613,6 +861,22 @@
             "schema": {
               "type": "string",
               "default": ""
+            },
+            "required": false,
+            "deprecated": false,
+            "allowEmptyValue": false,
+            "allowReserved": false
+          },
+          {
+            "name": "coverage_profile",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "resident",
+                "with-passage"
+              ],
+              "default": "resident"
             },
             "required": false,
             "deprecated": false,
@@ -722,7 +986,18 @@
             "type": "array"
           },
           "stats": {
-            "$ref": "#/components/schemas/CellStats"
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/CellStats"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "species_data_unavailable": {
+            "type": "boolean",
+            "default": false
           }
         },
         "type": "object",
@@ -788,6 +1063,30 @@
           },
           "dna_level": {
             "type": "string"
+          },
+          "metadata_status": {
+            "type": "string",
+            "default": "assessed"
+          },
+          "spatial_redlist_category": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "iucn_assessment_latest": {
+            "oneOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "type": "object",
@@ -855,6 +1154,45 @@
         "required": [],
         "title": "CellStats"
       },
+      "CoverageProfile": {
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "available": {
+            "type": "boolean"
+          }
+        },
+        "type": "object",
+        "required": [
+          "available",
+          "id",
+          "label"
+        ],
+        "title": "CoverageProfile"
+      },
+      "CoverageProfilesResponse": {
+        "properties": {
+          "selected": {
+            "type": "string"
+          },
+          "profiles": {
+            "items": {
+              "$ref": "#/components/schemas/CoverageProfile"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object",
+        "required": [
+          "profiles",
+          "selected"
+        ],
+        "title": "CoverageProfilesResponse"
+      },
       "HealthResponse": {
         "properties": {
           "status": {
@@ -891,6 +1229,14 @@
               "type": "string"
             },
             "type": "array"
+          },
+          "include_passage": {
+            "type": "boolean",
+            "default": false
+          },
+          "passage_available": {
+            "type": "boolean",
+            "default": false
           }
         },
         "type": "object",
@@ -992,6 +1338,30 @@
           },
           "priority": {
             "type": "number"
+          },
+          "metadata_status": {
+            "type": "string",
+            "default": "assessed"
+          },
+          "spatial_redlist_category": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "iucn_assessment_latest": {
+            "oneOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "type": "object",

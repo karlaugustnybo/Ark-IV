@@ -77,9 +77,10 @@ without metadata. `just data-prepare` continues through aggregation,
 metadata, the coarse map, and fine metrics using the selected spatial profile.
 It requires a current crosswalk; add `--crosswalk-mode refresh` to select the
 automatic crosswalk workflow. `just data-prepare --dry-run` shows its plan.
-Use `just data-prepare --tiles` to finish with a static PMTiles archive, or
-`just data-tiles` to resume only the export. The archive and map metadata are
-published together under `GLOBAL_PREVIEW_ROOT/tiles/current/`.
+Use `just data-prepare --tiles` to finish with coarse PMTiles and dynamic fine
+serving, or `just data-tiles` to resume only serving preparation. The archive,
+metadata, fine partitions, boundaries and available SQL exports are published
+as a bundle under `GLOBAL_PREVIEW_ROOT/tiles/current/`.
 Global ADM2 boundaries (49,308 areas across 180 available countries) are installed
 with `just data-boundaries`, also run during global map preparation. Country-sized
 catalogues keep the worldwide geometry out of browser downloads.
@@ -191,6 +192,7 @@ crosswalk as described in the [pipeline guide](docs/pipeline/01_data_pipeline.md
 
 ```bash
 just global-prepare
+just data-tiles
 just global-db-configure
 just global-db-load
 ```
@@ -201,8 +203,10 @@ metrics with their canonical SQL expressions; see the
 [reduction and validation details](docs/performance/serving_metrics_performance.md).
 End-to-end performance remains unbenchmarked. `RES7_WORKERS=1` and a smaller
 `DUCKDB_MEMORY_LIMIT` provide a bounded mode for memory-constrained machines.
-The optional `just global-res7-tiles` creates a much larger static snapshot;
-normal serving does not require it.
+Use `just data-tiles --static-fine` for an optional full fine PMTiles snapshot
+under `GLOBAL_PREVIEW_ROOT/tiles/static/current/`; the dynamic `tiles/current/`
+bundle remains selected for startup and SQL loading.
+Normal serving uses on-demand fine tiles.
 
 ## Run locally
 
@@ -212,6 +216,12 @@ partitions are present:
 ```bash
 just start
 ```
+
+`just start` selects the published serving bundle, or a compatible legacy preview.
+`GLOBAL_SERVING_CONFIG` selects an explicit validated bundle; `global-db-load`
+loads its recorded SQL exports. [Coverage profiles](docs/pipeline/coverage_profiles.md)
+describes separate resident/passage registration, the optional species-range
+supplement, unavailable fine evidence and archive revalidation.
 
 The launcher checks the required paths, starts Granian and Vite, and chooses
 free API/frontend ports when the configured ones are occupied. It prints the

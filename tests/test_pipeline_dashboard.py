@@ -106,7 +106,9 @@ class LiveEstimateTests(unittest.TestCase):
         self.assertEqual(model.counts[1], 7)
 
     def test_live_workload_replaces_sample_density_assumptions(self):
-        model = Forecast(prior(), RESOURCES)
+        stale = Forecast(prior(), RESOURCES)
+        self.assertNotIn("tiles", stale.base)
+        model = Forecast({**prior(), "serving_contract": "dynamic-h3-v1"}, RESOURCES)
         model.accept({"stage": "lists", "kind": "workload", "counts": {"res7_cells": 200, "res7_relationships": 4000, "res3_cells": 20}})
         self.assertEqual(model.base["fine_metrics"], 300)  # average of 2x cells and 4x relationships
         self.assertEqual(model.base["tiles"], 200)

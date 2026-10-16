@@ -4,6 +4,23 @@
  */
 
 export interface paths {
+    "/api/coverage-profiles": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** CoverageProfiles */
+        get: operations["getCoverageProfiles"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/health": {
         parameters: {
             query?: never;
@@ -123,7 +140,9 @@ export interface components {
             resolution: number;
             boundaries?: components["schemas"]["CellBoundaryMembership"][];
             species?: components["schemas"]["CellSpeciesRow"][];
-            stats?: components["schemas"]["CellStats"];
+            stats?: components["schemas"]["CellStats"] | null;
+            /** @default false */
+            species_data_unavailable: boolean;
         };
         /** CellSpeciesRow */
         CellSpeciesRow: {
@@ -136,6 +155,10 @@ export interface components {
             family: string;
             redlist_category: string;
             dna_level: string;
+            /** @default assessed */
+            metadata_status: string;
+            spatial_redlist_category?: string | null;
+            iucn_assessment_latest?: boolean | null;
         };
         /** CellStats */
         CellStats: {
@@ -162,6 +185,17 @@ export interface components {
             /** @default 0 */
             goat_data_deficient: number;
         };
+        /** CoverageProfile */
+        CoverageProfile: {
+            id: string;
+            label: string;
+            available: boolean;
+        };
+        /** CoverageProfilesResponse */
+        CoverageProfilesResponse: {
+            selected: string;
+            profiles: components["schemas"]["CoverageProfile"][];
+        };
         /** HealthResponse */
         HealthResponse: {
             status: string;
@@ -174,6 +208,10 @@ export interface components {
             species_name: string;
             resolution: number;
             cells?: string[];
+            /** @default false */
+            include_passage: boolean;
+            /** @default false */
+            passage_available: boolean;
         };
         /** SpeciesPage */
         SpeciesPage: {
@@ -200,6 +238,10 @@ export interface components {
             threat_score: number;
             dna_level: string;
             priority: number;
+            /** @default assessed */
+            metadata_status: string;
+            spatial_redlist_category?: string | null;
+            iucn_assessment_latest?: boolean | null;
         };
         /** SpeciesSuggestion */
         SpeciesSuggestion: {
@@ -231,9 +273,48 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    getCoverageProfiles: {
+        parameters: {
+            query?: {
+                coverage_profile?: "resident" | "with-passage";
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Request fulfilled, document follows */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CoverageProfilesResponse"];
+                };
+            };
+            /** @description Bad request syntax or unsupported method */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        status_code: number;
+                        detail: string;
+                        extra?: null | {
+                            [key: string]: unknown;
+                        } | unknown[];
+                    };
+                };
+            };
+        };
+    };
     getHealth: {
         parameters: {
-            query?: never;
+            query?: {
+                coverage_profile?: "resident" | "with-passage";
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -249,11 +330,28 @@ export interface operations {
                     "application/json": components["schemas"]["HealthResponse"];
                 };
             };
+            /** @description Bad request syntax or unsupported method */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        status_code: number;
+                        detail: string;
+                        extra?: null | {
+                            [key: string]: unknown;
+                        } | unknown[];
+                    };
+                };
+            };
         };
     };
     getStats: {
         parameters: {
-            query?: never;
+            query?: {
+                coverage_profile?: "resident" | "with-passage";
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -267,6 +365,21 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["StatsResponse"];
+                };
+            };
+            /** @description Bad request syntax or unsupported method */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        status_code: number;
+                        detail: string;
+                        extra?: null | {
+                            [key: string]: unknown;
+                        } | unknown[];
+                    };
                 };
             };
         };
@@ -299,6 +412,7 @@ export interface operations {
                 municipality?: string;
                 eez?: string;
                 conservation_framework?: string;
+                coverage_profile?: "resident" | "with-passage";
             };
             header?: never;
             path?: never;
@@ -337,6 +451,7 @@ export interface operations {
             query?: {
                 search?: string;
                 limit?: number;
+                coverage_profile?: "resident" | "with-passage";
             };
             header?: never;
             path?: never;
@@ -374,6 +489,8 @@ export interface operations {
         parameters: {
             query?: {
                 resolution?: number;
+                include_passage?: boolean;
+                coverage_profile?: "resident" | "with-passage";
             };
             header?: never;
             path: {
@@ -414,6 +531,7 @@ export interface operations {
             query?: {
                 resolution?: number;
                 system?: string;
+                coverage_profile?: "resident" | "with-passage";
             };
             header?: never;
             path: {

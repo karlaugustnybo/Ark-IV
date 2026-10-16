@@ -12,15 +12,30 @@ import shutil
 import subprocess
 import sys
 import time
+from copy import copy
 from importlib.metadata import version
 from pathlib import Path
 from types import SimpleNamespace
 
 import duckdb
 import psutil
+import pyarrow as pa
+import pyarrow.ipc as ipc
 import pyarrow.parquet as pq
 
-from ark_pipeline.builders.coarse_cache import sql_path, wide_aggregate_query
+from ark_pipeline.aggregation.pairs import RES3_PARENT_SQL
+from ark_pipeline.builders.coarse_cache import (
+    BOUNDARY_TILE_PROPERTIES,
+    COARSE_SNAPSHOT_SCHEMA_VERSION,
+    METRIC_TILE_NAMES,
+    METRICS,
+    SYSTEM_TILE_PREFIXES,
+    SYSTEMS,
+    aggregate_partition_query,
+    coarse_snapshot_query,
+    sql_path,
+    wide_aggregate_query,
+)
 from ark_pipeline.builders.fine_metrics import (
     aggregate_input_identity,
     aggregate_receipt_matches,
@@ -114,8 +129,26 @@ def record_prepared(args: argparse.Namespace) -> dict:
             "build_duckdb": args.build_duckdb, "metadata": args.metadata_template,
             "species": args.species, "species_systems": args.species_systems,
             "coarse_source": coarse_source,
+            "crosswalk": args.crosswalk,
         }.items()},
     }
+    snapshot = json.loads(args.metadata_template.read_text()).get("coarse_snapshot")
+    if snapshot:
+        report["files"]["coarse_snapshot"] = file_record(args.metadata_template.parent / Path(snapshot["url"]).name)
+    passage = args.species.parent / "species_passage_cells_res3.parquet"
+    if passage.is_file():
+        receipt_path = passage.with_suffix(".report.json")
+        receipt = json.loads(receipt_path.read_text())
+        if (receipt.get("status") != "passed" or receipt.get("scope") != "species-range-overlay"
+                or receipt.get("resolution") != 3 or receipt.get("output_sha256") != sha256(passage)
+                or receipt.get("species_sha256") != report["files"]["species"]["sha256"]):
+            raise ValueError("Passage supplement does not match the prepared species metadata")
+        report["files"]["species_passage"] = file_record(passage)
+        report["files"]["species_passage_report"] = file_record(receipt_path)
+    exports = args.build_duckdb.parent / "exports"
+    report["exports"] = {path.name: file_record(path) for path in sorted(exports.glob("*.parquet"))
+                         if not path.name.startswith(".")}
+    validate_exports(report)
     for base, source in sources.items():
         if aggregate_input_identity(metric_args, source) != identities[base]:
             raise ValueError("Metric input changed while recording prepared inputs")
@@ -129,11 +162,230 @@ def record_prepared(args: argparse.Namespace) -> dict:
     return report
 
 
+def validate_exports(report: dict) -> None:
+    """Reconcile consumed metadata and optional SQL exports with the coarse build."""
+    validate_coarse_membership(report)
+    exports = report.get("exports", {})
+    if "species_passage_cells_res3.parquet" in exports and "species_passage" not in report["files"]:
+        raise ValueError("Passage exports require a receipt-verified explicit passage supplement beside species metadata")
+    required = {"species.parquet", "species_systems.parquet", "cell_species_lists.parquet"}
+    if exports and not required <= exports.keys():
+        raise ValueError("Incomplete PostgreSQL export set")
+    with duckdb.connect(report["files"]["build_duckdb"]["path"], read_only=True) as connection:
+        configure_duckdb(connection)
+        validate_fine_membership(connection, report)
+        # Source/build producers copy the supplied species dimension verbatim.
+        # Compare all supplied fields, including optional identity/evidence fields;
+        # an older schema can omit them, but supplied values must not be stale.
+        species_path = report["files"]["species"]["path"]
+        names = pq.ParquetFile(species_path).schema_arrow.names
+        build_names = {row[0] for row in connection.execute("DESCRIBE SpecInfo").fetchall()}
+        if not set(names) <= build_names:
+            raise ValueError("Consumed species metadata does not match prepared build: missing fields")
+        columns = ", ".join('"' + name.replace('"', '""') + '"' for name in names)
+        metadata_queries = {
+            "species": (f"SELECT {columns} FROM SpecInfo", f"SELECT {columns} FROM read_parquet(?)"),
+            "species_systems": (
+                "SELECT DISTINCT gbif_accepted_id, system FROM SpecSystems WHERE system IN ('Terrestrial','Freshwater','Marine')",
+                "SELECT DISTINCT gbif_accepted_id, system FROM read_parquet(?) WHERE system IN ('Terrestrial','Freshwater','Marine')",
+            ),
+        }
+        for name, (expected, actual) in metadata_queries.items():
+            mismatch = connection.execute(f"""
+                WITH expected AS ({expected}), actual AS ({actual})
+                SELECT count(*) FROM ((SELECT * FROM expected EXCEPT ALL SELECT * FROM actual)
+                UNION ALL (SELECT * FROM actual EXCEPT ALL SELECT * FROM expected))
+            """, [report["files"][name]["path"]]).fetchone()[0]
+            if mismatch:
+                raise ValueError(f"Consumed {name} metadata does not match prepared build")
+        validate_coarse_metrics(connection)
+        validate_coarse_snapshot(connection, report)
+        if not exports:
+            return  # Maps without SQL still require matching coarse/fine metadata.
+        queries = {
+            "species.parquet": "SELECT {columns} FROM SpecInfo",
+            "species_systems.parquet": "SELECT DISTINCT gbif_accepted_id, system FROM SpecSystems WHERE system IN ('Terrestrial','Freshwater','Marine')",
+            "cell_species_lists.parquet": "SELECT CAST(CAST('0x' || h3_index AS UBIGINT) AS BIGINT) AS h3_index, 3::SMALLINT AS resolution, gbif_ids AS species_ids FROM H3Res3Species",
+        }
+        # Optional inverse/expanded tables feed species highlights and legacy
+        # detail readers. They must agree with the same coarse membership.
+        if "species_cells_res3.parquet" in exports:
+            queries["species_cells_res3.parquet"] = """
+                SELECT ids.gbif_id AS gbif_accepted_id, 3::SMALLINT AS resolution,
+                    list_sort(list(CAST(CAST('0x' || hs.h3_index AS UBIGINT) AS BIGINT))) AS h3_indexes
+                FROM H3Res3Species hs, UNNEST(hs.gbif_ids) AS ids(gbif_id)
+                GROUP BY ids.gbif_id
+            """
+        if "cell_species.parquet" in exports:
+            queries["cell_species.parquet"] = """
+                SELECT CAST(CAST('0x' || hs.h3_index AS UBIGINT) AS BIGINT) AS h3_index,
+                    3::SMALLINT AS resolution, ids.gbif_id AS gbif_accepted_id
+                FROM H3Res3Species hs, UNNEST(hs.gbif_ids) AS ids(gbif_id)
+            """
+        for name, query in queries.items():
+            path = exports[name]["path"]
+            names = pq.ParquetFile(path).schema_arrow.names
+            columns = ", ".join('"' + column.replace('"', '""') + '"' for column in names)
+            query = query.format(columns=columns)
+            actual = f"SELECT {columns} FROM read_parquet(?)"
+            if name == "species_cells_res3.parquet":
+                actual = "SELECT gbif_accepted_id, resolution, list_sort(h3_indexes) AS h3_indexes FROM read_parquet(?)"
+            # This serving contract loads coarse SQL lists; fine lists stay external.
+            mismatch = connection.execute(f"""
+                WITH expected AS ({query}), actual AS ({actual})
+                SELECT count(*) FROM ((SELECT * FROM expected EXCEPT ALL SELECT * FROM actual)
+                UNION ALL (SELECT * FROM actual EXCEPT ALL SELECT * FROM expected))
+            """, [path]).fetchone()[0]
+            if mismatch:
+                raise ValueError(f"PostgreSQL export does not match prepared build: {name}")
+
+
+def validate_fine_membership(connection: duckdb.DuckDBPyConnection, report: dict) -> None:
+    """Reconcile raw source IDs before the shared explicit serving-ID mapping.
+
+    Legacy/manual packs have no trustworthy common producer receipt. Reduce
+    the fine lists natively to the distinct parent/species relation instead;
+    DuckDB's configured memory and spill govern the scan, not Python lists.
+    """
+    sources = [records["source"]["path"] for records in report["parts"].values()]
+    mismatch = connection.execute(f"""
+        WITH fine AS (
+            SELECT h3_cell AS h3_index, unnest(species_ids) AS species_id
+            FROM read_parquet(?)
+        ), expected AS MATERIALIZED (SELECT DISTINCT {RES3_PARENT_SQL} AS h3_cell, species_id FROM fine),
+        actual AS MATERIALIZED (SELECT DISTINCT h3_cell, unnest(species_ids) AS species_id FROM read_parquet(?))
+        SELECT count(*) FROM ((SELECT * FROM expected EXCEPT SELECT * FROM actual)
+        UNION ALL (SELECT * FROM actual EXCEPT SELECT * FROM expected))
+    """, [sources, report["files"]["coarse_source"]["path"]]).fetchone()[0]
+    if mismatch:
+        raise ValueError("Coarse source does not match fine parent membership; rerun just data-prepare")
+
+
+def validate_coarse_metrics(connection: duckdb.DuckDBPyConnection) -> None:
+    """Reconcile scored aggregates with current dimensions and mapped membership.
+
+    Recompute one base cell at a time using the materializer's exact SQL. Legacy
+    packs may represent a zero-species ecosystem with either no row or a single
+    zero row; retain both representations, while rejecting extras/duplicates.
+    Only the small set of base-cell numbers leaves DuckDB.
+    """
+    base = "((CAST('0x' || h3_index AS UBIGINT) >> 45) & 127)"
+    tables = ['H3Res3Species', *(f'h3_res3_agg_{system}' for system in SYSTEMS)]
+    bases = connection.execute(' UNION '.join(f'SELECT DISTINCT {base} AS base_cell FROM {table}' for table in tables)).fetchall()
+    metrics = ', '.join(f'coalesce("{metric}", 0) AS "{metric}"' for metric in METRICS)
+    for (base_cell,) in bases:
+        if base_cell is None:
+            raise ValueError("Coarse scored metrics contain a null cell")
+        predicate = f"{base} = {int(base_cell)}"
+        query = aggregate_partition_query(3, predicate.replace('h3_index', 'hs.h3_index'))
+        expected, actual = [], []
+        for system in SYSTEMS:
+            suffix = system.lower()
+            projection = ', '.join(f'"{metric}__{suffix}" AS "{metric}"' for metric in METRICS)
+            expected.append(f"""SELECT '{system}' AS system, h3_index, {projection} FROM recomputed
+                WHERE "total_species__{suffix}" > 0 OR EXISTS (
+                    SELECT 1 FROM actual WHERE actual.system = '{system}' AND actual.h3_index = recomputed.h3_index)
+            """)
+            actual.append(f"SELECT '{system}' AS system, h3_index, {metrics} FROM h3_res3_agg_{system} WHERE {predicate}")
+        mismatch = connection.execute(f"""
+            WITH recomputed AS MATERIALIZED ({query}),
+            actual AS MATERIALIZED ({' UNION ALL '.join(actual)}),
+            expected AS ({' UNION ALL '.join(expected)})
+            SELECT count(*) FROM ((SELECT * FROM expected EXCEPT ALL SELECT * FROM actual)
+            UNION ALL (SELECT * FROM actual EXCEPT ALL SELECT * FROM expected))
+        """).fetchone()[0]
+        if mismatch:
+            raise ValueError("Coarse scored metrics do not match current dimensions and membership; rerun just data-prepare")
+
+
+def validate_coarse_snapshot(connection: duckdb.DuckDBPyConnection, report: dict) -> None:
+    """Stream a selected Arrow snapshot against its current producer projection."""
+    files = report["files"]
+    descriptor = json.loads(Path(files["metadata"]["path"]).read_text()).get("coarse_snapshot")
+    if not descriptor:
+        if "coarse_snapshot" in files:
+            raise ValueError("Prepared coarse snapshot is absent from its metadata template")
+        return
+    expected_descriptor = {
+        "format": "arrow-ipc-v1", "schema_version": COARSE_SNAPSHOT_SCHEMA_VERSION,
+        "resolution": 3, "systems": [SYSTEM_TILE_PREFIXES[system] for system in SYSTEMS],
+        "metrics": list(METRIC_TILE_NAMES.values()), "boundary_columns": list(BOUNDARY_TILE_PROPERTIES),
+    }
+    if any(descriptor.get(key) != value for key, value in expected_descriptor.items()):
+        raise ValueError("Invalid coarse snapshot descriptor; rerun just data-prepare")
+    path = Path(files["metadata"]["path"]).parent / Path(descriptor["url"]).name
+    if "coarse_snapshot" not in files or path.resolve() != Path(files["coarse_snapshot"]["path"]):
+        raise ValueError("Coarse snapshot does not match its recorded metadata dependency")
+    query = coarse_snapshot_query()
+    columns = [column[0] for column in connection.execute(f"DESCRIBE ({query})").fetchall()]
+    with ipc.open_file(path) as reader:
+        if not set(columns + list(BOUNDARY_TILE_PROPERTIES)) <= set(reader.schema.names):
+            raise ValueError("Invalid coarse snapshot columns; rerun just data-prepare")
+        batches = pa.RecordBatchReader.from_batches(reader.schema,
+            (reader.get_batch(index) for index in range(reader.num_record_batches)))
+        connection.register("prepared_snapshot", batches)
+        try:
+            projection = ", ".join('"' + name + '"' for name in columns)
+            mismatch, cells = connection.execute(f"""
+                WITH expected AS ({query}),
+                actual AS MATERIALIZED (SELECT {projection} FROM prepared_snapshot)
+                SELECT (SELECT count(*) FROM (
+                    (SELECT * FROM expected EXCEPT ALL SELECT * FROM actual)
+                    UNION ALL (SELECT * FROM actual EXCEPT ALL SELECT * FROM expected))),
+                    (SELECT count(*) FROM actual)
+            """).fetchone()
+        finally:
+            connection.unregister("prepared_snapshot")
+            batches.close()
+    if mismatch or descriptor.get("cells") != cells:
+        raise ValueError("Coarse snapshot does not match prepared build; rerun just data-prepare")
+
+
+def validate_coarse_membership(report: dict) -> None:
+    """Compare source lists through the explicit source producer's ID mapping."""
+    from ark_pipeline.builders.source_database import build_h3_table, validate_crosswalk
+
+    files = report["files"]
+    if "crosswalk" not in files:
+        raise ValueError("Prepared coarse membership requires an explicit crosswalk; rerun just data-prepare")
+    crosswalk = Path(files["crosswalk"]["path"])
+    # Reuse the producer's schema/mapping validation. Managed fine metrics and
+    # detail readers require identity IDs, unlike the standalone coarse builder.
+    with duckdb.connect() as connection:
+        configure_duckdb(connection)
+        mapping = validate_crosswalk(connection, crosswalk)
+        mapped = build_h3_table(connection, 3, Path(files["coarse_source"]["path"]),
+                                crosswalk, deep_validation=False)
+        if mapped.get("unmatched_relationships", 0) or mapped.get("unmatched_cells", 0):
+            raise ValueError("Consumed coarse membership has unmapped source IDs")
+        connection.execute(f"ATTACH {sql_path(Path(files['build_duckdb']['path']))} AS build (READ_ONLY)")
+        mismatch = connection.execute("""
+            WITH expected AS (SELECT h3_index, list_sort(gbif_ids) AS gbif_ids FROM H3Res3Species),
+            actual AS (SELECT h3_index, list_sort(gbif_ids) AS gbif_ids FROM build.H3Res3Species)
+            SELECT count(*) FROM ((SELECT * FROM expected EXCEPT ALL SELECT * FROM actual)
+            UNION ALL (SELECT * FROM actual EXCEPT ALL SELECT * FROM expected))
+        """).fetchone()[0]
+        if mismatch:
+            raise ValueError("Consumed coarse membership does not match prepared build; rerun just data-prepare")
+        nonidentity = connection.execute(f"""
+            WITH used AS (SELECT DISTINCT CAST(unnest(species_ids) AS VARCHAR) AS source_id
+                FROM read_parquet(?)),
+            mapping AS (SELECT CAST({mapping['source_column']} AS VARCHAR) AS source_id,
+                CAST({mapping['target_column']} AS VARCHAR) AS serving_id FROM read_parquet(?))
+            SELECT count(*) FROM used JOIN mapping USING (source_id)
+            WHERE serving_id IS DISTINCT FROM source_id
+        """, [files["coarse_source"]["path"], str(crosswalk)]).fetchone()[0]
+        if nonidentity:
+            raise ValueError("Managed fine serving requires identity source-to-serving IDs for used species: "
+                "native fine metrics and detail readers use raw IDs directly; prepare matching SIS-valued "
+                "serving keys and rebuild coarse/fine products, rather than relabeling the crosswalk")
+
+
 def read_prepared(path: Path) -> dict:
     report = json.loads(path.read_text())
     if report.get("status") != "passed" or report.get("schema_version") != 1:
         raise ValueError("Prepared-input report is incomplete; rerun just data-prepare")
-    for record in report["files"].values():
+    for record in (*report["files"].values(), *report.get("exports", {}).values()):
         verify_record(record)
     sources = input_parts(Path(report["h3_root"]) / "res7_merged_parts")
     if {str(base) for base in sources} != set(report["parts"]):
@@ -152,6 +404,7 @@ def read_prepared(path: Path) -> dict:
             raise ValueError("Prepared source paths no longer match the generation")
         for record in records.values():
             verify_record(record)
+    validate_exports(report)
     return report
 
 
@@ -435,7 +688,10 @@ def publish(output: Path, generation: Path) -> None:
 
 @tracked_stage("tiles")
 def build(args: argparse.Namespace) -> dict:
+    args = copy(args)
     args.output_dir = args.output_dir.resolve()
+    if getattr(args, "static_fine", False):
+        args.output_dir = args.output_dir / "static"
     args.output_dir.mkdir(parents=True, exist_ok=True)
     # One writer per publication root, released by the OS after a crash.
     with (args.output_dir / ".build.lock").open("a") as lock:
@@ -443,6 +699,9 @@ def build(args: argparse.Namespace) -> dict:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
             raise ValueError("Another tile build is using this output directory") from exc
+        if not getattr(args, "static_fine", False):
+            from ark_pipeline.cli.map_serving import prepare_map
+            return prepare_map(args)
         return build_locked(args)
 
 
@@ -474,6 +733,9 @@ def build_locked(args: argparse.Namespace) -> dict:
                 "fine_groups": getattr(args, "fine_groups", 1)}
     generation = args.output_dir / "generations" / identity_digest(identity)
     outputs = ("priorities.pmtiles", "map-metadata.json")
+    snapshot_record = prepared["files"].get("coarse_snapshot")
+    if snapshot_record:
+        outputs += (Path(snapshot_record["path"]).name,)
     current = args.output_dir / "current"
     if current.is_symlink() and reusable(current.resolve(), identity, outputs):
         return {"status": "passed", "reused": True, "current": str(current),
@@ -624,6 +886,8 @@ def build_locked(args: argparse.Namespace) -> dict:
         metadata = json.loads(metadata_path.read_text())
         metadata.update(tile_metric_encoding="sparse-zero-v1", tile_metric_default=0)
         atomic_json(metadata_path, metadata)
+        if snapshot_record:
+            shutil.copyfile(verify_record(snapshot_record), generation / Path(snapshot_record["path"]).name)
         report.update(status="passed", reused=False, seconds=time.perf_counter() - started,
                       features=sum(item["features"] for item in report["shards"].values()))
         validate_snapshot()
@@ -643,12 +907,13 @@ def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(description=__doc__)
     commands = root.add_subparsers(dest="command", required=True)
     record = commands.add_parser("record", help="Record a successful preparation; run through data-prepare.")
-    for name in ("h3-root", "parts-dir", "build-duckdb", "species", "species-systems", "metadata-template", "output"):
+    for name in ("h3-root", "parts-dir", "build-duckdb", "species", "species-systems", "crosswalk", "metadata-template", "output"):
         record.add_argument("--" + name, type=Path, required=True)
     record.set_defaults(run=record_prepared)
     tiles = commands.add_parser("build")
     for name in ("prepared-inputs", "output-dir", "scratch-dir"):
         tiles.add_argument("--" + name, type=Path, required=True)
+    tiles.add_argument("--static-fine", action="store_true", help="Build the optional full fine PMTiles archive under OUTPUT_DIR/static/current; preserve the dynamic serving publication.")
     tiles.add_argument("--tippecanoe", default="tippecanoe")
     tiles.add_argument("--tile-join", default="tile-join")
     tiles.add_argument("--threads", type=positive_int, default=configured_count("TILE_DUCKDB_THREADS", default=1))

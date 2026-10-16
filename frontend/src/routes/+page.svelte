@@ -3,6 +3,7 @@
   import { api, type StatsResponse } from '$lib/api/client';
   import { preloadMapBundle } from '$lib/map/mapBundle';
   import { navigateToPreloadedMap } from '$lib/map/mapNavigation';
+  import { withCoverageProfile } from '$lib/map/coverageProfile';
 
   const statDefinitions: { key: keyof StatsResponse; label: string }[] = [
     { key: 'total', label: 'Species' },
@@ -101,132 +102,20 @@
     <div class="section-divider"><span>Explore</span></div>
 
     <div class="feature-grid">
-      <a href="/table" class="feature-card">
-        <div class="feature-icon">
-          <svg
-            xmlns="http://www.w3.org/2000/svg"
-            width="24"
-            height="24"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-            ><path
-              d="M9 3H5a2 2 0 0 0-2 2v4m6-6h10a2 2 0 0 1 2 2v4M9 3v18m0 0h10a2 2 0 0 0 2-2V9M9 21H5a2 2 0 0 1-2-2V9m0 0h18"
-            /></svg
-          >
-        </div>
-        <h3>Species Table</h3>
-        <p>
-          Browse, filter, and sort every species in the database. Adjust scoring weights to discover
-          which animals need DNA sequencing the most.
-        </p>
-        <div class="feature-arrow">
-          <svg
-            class="arrow-icon"
-            xmlns="http://www.w3.org/2000/svg"
-            width="16"
-            height="16"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="1.5"
-            stroke-linecap="round"
-            stroke-linejoin="round"><path d="M5 12h14" /><path d="m12 5 7 7-7 7" /></svg
-          ><span>Explore the Table</span>
-        </div>
+      <a href={withCoverageProfile('/table')} class="feature-card">
+        <div class="feature-icon"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3H5a2 2 0 0 0-2 2v4m6-6h10a2 2 0 0 1 2 2v4M9 3v18m0 0h10a2 2 0 0 0 2-2V9M9 21H5a2 2 0 0 1-2-2V9m0 0h18"/></svg></div>
+        <h3>Species Table</h3><p>Browse, filter, and sort every species in the database. Adjust scoring weights to discover which animals need DNA sequencing the most.</p>
+        <div class="feature-arrow"><svg class="arrow-icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg><span>Explore the Table</span></div>
       </a>
-      <a
-        href="/map"
-        class="feature-card"
-        onclick={navigateToPreloadedMap}
-        onpointerenter={warmMap}
-        onfocus={warmMap}
-        onpointerdown={warmMap}
-      >
-        <div class="feature-icon">
-          <svg
-            xmlns="http://www.w3.org/2000/svg"
-            width="24"
-            height="24"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-            ><path d="M21.54 15H17a2 2 0 0 0-2 2v4.54" /><path
-              d="M7 3.34V5a3 3 0 0 0 3 3a2 2 0 0 1 2 2c0 1.1.9 2 2 2a2 2 0 0 0 2-2c0-1.1.9-2 2-2h3.17"
-            /><path d="M11 21.95V18a2 2 0 0 0-2-2a2 2 0 0 1-2-2v-1a2 2 0 0 0-2-2H2.05" /><circle
-              cx="12"
-              cy="12"
-              r="10"
-            /></svg
-          >
-        </div>
-        <h3>Interactive Heatmap</h3>
-        <p>
-          Visualise conservation priorities worldwide. Explore global H3 aggregations and compare
-          terrestrial, freshwater, and marine species.
-        </p>
-        <div class="feature-arrow">
-          <svg
-            class="arrow-icon"
-            xmlns="http://www.w3.org/2000/svg"
-            width="16"
-            height="16"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="1.5"
-            stroke-linecap="round"
-            stroke-linejoin="round"><path d="M5 12h14" /><path d="m12 5 7 7-7 7" /></svg
-          ><span>Open the Map</span>
-        </div>
+      <a href={withCoverageProfile('/map')} class="feature-card" onclick={navigateToPreloadedMap} onpointerenter={warmMap} onfocus={warmMap} onpointerdown={warmMap}>
+        <div class="feature-icon"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.54 15H17a2 2 0 0 0-2 2v4.54"/><path d="M7 3.34V5a3 3 0 0 0 3 3a2 2 0 0 1 2 2c0 1.1.9 2 2 2a2 2 0 0 0 2-2c0-1.1.9-2 2-2h3.17"/><path d="M11 21.95V18a2 2 0 0 0-2-2a2 2 0 0 1-2-2v-1a2 2 0 0 0-2-2H2.05"/><circle cx="12" cy="12" r="10"/></svg></div>
+        <h3>Interactive Heatmap</h3><p>Visualise conservation priorities worldwide. Explore global H3 aggregations and compare terrestrial, freshwater, and marine species.</p>
+        <div class="feature-arrow"><svg class="arrow-icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg><span>Open the Map</span></div>
       </a>
-      <a href="/tutorial" class="feature-card">
-        <div class="feature-icon">
-          <svg
-            xmlns="http://www.w3.org/2000/svg"
-            width="24"
-            height="24"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-            ><path
-              d="M3.85 8.62a4 4 0 0 1 4.78-4.77 4 4 0 0 1 6.74 0 4 4 0 0 1 4.78 4.78 4 4 0 0 1 0 6.74 4 4 0 0 1-4.77 4.78 4 4 0 0 1-6.75 0 4 4 0 0 1-4.78-4.77 4 4 0 0 1 0-6.76Z"
-            /><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" /><line
-              x1="12"
-              x2="12.01"
-              y1="17"
-              y2="17"
-            /></svg
-          >
-        </div>
-        <h3>Tutorial</h3>
-        <p>
-          Learn how to navigate the table and map, understand the weighting system, and build your
-          own custom conservation scores.
-        </p>
-        <div class="feature-arrow">
-          <svg
-            class="arrow-icon"
-            xmlns="http://www.w3.org/2000/svg"
-            width="16"
-            height="16"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="1.5"
-            stroke-linecap="round"
-            stroke-linejoin="round"><path d="M5 12h14" /><path d="m12 5 7 7-7 7" /></svg
-          ><span>Read the Tutorial</span>
-        </div>
+      <a href={withCoverageProfile('/tutorial')} class="feature-card">
+        <div class="feature-icon"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3.85 8.62a4 4 0 0 1 4.78-4.77 4 4 0 0 1 6.74 0 4 4 0 0 1 4.78 4.78 4 4 0 0 1 0 6.74 4 4 0 0 1-4.77 4.78 4 4 0 0 1-6.75 0 4 4 0 0 1-4.78-4.77 4 4 0 0 1 0-6.76Z"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" x2="12.01" y1="17" y2="17"/></svg></div>
+        <h3>Tutorial</h3><p>Learn how to navigate the table and map, understand the weighting system, and build your own custom conservation scores.</p>
+        <div class="feature-arrow"><svg class="arrow-icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg><span>Read the Tutorial</span></div>
       </a>
     </div>
 

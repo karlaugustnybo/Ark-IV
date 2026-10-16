@@ -167,6 +167,48 @@ def sql_path(path: Path) -> str:
     return "'" + str(path).replace("'", "''") + "'"
 
 
+def aggregate_partition_query(resolution: int, cell_predicate: str) -> str:
+    """Recompute every metric/system from current dimensions and selected cells.
+
+    The producer and serving coherence gate share these exact predicates and
+    joins. Table names and the cell predicate are trusted internal SQL.
+    """
+    wide_columns = []
+    for system, system_predicate in SYSTEM_PREDICATES.items():
+        suffix = system.lower()
+        for metric, metric_predicate in METRICS.items():
+            wide_columns.append(
+                "COUNT(*) FILTER (WHERE "
+                f"({system_predicate}) AND ({metric_predicate}))::BIGINT "
+                f'AS "{metric}__{suffix}"'
+            )
+    return f"""
+    WITH species AS (
+        SELECT
+            info.*,
+            coalesce(bool_or(systems.system = 'Terrestrial'), false)
+                AS is_terrestrial,
+            coalesce(bool_or(systems.system = 'Freshwater'), false)
+                AS is_freshwater,
+            coalesce(bool_or(systems.system = 'Marine'), false)
+                AS is_marine
+        FROM SpecInfo info
+        LEFT JOIN SpecSystems systems USING (gbif_accepted_id)
+        GROUP BY ALL
+    ),
+    cells AS (
+        SELECT hs.h3_index, ids.gbif_id
+        FROM H3Res{resolution}Species hs,
+        UNNEST(hs.gbif_ids) AS ids(gbif_id)
+        WHERE {cell_predicate}
+    )
+    SELECT cells.h3_index, {", ".join(wide_columns)}
+    FROM cells
+    JOIN species ON species.gbif_accepted_id = cells.gbif_id
+    GROUP BY cells.h3_index
+    """
+
+
 def materialize_aggregates(
     connection: duckdb.DuckDBPyConnection,
     resolutions: tuple[int, ...] = (3, 7),
@@ -210,15 +252,6 @@ def materialize_aggregates(
                 """
             )
 
-        wide_columns = []
-        for system, system_predicate in SYSTEM_PREDICATES.items():
-            suffix = system.lower()
-            for metric, metric_predicate in METRICS.items():
-                wide_columns.append(
-                    "COUNT(*) FILTER (WHERE "
-                    f"({system_predicate}) AND ({metric_predicate}))::BIGINT "
-                    f'AS "{metric}__{suffix}"'
-                )
         base_cells = [
             int(row[0])
             for row in connection.execute(
@@ -227,32 +260,8 @@ def materialize_aggregates(
         ]
         for base_cell in base_cells:
             connection.execute(
-                f"""
-                CREATE OR REPLACE TEMP TABLE aggregate_partition AS
-                WITH species AS (
-                    SELECT
-                        info.*,
-                        coalesce(bool_or(systems.system = 'Terrestrial'), false)
-                            AS is_terrestrial,
-                        coalesce(bool_or(systems.system = 'Freshwater'), false)
-                            AS is_freshwater,
-                        coalesce(bool_or(systems.system = 'Marine'), false)
-                            AS is_marine
-                    FROM SpecInfo info
-                    LEFT JOIN SpecSystems systems USING (gbif_accepted_id)
-                    GROUP BY ALL
-                ),
-                cells AS (
-                    SELECT hs.h3_index, ids.gbif_id
-                    FROM {input_table} hs,
-                    UNNEST(hs.gbif_ids) AS ids(gbif_id)
-                    WHERE hs.base_cell = {base_cell}
-                )
-                SELECT cells.h3_index, {", ".join(wide_columns)}
-                FROM cells
-                JOIN species ON species.gbif_accepted_id = cells.gbif_id
-                GROUP BY cells.h3_index
-                """
+                "CREATE OR REPLACE TEMP TABLE aggregate_partition AS "
+                + aggregate_partition_query(resolution, f"hs.base_cell = {base_cell}")
             )
             for system in SYSTEMS:
                 suffix = system.lower()
@@ -429,6 +438,13 @@ def export_parquet(
             ORDER BY resolution, h3_index
         """,
     }
+    available_columns = {row[0] for row in connection.execute("DESCRIBE SpecInfo").fetchall()}
+    extra = [column for column in ("metadata_status", "spatial_redlist_category",
+             "spatial_metadata_provenance", "spatial_metadata_conflicts",
+             "iucn_metadata_provenance", "iucn_ecosystem_evidence", "iucn_assessment_latest") if column in available_columns]
+    if extra:
+        exports["species.parquet"] = exports["species.parquet"].replace(
+            "FROM SpecInfo", ", " + ", ".join(extra) + " FROM SpecInfo")
     if 3 in resolutions:
         exports["species_cells_res3.parquet"] = """
             SELECT
@@ -617,6 +633,13 @@ def export_map_metadata(
         "species_normalized_score_domains": normalized_domains,
         "reference_weights": DEFAULT_WEIGHTS,
     }
+    profile_path = os.environ.get("SPATIAL_PROFILE")
+    if profile_path:
+        from ark_pipeline.spatial.coverage import load_spatial_profile
+        profile = load_spatial_profile(Path(profile_path))
+        metadata["spatial_semantics"] = {"profile_id": profile.profile_id,
+            "digest": profile.digest, "seasonality": list(profile.seasonality),
+            "presence": list(profile.presence), "origin": list(profile.origin)}
     if coarse_snapshot is not None:
         metadata["coarse_snapshot"] = coarse_snapshot
     if boundary_indexes:
@@ -634,6 +657,27 @@ def export_map_metadata(
     print(f"Exported {target}")
 
 
+def coarse_snapshot_query() -> str:
+    """Project the cell IDs and typed metrics shared by Arrow export and validation."""
+    projections = ["s0.h3_index AS h3_index"]
+    aliases = [f"s{index}" for index in range(len(SYSTEMS))]
+    for alias, system in zip(aliases, SYSTEMS, strict=True):
+        prefix = SYSTEM_TILE_PREFIXES[system]
+        projections.extend(
+            f"coalesce({alias}.{metric}, 0)::USMALLINT AS "
+            f'"{prefix}_{METRIC_TILE_NAMES[metric]}"'
+            for metric in METRICS
+        )
+    joins = " ".join(
+        f"LEFT JOIN h3_res3_agg_{system} {alias} USING (h3_index)"
+        for system, alias in zip(SYSTEMS[1:], aliases[1:], strict=True)
+    )
+    return (
+        f"SELECT {', '.join(projections)} FROM h3_res3_agg_all s0 "
+        f"{joins} ORDER BY h3_index"
+    )
+
+
 def export_coarse_snapshot(
     connection: duckdb.DuckDBPyConnection,
     tile_dir: Path,
@@ -646,22 +690,7 @@ def export_coarse_snapshot(
     the homepage and lets the map render resolution 3 without any tile swaps.
     """
     prefixes = tuple(SYSTEM_TILE_PREFIXES[system] for system in SYSTEMS)
-    projections = ["s0.h3_index AS h3_index"]
-    aliases = [f"s{index}" for index in range(len(SYSTEMS))]
-    for alias, prefix in zip(aliases, prefixes, strict=True):
-        projections.extend(
-            f"coalesce({alias}.{metric}, 0)::USMALLINT AS "
-            f'"{prefix}_{METRIC_TILE_NAMES[metric]}"'
-            for metric in METRICS
-        )
-    joins = " ".join(
-        f"LEFT JOIN h3_res3_agg_{system} {alias} USING (h3_index)"
-        for system, alias in zip(SYSTEMS[1:], aliases[1:], strict=True)
-    )
-    reader = connection.execute(
-        f"SELECT {', '.join(projections)} FROM h3_res3_agg_all s0 "
-        f"{joins} ORDER BY h3_index"
-    ).to_arrow_reader(batch_size=TILE_FEATURE_BATCH_SIZE)
+    reader = connection.execute(coarse_snapshot_query()).to_arrow_reader(batch_size=TILE_FEATURE_BATCH_SIZE)
     table = reader.read_all()
     h3_indexes = table.column("h3_index").to_pylist()
     boundary_indexes = normalize_boundary_indexes(jurisdiction_index)

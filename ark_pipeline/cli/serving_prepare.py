@@ -51,7 +51,7 @@ def parser() -> argparse.ArgumentParser:
                         default=os.environ.get("GLOBAL_IUCN_METADATA_MODE", "auto"))
     result.add_argument("--reviewed-evidence-path", type=Path,
                         default=os.environ.get("GLOBAL_IUCN_REVIEWED_EVIDENCE_PATH"))
-    result.add_argument("--tiles", action="store_true", help="Continue through a resumable full PMTiles build.")
+    result.add_argument("--tiles", action="store_true", help="Continue through validated coarse PMTiles and dynamic H3 serving.")
     result.add_argument("--ui", choices=("auto", "rich", "plain"), default="auto", help="Live Rich dashboard in a terminal; plain output when redirected.")
     result.add_argument("--fresh", action="store_true", help="Start fresh dashboard history; production outputs still undergo normal reuse validation.")
     result.add_argument("--benchmark-report", type=Path, help="ETA prior; defaults to the latest passed benchmark with matching source/profile fingerprints.")
@@ -108,6 +108,7 @@ def preparation_plan(args: argparse.Namespace) -> tuple[list[list[str]], dict[st
     environment = {
         "GLOBAL_DATA_ROOT": str(root),
         "GLOBAL_IUCN_METADATA_MODE": args.iucn_metadata_mode,
+        "SPATIAL_PROFILE": str(args.profile.expanduser().resolve()),
         "GLOBAL_H3_ROOT": str(h3_root),
         "GLOBAL_CROSSWALK_PATH": str(crosswalk),
         "GLOBAL_PREVIEW_ROOT": str(preview_root.expanduser().resolve()),

@@ -1,3 +1,7 @@
+<script lang="ts">
+  import { withCoverageProfile } from '$lib/map/coverageProfile';
+</script>
+
 <svelte:head><title>Tutorial · Ark-IV</title></svelte:head>
 
 <main class="main-content">
@@ -250,11 +254,6 @@
       </div>
     </div>
 
-    <footer class="tutorial-footer">
-      <p>
-        <strong>Ready to explore?</strong> Start with the <a href="/table">table</a> or jump to the
-        <a href="/map">map</a>.
-      </p>
-    </footer>
+    <footer class="tutorial-footer"><p><strong>Ready to explore?</strong> Start with the <a href={withCoverageProfile('/table')}>table</a> or jump to the <a href={withCoverageProfile('/map')}>map</a>.</p></footer>
   </div>
 </main>

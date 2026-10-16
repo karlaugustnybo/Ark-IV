@@ -14,23 +14,34 @@ Pool = asyncpg.Pool
 
 @asynccontextmanager
 async def database_lifespan(app: Litestar) -> AsyncGenerator[None]:
-    settings = get_settings()
-    pool = await asyncpg.create_pool(
-        dsn=settings.database_url,
-        min_size=settings.db_pool_min_size,
-        max_size=settings.db_pool_max_size,
-        command_timeout=30,
-    )
-    await apply_schema(pool, ROOT / "backend" / "schema.sql")
-    app.state.db_pool = pool
+    from backend.coverage_profiles import load_profiles
+
+    registry = load_profiles(get_settings())
+    pools = {}
     try:
+        for key, settings in registry.items():
+            pool = await asyncpg.create_pool(
+                dsn=settings.database_url,
+                min_size=settings.db_pool_min_size,
+                max_size=settings.db_pool_max_size,
+                command_timeout=30,
+            )
+            pools[key] = pool
+            await apply_schema(pool, ROOT / "backend/schema.sql")
+        app.state.coverage_settings = registry
+        app.state.coverage_pools = pools
+        app.state.db_pool = pools["resident"]
         yield
     finally:
-        await pool.close()
+        for pool in pools.values():
+            await pool.close()
 
 
 def get_pool(state: State) -> Pool:
-    return cast(Pool, state.db_pool)
+    from backend.coverage_profiles import current_profile
+
+    registry = getattr(state, "coverage_pools", None)
+    return cast(Pool, registry[current_profile.get()] if registry is not None else state.db_pool)
 
 
 async def apply_schema(pool: Pool, schema_path: Path) -> None:

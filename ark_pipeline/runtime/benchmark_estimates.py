@@ -12,12 +12,17 @@ SIZE_BREAKS = (1e-10, 1e-9, 1e-8, 1e-7, 1e-6, 1e-5, 1e-4, 3e-4,
                100., 300., 1000., 3000., 10000.)
 
 
-def estimate(stages: list[dict], population: dict, pairs: dict, lists: dict) -> dict:
+def estimate(stages: list[dict], population: dict, pairs: dict, lists: dict, *, serving_contract: str | None = None) -> dict:
     """Project measured work; scenario ranges are not statistical confidence intervals.
 
     Forced minimum/maximum polygons exercise the kernel and downstream stages,
     but are not random observations. Use them only in a completely sampled band.
     """
+    if serving_contract is None:
+        serving_contract = next((stage.get("serving_contract", "static-pmtiles-v1")
+                                 for stage in stages if stage["name"] == "tiles"), "static-pmtiles-v1")
+    if serving_contract not in {"dynamic-h3-v1", "static-pmtiles-v1"}:
+        raise ValueError(f"Unsupported tile estimate contract: {serving_contract}")
     groups = defaultdict(list)
     for row in pairs["observations"]:
         if not 0 <= row["size_bin"] < len(population["size_bin_counts"]) or population["size_bin_counts"][row["size_bin"]] == 0:
@@ -44,6 +49,7 @@ def estimate(stages: list[dict], population: dict, pairs: dict, lists: dict) -> 
         bands.append({"size_bin": band, "population": count, "observations": len(rows),
                       "mean_kernel_seconds": seconds, "mean_output_pairs": cells})
     result = {
+        "serving_contract": serving_contract,
         "status": "incomplete" if missing else "planning-estimate",
         "missing_size_bins": missing,
         "bands": bands,
@@ -99,9 +105,10 @@ def estimate(stages: list[dict], population: dict, pairs: dict, lists: dict) -> 
             model = f"midpoint of res{resolution} cell and relationship throughput scenarios"
         else:
             if name == "tiles":
-                sample_work = lists["res3_cells"] + lists["res7_cells"]
-                full_work = projected["res3_cells"] + projected["res7_cells"]
-                unit = "tile features"
+                resolutions = (3,) if serving_contract == "dynamic-h3-v1" else (3, 7)
+                sample_work = sum(lists[f"res{resolution}_cells"] for resolution in resolutions)
+                full_work = sum(projected[f"res{resolution}_cells"] for resolution in resolutions)
+                unit = "coarse tile features" if resolutions == (3,) else "coarse and fine tile features"
             else:
                 sample_work, full_work, unit = raw, global_pairs, "raw pairs"
             scale = full_work / sample_work

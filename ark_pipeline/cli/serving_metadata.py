@@ -82,6 +82,9 @@ def validate_crosswalk_sources(crosswalk: Path, manifest: dict) -> None:
 @tracked_stage("metadata")
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--profile", type=Path, default=Path(os.environ.get("SPATIAL_PROFILE", "config/spatial_semantics_iucn_richness_v3.toml")))
+    parser.add_argument("--build-passage", action="store_true", default=os.environ.get("GLOBAL_SPECIES_PASSAGE", "").lower() == "true",
+                        help="Build the separate coarse passage range supplement from registered sources.")
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--h3-root", type=Path, required=True)
     parser.add_argument("--crosswalk", type=Path, required=True)
@@ -180,6 +183,10 @@ def main(argv: list[str] | None = None) -> int:
             validate()
             atomic_json(metadata_report, report)
             publish_metadata(staged, args.output_dir, validate=validate)
+        if args.build_passage:
+            from ark_pipeline.cli.species_passage import build as build_passage
+            build_passage(root, args.profile, args.output_dir / "species.parquet",
+                          args.output_dir / "species_passage_cells_res3.parquet")
         return 0
     except (OSError, ValueError) as error:
         print(json.dumps({"status": "failed", "error": str(error)}, indent=2))
