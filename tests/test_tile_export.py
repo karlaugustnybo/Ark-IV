@@ -121,6 +121,32 @@ def prepared_fixture(root: Path):
     return parser().parse_args(options), record_args, cells
 
 
+class PreparedMetricIdentityTests(unittest.TestCase):
+    def test_metadata_replacement_during_recording_preserves_previous_report(self):
+        from ark_pipeline.cli import serving_tiles
+
+        with tempfile.TemporaryDirectory() as temporary:
+            _, args, _ = prepared_fixture(Path(temporary))
+            previous = args.output.read_bytes()
+            original = args.species.read_bytes()
+            record = serving_tiles.file_record
+
+            def replace_after_species_record(path):
+                result = record(path)
+                if path == args.species:
+                    rows = pq.read_table(path).to_pylist()
+                    rows[0]["has_dna_species_level"] = True
+                    pq.write_table(pa.Table.from_pylist(rows), path)
+                return result
+
+            with patch.object(serving_tiles, "file_record", side_effect=replace_after_species_record):
+                with self.assertRaisesRegex(ValueError, "Metric input changed"):
+                    record_prepared(args)
+            self.assertEqual(args.output.read_bytes(), previous)
+            args.species.write_bytes(original)
+            read_prepared(args.output)
+
+
 @unittest.skipUnless(all(shutil.which(tool) for tool in ("tippecanoe", "tile-join", "tippecanoe-decode")),
                      "Tippecanoe binaries are required for the actual archive integration test")
 class TilePublicationTests(unittest.TestCase):
