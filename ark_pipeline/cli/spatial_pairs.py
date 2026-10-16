@@ -15,7 +15,7 @@ import zipfile
 from collections import Counter
 from collections.abc import Iterable
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -28,6 +28,7 @@ import pyarrow.csv as pacsv
 import pyarrow.parquet as pq
 import pyogrio
 import shapely
+from h3ronpy import compact, uncompact
 from h3ronpy.vector import coordinates_to_cells
 
 from ark_pipeline.runtime.progress import emit, tracked_stage
@@ -45,6 +46,7 @@ from ark_pipeline.spatial.coverage import (
     GeometryCoverageError,
     NativeCoverageResult,
     SpatialProfile,
+    configure_full_tile_cache,
     exact_intersecting_cells_native,
     load_spatial_profile,
 )
@@ -153,12 +155,14 @@ class GeometryWorkerFailure:
 class GeometryWorkerSuccess:
     coverage: NativeCoverageResult
     wall_seconds: float
+    cells_compacted: bool = False
 
 
-def _initialize_worker(profile: SpatialProfile, slots=None, tile_workers: int = 1) -> None:
+def _initialize_worker(profile: SpatialProfile, slots=None, tile_workers: int = 1, full_tiles=None) -> None:
     global _WORKER_PROFILE, _WORKER_SLOTS, _TILE_WORKERS
     _WORKER_PROFILE = profile
     _WORKER_SLOTS, _TILE_WORKERS = slots, tile_workers
+    configure_full_tile_cache(full_tiles)
 
 
 def _polyfill_wkb(wkb: bytes | tuple) -> GeometryWorkerSuccess | GeometryWorkerFailure:
@@ -191,11 +195,18 @@ def _polyfill_reserved(wkb: bytes | tuple) -> GeometryWorkerSuccess | GeometryWo
             emit("geometry_start", phase=f"Polygon {context['id']} · size band {context['size_bin']}")
             budget = TileBudget(_WORKER_SLOTS, _TILE_WORKERS) if _TILE_WORKERS > 1 else None
             coverage = exact_intersecting_cells_native(geometry, _WORKER_PROFILE, tile_budget=budget)
+            output_cells = int(coverage.cells.size)
+            cells_compacted = _TILE_WORKERS > 1 and output_cells >= 250_000
+            if cells_compacted:
+                # Transport complete H3 subtrees, not hundreds of MB of child
+                # IDs through multiprocessing's pickle buffers. This is exact
+                # index compaction, unrelated to polygon simplification.
+                coverage = replace(coverage, cells=np.asarray(compact(coverage.cells), dtype=np.uint64))
             elapsed = time.perf_counter() - started
-            emit("geometry_done", kernel_seconds=elapsed, output_pairs=int(coverage.cells.size),
+            emit("geometry_done", kernel_seconds=elapsed, output_pairs=output_cells,
                  tile_workers=budget.peak_workers if budget else 1,
                  simplification=coverage.decision_simplification_audit)
-        return GeometryWorkerSuccess(coverage, elapsed)
+        return GeometryWorkerSuccess(coverage, elapsed, cells_compacted)
     except Exception as error:
         return GeometryWorkerFailure(
             f"{type(error).__name__}: {error}", time.perf_counter() - started
@@ -688,6 +699,15 @@ def _flush_rows(writer: pq.ParquetWriter, rows: list[dict[str, Any]], schema: pa
         rows.clear()
 
 
+def _pair_writer(path: Path) -> pq.ParquetWriter:
+    """Encode sorted per-polygon H3 runs as deltas instead of dictionaries."""
+    return pq.ParquetWriter(
+        path, PAIR_SCHEMA, compression="zstd",
+        use_dictionary=["iucn_sis_id"],
+        column_encoding={"h3_index": "DELTA_BINARY_PACKED"},
+    )
+
+
 def _write_pair_table(
     writer: pq.ParquetWriter,
     cells: np.ndarray,
@@ -737,7 +757,7 @@ def _write_large_coverage(
 
 def _process_bounded(
     executor: ProcessPoolExecutor,
-    work: list[bytes],
+    work,
     *,
     max_pending_factor: int = 2,
 ) -> Iterator[tuple[int, GeometryWorkerSuccess | GeometryWorkerFailure]]:
@@ -749,11 +769,18 @@ def _process_bounded(
     yielded immediately so multi-million-cell arrays do not accumulate in the
     parent process while a complete Arrow batch finishes.
     """
-    if not work:
+    yield from _process_tagged_bounded(executor, enumerate(work), max_pending_factor=max_pending_factor)
+
+
+def _process_tagged_bounded(executor, work, *, max_pending_factor=2):
+    """Stream (metadata, WKB) jobs across input batches with bounded lookahead."""
+    if executor is None:
+        for tag, payload in work:
+            yield tag, _polyfill_wkb(payload)
         return
-    max_pending = min(len(work), max(1, executor._max_workers * max_pending_factor))
-    task_iter = iter(enumerate(work))
-    pending: dict[Any, int] = {}
+    max_pending = max(1, executor._max_workers * max_pending_factor)
+    task_iter = iter(work)
+    pending: dict[Any, Any] = {}
 
     def submit_one() -> bool:
         try:
@@ -769,8 +796,13 @@ def _process_bounded(
         done, _ = wait(pending, return_when=FIRST_COMPLETED)
         for future in done:
             index = pending.pop(future)
-            yield index, future.result()
             submit_one()
+            result = future.result()
+            if isinstance(result, GeometryWorkerSuccess) and result.cells_compacted:
+                cells = np.asarray(uncompact(result.coverage.cells, 7), dtype=np.uint64)
+                cells.sort(kind="quicksort")
+                result = replace(result, coverage=replace(result.coverage, cells=cells), cells_compacted=False)
+            yield index, result
 
 
 def default_geometry_workers() -> int:
@@ -861,9 +893,10 @@ def build_archive(
     candidate_relationships = 0
     repairs = 0
     source_rows = 0
-    pair_writer = pq.ParquetWriter(temporary_pairs, PAIR_SCHEMA, compression="zstd")
+    pair_writer = _pair_writer(temporary_pairs)
     audit_writer = pq.ParquetWriter(temporary_audit, AUDIT_SCHEMA, compression="zstd")
-    try:
+    def input_tasks():
+        nonlocal source_rows
         for source_layer, geometry_name, fid_name, batch in iter_arrow_batches(
             record["resolved_path"], profile.geometry_batch_rows
         ):
@@ -908,81 +941,80 @@ def build_archive(
                 else:
                     tasks.append((base_audit, geometry_wkb))
 
-            work = [task[1] for task in tasks]
-            if executor is None:
-                indexed_results = ((index, _polyfill_wkb(wkb)) for index, wkb in enumerate(work))
-            else:
-                indexed_results = _process_bounded(executor, work)
-            for task_index, result in indexed_results:
-                emit(phase=f"{record['logical_name']} · {source_rows:,} source rows · {output_relationships:,} pairs", force=True)
-                base_audit, _ = tasks[task_index]
-                iucn_sis_id = base_audit["iucn_sis_id"]
-                source_row = base_audit["source_row"]
-                if isinstance(result, GeometryWorkerFailure):
-                    decisions["geometry_failure"] += 1
-                    audit_rows.append(
-                        {
-                            **base_audit,
-                            "decision": "geometry_failure",
-                            "validity_issue": result.message,
-                            "geometry_wall_seconds": result.wall_seconds,
-                        }
-                    )
-                    _flush_rows(audit_writer, audit_rows, AUDIT_SCHEMA)
-                    raise GeometryCoverageError(
-                        f"{record['logical_name']} row {source_row} "
-                        f"({iucn_sis_id}) failed: {result.message}"
-                    )
-                if not isinstance(result, GeometryWorkerSuccess):
-                    raise TypeError("worker returned an invalid coverage result")
-                else:
-                    coverage = result.coverage
-                    decisions["included"] += 1
-                    repairs += int(not coverage.repair.original_valid)
-                    candidate_relationships += coverage.candidate_cells
-                    output_relationships += int(coverage.cells.size)
-                    audit_rows.append(
-                        {
-                            **base_audit,
-                            "decision": "included",
-                            "original_valid": coverage.repair.original_valid,
-                            "repair_method": coverage.repair.method,
-                            "validity_issue": coverage.repair.original_validity_issue,
-                            "relative_planar_area_change": coverage.repair.relative_planar_area_change,
-                            "candidate_cells": coverage.candidate_cells,
-                            "output_cells": int(coverage.cells.size),
-                            "geometry_wall_seconds": result.wall_seconds,
-                            "decision_simplification_applied": (
-                                coverage.decision_simplification_applied
-                            ),
-                            "decision_simplification_bound_metres": (
-                                coverage.decision_simplification_bound_metres
-                            ),
-                            "decision_simplification_audit": json.dumps(coverage.decision_simplification_audit),
-                        }
-                    )
-                    if coverage.cells.size >= profile.pair_write_rows:
-                        _flush_pair_chunks(pair_writer, pair_cell_chunks, pair_species_ids)
-                        buffered_pairs = 0
-                        _write_large_coverage(
-                            pair_writer,
-                            coverage.cells,
-                            iucn_sis_id,
-                            profile.pair_write_rows,
-                        )
-                    else:
-                        pair_cell_chunks.append(coverage.cells)
-                        pair_species_ids.append(iucn_sis_id)
-                        buffered_pairs += int(coverage.cells.size)
-                        if buffered_pairs >= profile.pair_write_rows:
-                            _flush_pair_chunks(pair_writer, pair_cell_chunks, pair_species_ids)
-                            buffered_pairs = 0
-                peak_rss = max(peak_rss, _process_tree_rss(process))
-                peak_swap_used = _observed_swap_peak(peak_swap_used)
+            # Start expensive geometry preparation before small jobs drain.
+            tasks.sort(key=lambda task: len(task[1]), reverse=True)
             if len(audit_rows) >= profile.geometry_batch_rows:
                 _flush_rows(audit_writer, audit_rows, AUDIT_SCHEMA)
+            yield from tasks
+
+    try:
+        for base_audit, result in _process_tagged_bounded(executor, input_tasks()):
+            emit(phase=f"{record['logical_name']} · {source_rows:,} source rows · {output_relationships:,} pairs", force=True)
+            iucn_sis_id = base_audit["iucn_sis_id"]
+            source_row = base_audit["source_row"]
+            if isinstance(result, GeometryWorkerFailure):
+                decisions["geometry_failure"] += 1
+                audit_rows.append(
+                    {
+                        **base_audit,
+                        "decision": "geometry_failure",
+                        "validity_issue": result.message,
+                        "geometry_wall_seconds": result.wall_seconds,
+                    }
+                )
+                _flush_rows(audit_writer, audit_rows, AUDIT_SCHEMA)
+                raise GeometryCoverageError(
+                    f"{record['logical_name']} row {source_row} "
+                    f"({iucn_sis_id}) failed: {result.message}"
+                )
+            if not isinstance(result, GeometryWorkerSuccess):
+                raise TypeError("worker returned an invalid coverage result")
+            else:
+                coverage = result.coverage
+                decisions["included"] += 1
+                repairs += int(not coverage.repair.original_valid)
+                candidate_relationships += coverage.candidate_cells
+                output_relationships += int(coverage.cells.size)
+                audit_rows.append(
+                    {
+                        **base_audit,
+                        "decision": "included",
+                        "original_valid": coverage.repair.original_valid,
+                        "repair_method": coverage.repair.method,
+                        "validity_issue": coverage.repair.original_validity_issue,
+                        "relative_planar_area_change": coverage.repair.relative_planar_area_change,
+                        "candidate_cells": coverage.candidate_cells,
+                        "output_cells": int(coverage.cells.size),
+                        "geometry_wall_seconds": result.wall_seconds,
+                        "decision_simplification_applied": (
+                            coverage.decision_simplification_applied
+                        ),
+                        "decision_simplification_bound_metres": (
+                            coverage.decision_simplification_bound_metres
+                        ),
+                        "decision_simplification_audit": json.dumps(coverage.decision_simplification_audit),
+                    }
+                )
+                if coverage.cells.size >= profile.pair_write_rows:
+                    _flush_pair_chunks(pair_writer, pair_cell_chunks, pair_species_ids)
+                    buffered_pairs = 0
+                    _write_large_coverage(
+                        pair_writer,
+                        coverage.cells,
+                        iucn_sis_id,
+                        profile.pair_write_rows,
+                    )
+                else:
+                    pair_cell_chunks.append(coverage.cells)
+                    pair_species_ids.append(iucn_sis_id)
+                    buffered_pairs += int(coverage.cells.size)
+                    if buffered_pairs >= profile.pair_write_rows:
+                        _flush_pair_chunks(pair_writer, pair_cell_chunks, pair_species_ids)
+                        buffered_pairs = 0
             peak_rss = max(peak_rss, _process_tree_rss(process))
             peak_swap_used = _observed_swap_peak(peak_swap_used)
+            if len(audit_rows) >= profile.geometry_batch_rows:
+                _flush_rows(audit_writer, audit_rows, AUDIT_SCHEMA)
         _flush_pair_chunks(pair_writer, pair_cell_chunks, pair_species_ids)
         _flush_rows(audit_writer, audit_rows, AUDIT_SCHEMA)
     except Exception:
@@ -1072,6 +1104,7 @@ def _iter_zipped_csv_batches(
                         block_size=max(1 << 20, batch_rows * 192),
                         use_threads=True,
                     ),
+                    parse_options=pacsv.ParseOptions(newlines_in_values=True),
                     convert_options=pacsv.ConvertOptions(
                         include_columns=columns,
                         column_types={name: column_types[name] for name in columns},
@@ -2010,11 +2043,11 @@ def build(
         results, basin_report = execute(None)
     else:
         context = multiprocessing.get_context("spawn")
-        with ProcessPoolExecutor(
+        with context.Manager() as manager, ProcessPoolExecutor(
             max_workers=workers,
             mp_context=context,
             initializer=_initialize_worker,
-            initargs=(profile, context.BoundedSemaphore(workers), workers),
+            initargs=(profile, context.BoundedSemaphore(workers), workers, manager.dict()),
         ) as executor:
             results, basin_report = execute(executor)
     report = {

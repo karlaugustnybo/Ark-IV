@@ -130,6 +130,16 @@ def markdown_report(report: dict) -> str:
     lines = ["# Pipeline benchmark", "", f"Status: **{report['status']}**", "",
              f"Output: `{report['output']}`", "",
              f"Workers: `{report['resources']}`", ""]
+    if report.get("scope") == "stage-replay":
+        lines += [f"Stage replay: **{report['only_stage']}**. Inputs reused from `{report['from_run']}`.",
+                  "This measures one stage against saved inputs, not a full pipeline build.", ""]
+        reference = report.get("reference_stage")
+        if reference and reference.get("status") == "passed":
+            lines += [f"Previous run's stage time: **{duration(reference.get('wall_seconds'))}**.", ""]
+            if report.get("reference_resources") != report["resources"]:
+                lines += ["Worker settings differ from the reference run; timings are not a controlled speedup comparison.", ""]
+        if report.get("reference_runtime") != report.get("runtime"):
+            lines += ["Runtime environments differ or the reference environment is unknown; times are not a controlled speedup comparison.", ""]
     if report.get("selection"):
         selection = report["selection"]
         lines += [f"Sample: **{selection['selected_rows']:,} selected polygons** from the {selection['original_rows']:,}-row fixture. "

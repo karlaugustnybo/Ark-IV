@@ -16,7 +16,7 @@ def load_prior(root: Path, profile_sha: str, explicit: Path | None = None) -> tu
     for path in paths:
         try:
             report = json.loads(path.read_text())
-            if report.get("status") != "passed" or report.get("profile_sha256") != profile_sha or report.get("acquisition_manifest_sha256") != current:
+            if report.get("scope") == "stage-replay" or report.get("status") != "passed" or report.get("profile_sha256") != profile_sha or report.get("acquisition_manifest_sha256") != current:
                 if explicit:
                     raise ValueError("Benchmark report is incomplete or its source/profile fingerprints differ from this run")
                 continue
