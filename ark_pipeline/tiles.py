@@ -66,7 +66,7 @@ def geometries_for_cells(ids: list[str]) -> tuple[list[dict], np.ndarray]:
         if geometry["type"] == "Polygon":
             groups[len(geometry["coordinates"][0])].append(index)
         else:
-            # This rare branch uses exactly the original clipping implementation.
+            # Dateline and polar cells use the shared canonical clipping contract.
             polygons[index] = cell_geometry(cell)
     for indexes in groups.values():
         polygons[indexes] = shapely.polygons([geojson[i]["coordinates"][0] for i in indexes])

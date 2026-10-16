@@ -40,6 +40,23 @@ audit. Point and relationship tables use compact per-member decision summaries
 to avoid writing an audit copy of multi-gigabyte CSVs; normalized eligible
 basin/species relationships and the registered originals remain available.
 
+The direct any-touch kernel treats native overlap as candidates. Fully contained
+cells are accepted directly; other candidates and their immediate H3 neighbours
+are checked with closed `intersects`, including adjacent longitude copies. This
+recovers edge/vertex contacts omitted by the native overlap mode without accepting
+non-intersecting halo cells. Each grid piece is split into canonical longitude
+windows before native filling, so an accepted non-divisor grid (for example 7°)
+retains both sides of the date line. H3 cell geometry closes polar winding through
+the pole rather than through a planar diagonal.
+
+Synthetic fixtures cover north/south poles at resolutions 3 and 7, scalar and
+batched boundary membership and GeoJSON, shared edges at ordinary/high latitudes
+and the date line, isolated vertex contact, holes, tiny ranges and partition
+invariance. These checks establish those fixtures, not global coverage accuracy
+or current throughput. Geometry fingerprints invalidate prior spatial receipts;
+previous timing estimates below require fresh calibration for the corrected
+frontier predicate before they can predict a new build.
+
 The exact direct kernel uses 10° partitions below 100 square degrees of bbox
 area and 2.5° partitions at or above that threshold. The smaller large-range
 partition was exact on all 50 tested tail polygons and reduced sequential fill

@@ -29,7 +29,12 @@ if str(ROOT) not in sys.path:
 
 from ark_pipeline.runtime.progress import monitor_query, tracked_stage
 from ark_pipeline.runtime.resources import configure_duckdb, configured_count
-from ark_pipeline.spatial.boundaries import JurisdictionIndex, load_jurisdiction_index
+from ark_pipeline.spatial.boundaries import (
+    JurisdictionIndex,
+    canonical_h3_geometry,
+    h3_ring_polygon,
+    load_jurisdiction_index,
+)
 from backend.config import get_settings
 
 SYSTEMS = ("all", "Terrestrial", "Freshwater", "Marine")
@@ -767,72 +772,16 @@ def wide_feature(
     }
 
 
-def _clip_vertical(
-    ring: list[list[float]], boundary: float, *, keep_less: bool
-) -> list[list[float]]:
-    """Clip a convex longitude/latitude ring against one meridian."""
-    if not ring:
-        return []
-
-    def inside(point: list[float]) -> bool:
-        return point[0] <= boundary if keep_less else point[0] >= boundary
-
-    def intersection(start: list[float], end: list[float]) -> list[float]:
-        fraction = (boundary - start[0]) / (end[0] - start[0])
-        return [boundary, start[1] + fraction * (end[1] - start[1])]
-
-    output: list[list[float]] = []
-    previous = ring[-1]
-    previous_inside = inside(previous)
-    for current in ring:
-        current_inside = inside(current)
-        if current_inside:
-            if not previous_inside:
-                output.append(intersection(previous, current))
-            output.append(current)
-        elif previous_inside:
-            output.append(intersection(previous, current))
-        previous = current
-        previous_inside = current_inside
-    return output
-
-
-def _closed(ring: list[list[float]]) -> list[list[float]]:
-    return ring + [ring[0]] if ring and ring[0] != ring[-1] else ring
-
-
 def antimeridian_safe_polygon(ring: list[list[float]]) -> dict[str, Any]:
-    """Split an H3 polygon at the antimeridian instead of spanning the globe."""
-    if not ring:
+    """Export the shared pole-aware H3 geometry in canonical longitudes."""
+    polygon = canonical_h3_geometry(h3_ring_polygon(ring))
+    if polygon.is_empty:
         return {"type": "Polygon", "coordinates": []}
-    unwrapped = [ring[0][:]]
-    for longitude, latitude in ring[1:]:
-        previous_longitude = unwrapped[-1][0]
-        while longitude - previous_longitude > 180:
-            longitude -= 360
-        while longitude - previous_longitude < -180:
-            longitude += 360
-        unwrapped.append([longitude, latitude])
-
-    minimum = min(point[0] for point in unwrapped)
-    maximum = max(point[0] for point in unwrapped)
-    if maximum > 180:
-        west = _clip_vertical(unwrapped, 180, keep_less=True)
-        east = _clip_vertical(unwrapped, 180, keep_less=False)
-        east = [[longitude - 360, latitude] for longitude, latitude in east]
-        return {
-            "type": "MultiPolygon",
-            "coordinates": [[_closed(west)], [_closed(east)]],
-        }
-    if minimum < -180:
-        east = _clip_vertical(unwrapped, -180, keep_less=False)
-        west = _clip_vertical(unwrapped, -180, keep_less=True)
-        west = [[longitude + 360, latitude] for longitude, latitude in west]
-        return {
-            "type": "MultiPolygon",
-            "coordinates": [[_closed(east)], [_closed(west)]],
-        }
-    return {"type": "Polygon", "coordinates": [_closed(unwrapped)]}
+    def coordinates(part):
+        return [[[float(x), float(y)] for x, y in part.exterior.coords]]
+    if polygon.geom_type == "Polygon":
+        return {"type": "Polygon", "coordinates": coordinates(polygon)}
+    return {"type": "MultiPolygon", "coordinates": [coordinates(part) for part in polygon.geoms]}
 
 
 def iter_query_rows(
