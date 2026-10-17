@@ -246,12 +246,21 @@ class BenchmarkReplayInputTests(unittest.TestCase):
             atomic_json(source / "benchmark-report.json", previous)
             before = artifact_inventory(source)
             args = self.replay_args(source, root / "replay", "prepared_inputs")
-            old_report, old_stage, _, _ = replay_plan(args)
+            def old_plan(arguments):
+                config, stages, env = plan(arguments)
+                command = next(item["command"] for item in stages if item["name"] == "prepared_inputs")
+                if "--crosswalk" in command:
+                    index = command.index("--crosswalk")
+                    del command[index:index + 2]
+                return config, stages, env
+
+            with patch("ark_pipeline.cli.benchmark_pipeline.plan", side_effect=old_plan):
+                old_report, old_stage, _, _ = replay_plan(args)
             self.assertNotIn("--crosswalk", old_stage["command"])
             self.assertNotIn(CROSSWALK, old_report["input_inventory"])
 
             def future_plan(arguments):
-                config, stages, env = plan(arguments)
+                config, stages, env = old_plan(arguments)
                 stage = next(item for item in stages if item["name"] == "prepared_inputs")
                 stage["command"] += ["--crosswalk", str(Path(config["output"]) / CROSSWALK)]
                 return config, stages, env
