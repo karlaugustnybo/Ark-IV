@@ -117,6 +117,73 @@ class BenchmarkModelTests(unittest.TestCase):
 
 
 class BenchmarkReplayInputTests(unittest.TestCase):
+    def test_rejected_metadata_is_rerun_after_evidence_is_restored(self):
+        with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):
+            root = Path(temporary).resolve()
+            sample, boundary = fixture(root)
+            evidence = root / "outside-config.json"
+            original = b'{"entries": []}\n'
+            evidence.write_bytes(original)
+            output = root / "benchmark"
+            options = ["--root", str(root), "--sample", str(sample), "--output-root", str(output),
+                       "--workers", "1", "--memory-limit", "512MB", "--ui", "plain"]
+            for key in ("admin0", "admin1", "municipality", "eez", "conservation-framework"):
+                options += ["--" + key, str(boundary)]
+
+            def replace_evidence(stage, *args, **kwargs):
+                if stage["name"] == "metadata":
+                    evidence.write_bytes(b'{"entries": [], "changed": true}\n')
+                return run_stage(stage, *args, **kwargs)
+
+            calls = []
+
+            def stop_at_database(stage, *args, **kwargs):
+                calls.append(stage["name"])
+                if stage["name"] == "coarse_db":
+                    raise KeyboardInterrupt
+                return run_stage(stage, *args, **kwargs)
+
+            with patch.dict(os.environ, {"GLOBAL_IUCN_REVIEWED_EVIDENCE_PATH": str(evidence)}), \
+                 patch("ark_pipeline.cli.benchmark_pipeline.shutil.which", return_value="fixture-compiler"):
+                with patch("ark_pipeline.cli.benchmark_pipeline.run_stage", side_effect=replace_evidence):
+                    failed = run(parser().parse_args(options))
+                self.assertEqual(failed["status"], "failed")
+                self.assertIn("Reviewed ecosystem evidence changed", failed["error"])
+                rejected = failed["stages"][-1]
+                self.assertEqual(rejected["name"], "metadata")
+                self.assertEqual(rejected["status"], "failed")
+                self.assertEqual(rejected["exit_code"], 0)
+                self.assertGreater(rejected["wall_seconds"], 0)
+                self.assertEqual(rejected["error"], failed["error"])
+                checkpoint = json.loads((output / "dashboard-state.json").read_text())
+                self.assertEqual(checkpoint["status"], "failed")
+                self.assertEqual(checkpoint["states"]["metadata"]["status"], "failed")
+                self.assertNotIn("species/species.parquet", failed["artifacts"])
+                self.assert_replay_lock_released(output)
+                # Restore only after the rejection is persisted, in a new invocation.
+                evidence.write_bytes(original)
+                with self.assertRaises(ValueError):
+                    replay_plan(self.replay_args(output, root / "rejected-replay", "coarse_db"))
+                self.assertFalse((root / "rejected-replay").exists())
+                with patch("ark_pipeline.cli.benchmark_pipeline.run_stage", side_effect=stop_at_database):
+                    resumed = run(parser().parse_args(options))
+                self.assertEqual(calls, ["metadata", "coarse_db"])
+                self.assertEqual(resumed["status"], "interrupted")
+                accepted = resumed["stages"][-1]
+                self.assertEqual(accepted["name"], "metadata")
+                self.assertEqual(accepted["status"], "passed")
+                self.assertNotEqual(accepted["attempt_id"], rejected["attempt_id"])
+                self.assertIn("species/species.parquet", resumed["artifacts"])
+                checkpoint = json.loads((output / "dashboard-state.json").read_text())
+                self.assertEqual(checkpoint["states"]["metadata"]["status"], "passed")
+                replay = run(self.replay_args(output, root / "accepted-replay", "coarse_db"))
+                self.assertEqual(replay["status"], "passed", replay.get("error"))
+                # An ordinary compatible resume keeps the now-accepted metadata.
+                calls.clear()
+                with patch("ark_pipeline.cli.benchmark_pipeline.run_stage", side_effect=stop_at_database):
+                    run(parser().parse_args(options))
+                self.assertEqual(calls, ["coarse_db"])
+
     def test_reviewed_evidence_selection_matches_stage_working_directory(self):
         with tempfile.TemporaryDirectory() as temporary:
             repository = Path(temporary).resolve()

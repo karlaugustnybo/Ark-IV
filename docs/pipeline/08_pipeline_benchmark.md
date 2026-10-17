@@ -125,6 +125,10 @@ changing, removing, adding or switching that input prevents reuse. This guard is
 conservative on standalone plans that predate metadata reconciliation. It does
 not add reconciliation to those plans. Runs without this recorded identity must
 use fresh output; saved reports and receipts are never migrated in place.
+A successful subprocess becomes a completed stage only after post-stage checks
+and artifact inventory succeed. A rejection retains its exit code and timing,
+but marks the stage failed in the report and dashboard. After restoring the
+original input, a compatible resume reruns that stage before accepting its outputs.
 On cancellation, the runner sends SIGTERM to its owned stage process group,
 allows a bounded grace period and kills any remaining group members even if the
 leader has exited. The direct process is reaped before interruption is reported.

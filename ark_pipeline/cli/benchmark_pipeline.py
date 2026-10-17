@@ -482,23 +482,33 @@ def run(args) -> dict:
             if measured["status"] != "passed":
                 dashboard.global_estimate = None
                 raise RuntimeError(f"{stage['name']} failed; see {measured['log']}")
-            validate_reviewed_evidence(config["reviewed_evidence"])
-            # Reuse the exact offline workload model once pairs/lists exist.
-            if (output / "lists-report.json").is_file():
-                measured_by_name = {s["name"]: s for s in report["stages"]}
-                projected_stages = []
-                for planned in stages:
-                    item = measured_by_name.get(planned["name"])
-                    if item:
-                        projected_stages.append(item)
-                    elif dashboard.forecast.base.get(planned["name"]) is not None:
-                        projected_stages.append({"name": planned["name"], "wall_seconds": dashboard.forecast.base[planned["name"]]})
-                projection = estimate(projected_stages, json.loads((output / "population.json").read_text()),
-                                      json.loads((output / "pairs-report.json").read_text()), json.loads((output / "lists-report.json").read_text()))
-                if len(projected_stages) == len(stages):
-                    dashboard.global_estimate = projection["total_seconds"]
-                report["live_projection"] = projection
-            report["artifacts"] = artifact_inventory(output)
+            try:
+                validate_reviewed_evidence(config["reviewed_evidence"])
+                # Reuse the exact offline workload model once pairs/lists exist.
+                if (output / "lists-report.json").is_file():
+                    measured_by_name = {s["name"]: s for s in report["stages"]}
+                    projected_stages = []
+                    for planned in stages:
+                        item = measured_by_name.get(planned["name"])
+                        if item:
+                            projected_stages.append(item)
+                        elif dashboard.forecast.base.get(planned["name"]) is not None:
+                            projected_stages.append({"name": planned["name"], "wall_seconds": dashboard.forecast.base[planned["name"]]})
+                    projection = estimate(projected_stages, json.loads((output / "population.json").read_text()),
+                                          json.loads((output / "pairs-report.json").read_text()), json.loads((output / "lists-report.json").read_text()))
+                    if len(projected_stages) == len(stages):
+                        dashboard.global_estimate = projection["total_seconds"]
+                    report["live_projection"] = projection
+                report["artifacts"] = artifact_inventory(output)
+            except (Exception, KeyboardInterrupt) as error:
+                # A successful subprocess is reusable only after its outputs are accepted.
+                status = "interrupted" if isinstance(error, KeyboardInterrupt) else "failed"
+                measured.update(status=status, error=str(error) or "Interrupted")
+                dashboard.global_estimate = None
+                dashboard.accept({"kind": "stage_end", "stage": stage["name"], "status": status,
+                                  "time": time.time(), "elapsed": measured["wall_seconds"] - previous_attempt,
+                                  "message": measured["error"]})
+                raise
             save()
         if sha256(manifest) != manifest_sha:
             raise ValueError("Acquisition manifest changed during benchmark")
