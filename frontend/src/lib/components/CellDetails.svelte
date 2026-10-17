@@ -17,7 +17,7 @@
     selectedH3,
     selectedH3Resolution
   } from '$lib/stores/map';
-  import { weights } from '$lib/stores/weights';
+  import { weights, type WeightKey } from '$lib/stores/weights';
   import { knowledgeLimitsText, occupancyCaveatText } from '$lib/map/cellCaveats';
 
   type ScoredSpecies = CellSpeciesRow & SpeciesTableRow & { threat: number; dna: number };
@@ -70,28 +70,31 @@
     Sampled: 5
   };
 
-  function enrich(species: CellSpeciesRow): ScoredSpecies {
+  function enrich(
+    species: CellSpeciesRow,
+    currentWeights: Record<WeightKey, number>
+  ): ScoredSpecies {
     const threat =
       (
         {
-          'Critically Endangered': $weights.cr,
-          Endangered: $weights.en,
-          Vulnerable: $weights.vu,
-          'Near Threatened': $weights.nt,
-          'Data Deficient': $weights.dd,
-          'Least Concern': $weights.lc
+          'Critically Endangered': currentWeights.cr,
+          Endangered: currentWeights.en,
+          Vulnerable: currentWeights.vu,
+          'Near Threatened': currentWeights.nt,
+          'Data Deficient': currentWeights.dd,
+          'Least Concern': currentWeights.lc
         } as Record<string, number>
       )[species.redlist_category] ?? 0;
     const dna =
       species.dna_level === 'GoaT Data Deficient'
-        ? $weights.gdd
+        ? currentWeights.gdd
         : species.dna_level === 'Missing Family'
-          ? $weights.fam
+          ? currentWeights.fam
           : species.dna_level === 'Missing Genus'
-            ? $weights.gen
+            ? currentWeights.gen
             : species.dna_level === 'Missing Species'
-              ? $weights.sp
-              : $weights.samp;
+              ? currentWeights.sp
+              : currentWeights.samp;
     const dnaLabel =
       species.dna_level === 'Sampled' ? 'Already Sampled' : `${species.dna_level} (${dna})`;
     return {
@@ -104,24 +107,30 @@
     };
   }
 
-  function compare(a: ScoredSpecies, b: ScoredSpecies): number {
+  function compare(
+    a: ScoredSpecies,
+    b: ScoredSpecies,
+    activeSort: SpeciesSortKey,
+    activeOrder: 'asc' | 'desc'
+  ): number {
     let result = 0;
-    if (sort === 'species_name' || sort === 'family') result = a[sort].localeCompare(b[sort]);
-    else if (sort === 'redlist_category')
+    if (activeSort === 'species_name' || activeSort === 'family')
+      result = a[activeSort].localeCompare(b[activeSort]);
+    else if (activeSort === 'redlist_category')
       result = (statusRanks[a.redlist_category] ?? 7) - (statusRanks[b.redlist_category] ?? 7);
-    else if (sort === 'dna_level') result = a.dna - b.dna;
+    else if (activeSort === 'dna_level') result = a.dna - b.dna;
     else result = a.priority - b.priority;
-    if (result) return order === 'asc' ? result : -result;
-    if (sort === 'priority') {
+    if (result) return activeOrder === 'asc' ? result : -result;
+    if (activeSort === 'priority') {
       result = (statusRanks[a.redlist_category] ?? 7) - (statusRanks[b.redlist_category] ?? 7);
       if (!result) result = (dnaRanks[a.dna_level] ?? 5) - (dnaRanks[b.dna_level] ?? 5);
-    } else if (sort === 'dna_level')
+    } else if (activeSort === 'dna_level')
       result = (dnaRanks[a.dna_level] ?? 5) - (dnaRanks[b.dna_level] ?? 5);
     return result || a.species_name.localeCompare(b.species_name);
   }
 
   $: scored = ($cellDetails?.species ?? [])
-    .map(enrich)
+    .map((species) => enrich(species, $weights))
     .filter((species) => {
       const query = cellSearch.trim().toLocaleLowerCase();
       return (
@@ -131,7 +140,7 @@
         (!dnaFilters.length || dnaFilters.includes(species.dna_level))
       );
     })
-    .sort(compare);
+    .sort((a, b) => compare(a, b, sort, order));
   $: pages = Math.max(1, Math.ceil(scored.length / perPage));
   $: if (page > pages) page = pages;
   $: visible = scored.slice((page - 1) * perPage, page * perPage);

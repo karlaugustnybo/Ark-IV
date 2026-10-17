@@ -342,10 +342,10 @@
         <div class="about-content">
           <h2>Licences and credits</h2>
           <p>
-            Ark-IV application code is available under <a
+            Ark-IV application code is available under the <a
               href="https://github.com/karlaugustnybo/DIKUs-Ark/blob/main/LICENSE"
               target="_blank"
-              rel="noreferrer">AGPL-3.0-only</a
+              rel="noreferrer">repository licence</a
             >. That code licence does not grant permission to redistribute a dataset. The public
             code release excludes IUCN rows, global distributions, and generated serving databases.
           </p>

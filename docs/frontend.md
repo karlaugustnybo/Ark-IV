@@ -32,6 +32,8 @@ coverage or selected jurisdiction.
 
 Table parameter changes supersede pending requests from the first load onward,
 including after errors. Cell details abort owned work when closed or removed.
+Open cell rows update their ordering, priorities and DNA-gap labels immediately
+when sorting or shared weights change, including a weight reset.
 Window shortcuts leave native controls, links, editable content and previously
 handled events alone. Place filters, weights and selections remain shared across
 routes; Reset all clears table filters and spatial scope.
