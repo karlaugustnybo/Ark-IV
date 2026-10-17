@@ -25,7 +25,10 @@ export type MapMetadata = {
   jurisdiction_score_domains?: Record<string, Record<string, ScoreDomain>>;
   boundary_assignment?: string;
   boundary_score_domains?: Record<string, Record<string, Record<string, ScoreDomain>>>;
-  boundary_species_normalized_score_domains?: Record<string, Record<string, Record<string, ScoreDomain>>>;
+  boundary_species_normalized_score_domains?: Record<
+    string,
+    Record<string, Record<string, ScoreDomain>>
+  >;
   boundary_tile_properties?: Record<string, string>;
   resolution_tile_ranges?: Record<string, TileZoomRange>;
   res7_coverage_version?: number;
@@ -86,10 +89,7 @@ async function loadCoarseSnapshot(descriptor: CoarseSnapshotDescriptor): Promise
   // development server and API deliberately run on different ports).
   const metadataUrl = new URL(config.mapMetadataUrl, window.location.href);
   const snapshotUrl = new URL(descriptor.url, metadataUrl);
-  const [initialResponse, arrow] = await Promise.all([
-    fetch(snapshotUrl),
-    import('apache-arrow')
-  ]);
+  const [initialResponse, arrow] = await Promise.all([fetch(snapshotUrl), import('apache-arrow')]);
   // A failed response can outlive a development-server restart in the HTTP
   // cache. Retry that exceptional path from the network; successful hashed
   // artifacts remain cached normally via their immutable response headers.
@@ -97,7 +97,9 @@ async function loadCoarseSnapshot(descriptor: CoarseSnapshotDescriptor): Promise
     ? initialResponse
     : await fetch(snapshotUrl, { cache: 'reload' });
   if (!response.ok) {
-    throw new Error(`Unable to load the global coarse map (${response.status} from ${snapshotUrl})`);
+    throw new Error(
+      `Unable to load the global coarse map (${response.status} from ${snapshotUrl})`
+    );
   }
   const table = arrow.tableFromIPC(await response.arrayBuffer());
   const h3Column = table.getChild('h3_index') as ArrowColumn | null;
@@ -118,12 +120,15 @@ async function loadCoarseSnapshot(descriptor: CoarseSnapshotDescriptor): Promise
     const column = table.getChild(framework) as ArrowColumn | null;
     if (column) boundaryColumns.set(framework, column);
   }
-  const h3Indexes = Array.from({ length: table.numRows }, (_, index) => String(h3Column.get(index)));
+  const h3Indexes = Array.from({ length: table.numRows }, (_, index) =>
+    String(h3Column.get(index))
+  );
   return {
     length: table.numRows,
     indices: Uint32Array.from({ length: table.numRows }, (_, index) => index),
     h3Indexes,
-    metric: (prefix, name, index) => Number(metricColumns.get(`${prefix}_${name}`)?.get(index) ?? 0),
+    metric: (prefix, name, index) =>
+      Number(metricColumns.get(`${prefix}_${name}`)?.get(index) ?? 0),
     boundaryCodes: (framework, index) => stringList(boundaryColumns.get(framework)?.get(index))
   };
 }
@@ -149,11 +154,15 @@ export function preloadMapBundle(): Promise<MapBundle> {
 }
 
 export function preloadMapBundleInIdleTime(): () => void {
-  const connection = (navigator as Navigator & {
-    connection?: { saveData?: boolean; effectiveType?: string };
-  }).connection;
+  const connection = (
+    navigator as Navigator & {
+      connection?: { saveData?: boolean; effectiveType?: string };
+    }
+  ).connection;
   if (connection?.saveData || connection?.effectiveType === '2g') return () => {};
-  const start = () => { void preloadMapBundle().catch(() => {}); };
+  const start = () => {
+    void preloadMapBundle().catch(() => {});
+  };
   if ('requestIdleCallback' in window) {
     const id = window.requestIdleCallback(start, { timeout: 1_500 });
     return () => window.cancelIdleCallback(id);

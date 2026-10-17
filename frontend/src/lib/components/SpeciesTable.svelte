@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { ignoresWindowShortcut } from '$lib/map/keyboardShortcuts';
   import { onMount } from 'svelte';
   import { get } from 'svelte/store';
   import { api, type SpeciesPage } from '$lib/api/client';
@@ -6,7 +7,15 @@
   import { dnaStatus, type SpeciesSortKey, type SpeciesTableRow } from '$lib/species-table';
   import { weights } from '$lib/stores/weights';
   import { boundaryFilters } from '$lib/stores/boundaries';
-  import { tableDna, tableOrder, tablePage, tableRedlist, tableSearch, tableSort, tableSystems } from '$lib/stores/species';
+  import {
+    tableDna,
+    tableOrder,
+    tablePage,
+    tableRedlist,
+    tableSearch,
+    tableSort,
+    tableSystems
+  } from '$lib/stores/species';
 
   let result: SpeciesPage | null = null;
   let loading = true;
@@ -26,11 +35,16 @@
     const current = get(weights);
     const filters = get(boundaryFilters);
     return new URLSearchParams({
-      search: get(tableSearch), sort: get(tableSort), order: get(tableOrder),
-      page: String(get(tablePage)), per_page: String(perPage),
-      redlist: get(tableRedlist).join(','), dna: get(tableDna).join(','),
+      search: get(tableSearch),
+      sort: get(tableSort),
+      order: get(tableOrder),
+      page: String(get(tablePage)),
+      per_page: String(perPage),
+      redlist: get(tableRedlist).join(','),
+      dna: get(tableDna).join(','),
       systems: get(tableSystems).join(','),
-      admin0: (filters.admin0 ?? []).join(','), admin1: (filters.admin1 ?? []).join(','),
+      admin0: (filters.admin0 ?? []).join(','),
+      admin1: (filters.admin1 ?? []).join(','),
       municipality: (filters.municipality ?? []).join(','),
       eez: (filters.eez ?? []).join(','),
       conservation_framework: (filters.conservation_framework ?? []).join(','),
@@ -48,13 +62,14 @@
     try {
       const nextResult = await api.species(params(), controller.signal);
       if (currentRequest === requestId) result = nextResult;
-    }
-    catch (reason) {
-      if (currentRequest === requestId && !(reason instanceof DOMException && reason.name === 'AbortError')) {
+    } catch (reason) {
+      if (
+        currentRequest === requestId &&
+        !(reason instanceof DOMException && reason.name === 'AbortError')
+      ) {
         error = reason instanceof Error ? reason.message : 'Unable to load species';
       }
-    }
-    finally {
+    } finally {
       if (currentRequest === requestId) loading = false;
       if (abortController === controller) abortController = null;
     }
@@ -71,10 +86,12 @@
   }
 
   function sort(key: SpeciesSortKey) {
-    if (get(tableSort) === key) tableOrder.update((value) => value === 'asc' ? 'desc' : 'asc');
+    if (get(tableSort) === key) tableOrder.update((value) => (value === 'asc' ? 'desc' : 'asc'));
     else {
       tableSort.set(key);
-      tableOrder.set(key === 'species_name' || key === 'family' || key === 'redlist_category' ? 'asc' : 'desc');
+      tableOrder.set(
+        key === 'species_name' || key === 'family' || key === 'redlist_category' ? 'asc' : 'desc'
+      );
     }
     schedule(true);
   }
@@ -88,29 +105,44 @@
   }
 
   function keydown(event: KeyboardEvent) {
-    if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement || !result) return;
+    if (ignoresWindowShortcut(event) || !result) return;
     if (event.key === 'ArrowLeft' && result.page > 1) {
       event.preventDefault();
       page(-1);
-    }
-    else if (event.key === 'ArrowRight' && result.page < result.total_pages) {
+    } else if (event.key === 'ArrowRight' && result.page < result.total_pages) {
       event.preventDefault();
       page(1);
-    }
-    else {
+    } else {
       const shortcuts: Partial<Record<string, SpeciesSortKey>> = {
-        '1': 'species_name', '2': 'family', '3': 'redlist_category', '4': 'dna_level', '5': 'priority'
+        '1': 'species_name',
+        '2': 'family',
+        '3': 'redlist_category',
+        '4': 'dna_level',
+        '5': 'priority'
       };
       const key = shortcuts[event.key];
       if (key) sort(key);
     }
   }
 
-  const subscriptions = [weights, tableSearch, tableRedlist, tableDna, tableSystems, boundaryFilters]
-    .map((store) => store.subscribe(() => { if (result) schedule(true); }));
   onMount(() => {
-    load();
+    let ready = false;
+    const subscriptions = [
+      weights,
+      tableSearch,
+      tableRedlist,
+      tableDna,
+      tableSystems,
+      boundaryFilters
+    ].map((store) =>
+      store.subscribe(() => {
+        if (ready) schedule(true);
+      })
+    );
+    ready = true;
+    void load();
     return () => {
+      ready = false;
       subscriptions.forEach((unsubscribe) => unsubscribe());
       clearTimeout(debounce);
       requestId += 1;
@@ -123,11 +155,18 @@
 
 <div class="species-table-toolbar table-results-toolbar">
   <span>{result ? `${result.total.toLocaleString()} matching species` : 'Species results'}</span>
-  <label class="page-size">Rows <select bind:value={perPage} on:change={() => schedule(true)}><option value={10}>10</option><option value={25}>25</option><option value={50}>50</option></select></label>
+  <label class="page-size"
+    >Rows <select bind:value={perPage} on:change={() => schedule(true)}
+      ><option value={10}>10</option><option value={25}>25</option><option value={50}>50</option
+      ></select
+    ></label
+  >
 </div>
 {#if error}<p class="error-message">{error}</p>{/if}
 {#if result?.suggested && $tableSearch.trim()}
-  <p class="search-notice" role="status">No exact matches for “{$tableSearch.trim()}”. Showing similar names.</p>
+  <p class="search-notice" role="status">
+    No exact matches for “{$tableSearch.trim()}”. Showing similar names.
+  </p>
 {/if}
 <SpeciesDataTable
   rows={tableRows}
@@ -142,10 +181,18 @@
 
 {#if result}
   <div class="pagination">
-    <span class="page-info"><strong>{result.total.toLocaleString()}</strong> species · Page {result.page} of {result.total_pages}</span>
+    <span class="page-info"
+      ><strong>{result.total.toLocaleString()}</strong> species · Page {result.page} of {result.total_pages}</span
+    >
     <div class="pagination-buttons">
-      <button class="btn-secondary" disabled={loading || result.page <= 1} on:click={() => page(-1)}>Previous</button>
-      <button class="btn-secondary" disabled={loading || result.page >= result.total_pages} on:click={() => page(1)}>Next</button>
+      <button class="btn-secondary" disabled={loading || result.page <= 1} on:click={() => page(-1)}
+        >Previous</button
+      >
+      <button
+        class="btn-secondary"
+        disabled={loading || result.page >= result.total_pages}
+        on:click={() => page(1)}>Next</button
+      >
     </div>
   </div>
 {/if}

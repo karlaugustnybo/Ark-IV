@@ -19,6 +19,8 @@ stage-based CLI names and artifact-based builders.
 7. [Global serving pipeline](pipeline/07_global_serving_pipeline.md)
 8. [End-to-end benchmark](pipeline/08_pipeline_benchmark.md)
 
+- [Map and table interaction](frontend.md)
+
 ## Reference
 
 - [Source inventory](reference/global_source_data.md)

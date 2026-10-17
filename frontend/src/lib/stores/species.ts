@@ -18,5 +18,9 @@ export type SpeciesHighlightState = {
 };
 
 export const selectedSpecies = writable<SelectedSpecies | null>(null);
-export const speciesHighlight = writable<SpeciesHighlightState>({ status: 'idle', count: 0, resolution: 3 });
+export const speciesHighlight = writable<SpeciesHighlightState>({
+  status: 'idle',
+  count: 0,
+  resolution: 3
+});
 export const speciesHighlightGradient = writable(false);
