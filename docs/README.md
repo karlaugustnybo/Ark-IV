@@ -52,3 +52,14 @@ Optional research: [dated-tree, EDGE and phylogenetic gaps](pipeline/09_edge_pro
 [Serving export investigations](../notebooks/README.md) cover data completeness,
 coarse mapped range and DNA representation, and score-surface sensitivity.
 Use invented fixtures for code verification; real derived outputs remain local.
+
+## Research plans and evaluation
+
+These documents propose investigations; they are not implementation specifications
+or evidence of a validated global dataset. Optional unmerged work is identified in
+the roadmap and serving guide.
+
+- [Mentor-facing roadmap](roadmap-mini.md)
+- [GBIF–IUCN concordance proposal](GBIF%E2%80%93IUCN%20Concordance%20Extension%20Idea.md)
+- [Remaining performance hypotheses](performance/next_large_gains.md)
+- [Optimization evaluation method](performance/pipeline_optimization.md)
