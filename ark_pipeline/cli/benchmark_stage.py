@@ -62,6 +62,9 @@ def validate_replay_inventory(source, inventory, directories):
 
 
 def validate_replay_identities(config, selection=None):
+    from ark_pipeline.cli.benchmark_pipeline import validate_reviewed_evidence
+
+    validate_reviewed_evidence(config["reviewed_evidence"])
     if load_spatial_profile(Path(config["profile"])).digest != config["profile_sha256"]:
         raise ValueError("Spatial profile changed during stage replay")
     if selection is not None:
@@ -104,7 +107,12 @@ def replay_plan(args):
     if name == "tiles":
         stage["timeout_seconds"] = 1200
     required = []
-    for flag, relative in INPUT_FLAGS.get(name, {}).items():
+    inputs = dict(INPUT_FLAGS.get(name, {}))
+    # Older standalone record plans have no crosswalk argument. All existing
+    # required flags still fail closed if a malformed plan omits one.
+    if name == "prepared_inputs" and "--crosswalk" in stage["command"]:
+        inputs["--crosswalk"] = CROSSWALK
+    for flag, relative in inputs.items():
         path = source / relative
         required.append(path)
         stage["command"][stage["command"].index(flag) + 1] = str(path)
@@ -134,6 +142,8 @@ def replay_plan(args):
               "warnings": ["Stage replay uses previously built inputs; it does not measure a full pipeline build.",
                            "Source, profile, sample and boundary paths are inherited from --from-run; worker and memory settings are those shown for this invocation."]}
     if not args.dry_run:
+        if config["reviewed_evidence"] != saved.get("reviewed_evidence"):
+            raise ValueError("Reviewed ecosystem evidence changed or was not fingerprinted by the input benchmark")
         if sha256(root / "acquisition/current.json") != previous["acquisition_manifest_sha256"]:
             raise ValueError("Acquisition manifest changed since the input benchmark")
         if load_spatial_profile(Path(config["profile"])).digest != saved["profile_sha256"]:

@@ -118,6 +118,13 @@ A changed environment starts a new automatically discovered run; an explicit
 existing directory is rejected. Legacy benchmark identities lacking environment
 provenance are preserved but cannot be migrated safely: choose fresh output.
 Schema-1 dashboard checkpoints with an exactly matching identity remain supported.
+The selected reviewed ecosystem evidence file is pinned by canonical path,
+presence and SHA-256, including an outside-config
+`GLOBAL_IUCN_REVIEWED_EVIDENCE_PATH` override. An unchanged input permits resume;
+changing, removing, adding or switching that input prevents reuse. This guard is
+conservative on standalone plans that predate metadata reconciliation. It does
+not add reconciliation to those plans. Runs without this recorded identity must
+use fresh output; saved reports and receipts are never migrated in place.
 On cancellation, the runner sends SIGTERM to its owned stage process group,
 allows a bounded grace period and kills any remaining group members even if the
 leader has exited. The direct process is reaped before interruption is reported.
@@ -256,6 +263,10 @@ recorded member and contain no added files; unrelated outputs are ignored.
 The profile and pair sample/metadata identities are rechecked before success is
 reported. A persistent input change during execution leaves a failed replay
 report and isolated outputs, preserving the previous run.
+Replay also requires the selected reviewed evidence identity to match the saved
+run and rechecks it before and after execution. Its selected path is passed to
+subprocesses explicitly. Prepared-input replay rebinds a crosswalk when the
+recorder command consumes one, retaining older plans without that argument.
 External boundary hashes must match the
 original run. Changed or unrecorded inputs are rejected before output creation.
 Tile replay has a 20-minute cutoff, using the same owned-group cleanup as cancellation.
