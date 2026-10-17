@@ -1180,3 +1180,32 @@ is missing remains unscored for branch-based metrics; the explicit reason is
 No branch length is inferred merely from its IUCN category.
 
 Historical research artifacts remain local; rebuilt outputs carry their own source and code receipts.
+
+## Exploratory serving notebooks
+
+The three [serving notebooks](notebooks/README.md) are descriptive investigations,
+not production replacements. They preserve the default threat/DNA ladder and
+check executable SQL against production predicates, including NULL and
+contradictory evidence states. A configured input identity hashes consumed
+files, including the crosswalk; it is not proof of compatible source releases.
+
+Range analysis uses coarse mapped extent, excludes unknown DNA observations
+from representation-rate denominators, and reports family-clustered logistic
+associations. Logit coefficients are converted with `exp(beta)`; conditional
+mapping and representation odds ratios are separate, never an asserted joint
+population bias. Assessment-cohort coverage is a cross-section, not a time series
+of sequencing progress. Species-level flags use the website evidence rule and
+must not be relabelled completed reference genomes.
+
+Score exploration checks range-rarity conservation against one weight per
+listed species and independently checks declared range lengths. Country shares
+use overlapping country-scope contact cells (nonempty `admin0`), including
+possible EEZ-only contacts; this is not a terrestrial mask. Ecoregion fractions
+keep country-contacted species with zero coverage and intersect the numerator
+with that same country-contact denominator. Ecoregions are not protected areas.
+Moran permutations use the same
+zero-based adjacency and normalization as observed values. Rank comparisons
+keep zero-score cells in a consistent selected universe; constant correlations
+are undefined. Parent aggregation repeats child budgets rather than rebuilding
+deduplicated parent-species membership. Fixtures validate these code contracts,
+not global coverage, biological accuracy, causal inference or data-release rights.

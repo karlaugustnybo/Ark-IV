@@ -46,3 +46,9 @@ kept under local-only `archive/research/`, not in the GitHub code release. Curre
 validation lives in `tests/`; use `just data-benchmark` for new end-to-end timings.
 
 Optional research: [dated-tree, EDGE and phylogenetic gaps](pipeline/09_edge_prototype.md).
+
+## Exploratory notebooks
+
+[Serving export investigations](../notebooks/README.md) cover data completeness,
+coarse mapped range and DNA representation, and score-surface sensitivity.
+Use invented fixtures for code verification; real derived outputs remain local.

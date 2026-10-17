@@ -39,3 +39,7 @@ ignore = ["E402", "E501"]
 
 [tool.uv.sources]
 dated-complete-tree = { git = "https://github.com/jdduke24/dated-complete-tree.git", rev = "a82c4ca2531e709f07265eef6f16ef971bf36d76" }
+
+# Bound interactive serialization; notebooks pass lean chart frames, not full joins.
+[tool.marimo.runtime]
+output_max_bytes = 30_000_000
