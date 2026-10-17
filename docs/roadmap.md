@@ -422,3 +422,43 @@ the implementation passes tests.
 **Priority:** P2 · **Status:** External
 
 Estimate production hosting and data-storage costs, then identify funding or institutional infrastructure that can keep the public application reliably available.
+
+## Optional dated-tree research
+
+### Compute Ark-IV EDGE-style scores from a dated global tree
+
+**Priority:** P1 · **Status:** Experimental
+
+The optional [research workflow](pipeline/09_edge_prototype.md) computes complete-crown
+ED/EDGE-style descriptors with a pinned reference engine, audited identities,
+seeded risk draws, sampled tree comparisons and an original-author arithmetic
+benchmark. Source versions and uncertainty remain explicit. Matching coverage
+is separate from scored coverage and scientific dataset acceptance. Full ensembles,
+release-specific calibration provenance, taxon-concept review and biological
+validation remain open. Descriptive prototypes do not certify official EDGE lists.
+
+### Add a phylogenetic-gap score
+
+**Priority:** P1 · **Status:** Experimental
+
+The mammal investigation measures rooted marginal PD under the existing website
+DNA representation rule and current threat weights. It includes unassessed
+relatives in the baseline, audits missing identities, withholds affected
+same-genus priorities, and recomputes gains for greedy selection. The selected
+tree and broad sample/project/assembly evidence rule remain fixed inputs.
+Tree-date sensitivity, incomplete baseline reconciliation and biological
+calibration remain necessary before adopting a new priority score. A lack of
+recorded evidence does not prove a lack of genomes.
+
+### Integrate dated-tree identities, EDGE and DNA gaps into the data pipeline
+
+**Priority:** P1 · **Status:** Proposed
+
+Keep this as a separate future integration: registered dated-tree/OTT inputs →
+audited identities → checked current GoaT baseline → optional clade descriptors
+and gaps → provenance-aware species fields → explicitly reviewed serving/UI use.
+Preserve direct, expanded and synonym linkage provenance, unresolved values and
+compatible source/code receipts. Identity links do not authorize genomic transfers.
+No current production score or map cache consumes these research artifacts.
+New default priorities require independent scientific acceptance; pipeline wiring
+alone is not that acceptance. Data publication requires the existing release policy.

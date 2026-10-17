@@ -1130,3 +1130,53 @@ metadata fields identify unresolved spatial-only records and historical
 assessments without transferring source categories into scoring. Mutable static
 archives carry a representation version independent of tile schema, reject
 stale version URLs, and require ETag revalidation for full and range responses.
+
+## Optional dated-tree research
+
+A separate optional [dated-tree mammal prototype](docs/pipeline/09_edge_prototype.md)
+now computes ED and original EDGE (`ln(1 + ED) + GE ln(2)`), plus ED2/GE2/EDGE2
+components using the pinned Duke reference engine. It operates on the complete
+released mammal crown before joining reviewed IUCN assessments, reports every
+join failure, and compares scores with the published mammal supplement. Both
+scoring entry points require the canonical NCBI concept to be present at species
+rank in the registered current nodes snapshot before assigning assessment risk
+or attempting current-name rescue. Rejected tips retain unjoined pooled risk.
+Its 256 seeded risk draws use one median tree, so the reported intervals omit
+phylogenetic uncertainty. Output status is `prototype_unvalidated`; these
+descriptive artifacts are separate from the species dimension and supply no
+map score weights. The guide describes provenance and limitations.
+
+The follow-up `just edge-validate` adds conservative exact NCBI-name bridges
+with agreeing genus/family, no conflicting identifier and unique assignments.
+It compares configured median/sample trees using identical per-species uniform risk
+draws, audits extra nonmammalian environmental samples and keeps the full
+retained mammal universe for branch sharing. It reports pilot rank ranges,
+top-100 frequencies and published terminal-branch discrepancies. These small
+convenience samples do not establish official EDGE2 lists or full-ensemble
+confidence. The two median trees differ in topology, and the current date
+cache postdates the release; interpolation-method effects and release-specific
+date provenance remain unresolved.
+
+### Extinction-status precedence for dated-tree calculations
+
+**Verified IUCN species assessments overrule OTT/tree extinction flags.**
+For an identified species with a verified global assessment, use its registered
+IUCN category for conservation status and extinction classification. An OTT
+`extinct` or `extinct_inherited` flag cannot turn an IUCN EN, LC or other non-EX
+assessment into EX, exclude an otherwise valid scored leaf, or erase its DNA
+evidence. EX is classified extinct; EW remains a separate category. Possibly
+extinct assessment flags are retained without silently converting CR to EX.
+For DD, the effective flag means "not classified EX", not proof of living
+individuals. Missing/NE assessments remain unresolved and do not assert an
+IUCN status override.
+
+The calculation records the original OTT flags, IUCN SIS/assessment IDs and
+category, `effective_extinct`, `extinction_status_source`, conflict and override
+flags. Raw source files are preserved. Overrides resolve status only: unique
+species identity, genomic-transfer permissions, DNA-quality rules and dated
+branch availability retain their existing checks. A species whose dated leaf
+is missing remains unscored for branch-based metrics; the explicit reason is
+`iucn_status_override_tree_leaf_missing`, rather than an exclusion as extinct.
+No branch length is inferred merely from its IUCN category.
+
+Historical research artifacts remain local; rebuilt outputs carry their own source and code receipts.

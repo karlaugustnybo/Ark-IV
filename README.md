@@ -290,3 +290,9 @@ The code licence does **not** apply to source datasets or generated data
 artifacts. Those retain their own terms and required credits; see `NOTICE.md`
 and `DATA_POLICY.md`. In particular, CC0 does not grant permission to publish
 IUCN, EDGE, or other restricted data alongside the application.
+
+## Optional phylogenetic research
+
+The [dated-tree research guide](docs/pipeline/09_edge_prototype.md) documents optional
+EDGE-style scoring, audited tree identities, reference benchmarks and sequencing gaps.
+Install with `uv sync --group edge`; outputs stay local and do not alter map priorities.

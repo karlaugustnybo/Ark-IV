@@ -1,0 +1,44 @@
+schema_version = 1
+engine_commit = "a82c4ca2531e709f07265eef6f16ef971bf36d76"
+reference_commit = "f6a588afc28ad189c7084245f848a4113cba179e"
+upham_commit = "740b70189c77fc168be17bd6ade204c755bcb19b"
+
+[[sources]]
+id = "reference-edge-r"
+filename = "EDGE.2.calc"
+url = "https://raw.githubusercontent.com/rgumbs/EDGE2/f6a588afc28ad189c7084245f848a4113cba179e/EDGE.2.calc"
+release = "rgumbs/EDGE2 f6a588afc28ad189c7084245f848a4113cba179e"
+license = "No repository licence declared; local validation only, do not vendor"
+sha256 = "46cd4b5d70738386f908535bbdce7814229d3979cff5c0d3f887560020e443c7"
+
+[[sources]]
+id = "reference-ge-r"
+filename = "GE.2.calc"
+url = "https://raw.githubusercontent.com/rgumbs/EDGE2/f6a588afc28ad189c7084245f848a4113cba179e/GE.2.calc"
+release = "rgumbs/EDGE2 f6a588afc28ad189c7084245f848a4113cba179e"
+license = "No repository licence declared; local validation only, do not vendor"
+sha256 = "28cd229dddbaf911847c8ad5d930760ac68dc907284347f1935075788d2303f7"
+
+[[sources]]
+id = "upham-node-dated-100"
+filename = "MamPhy_fullPosterior_BDvr_Completed_5911sp_topoCons_NDexp_v2_sample100_nexus.trees"
+url = "https://raw.githubusercontent.com/n8upham/MamPhy_v1/740b70189c77fc168be17bd6ade204c755bcb19b/_DATA/MamPhy_fullPosterior_BDvr_Completed_5911sp_topoCons_NDexp_v2_sample100_nexus.trees"
+release = "Upham et al. 2019 node-dated completed author sample of 100 trees"
+license = "Author data accompanying 10.5061/dryad.tb03d03; retain attribution"
+sha256 = "d3c7be9b3a8c49d16555f8d2431b4f117df2dc1a297224ddd51e429b225e1878"
+
+[[sources]]
+id = "upham-taxonomy"
+filename = "taxonomy_mamPhy_5911species_toPublish.csv"
+url = "https://raw.githubusercontent.com/n8upham/MamPhy_v1/740b70189c77fc168be17bd6ade204c755bcb19b/_DATA/taxonomy_mamPhy_5911species_toPublish.csv"
+release = "Upham et al. 2019 author taxonomy"
+license = "Author data accompanying 10.5061/dryad.tb03d03; retain attribution"
+sha256 = "cffe4e02b013c338145d9b091f9da2f8b9d0d365a5b8e05d1efccf26a51b5134"
+
+[[sources]]
+id = "reference-methods"
+filename = "gumbs_s2_methods.docx"
+url = "https://journals.plos.org/plosbiology/article/file?id=10.1371/journal.pbio.3001991.s002&type=supplementary"
+release = "Gumbs et al. 2023 S2 Text"
+license = "CC-BY-4.0 article supplement"
+sha256 = "220b67013c5815998f054bedc280f48135ad0a9aaabcb551b5716bf41fb0578a"

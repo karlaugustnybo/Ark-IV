@@ -90,3 +90,34 @@ two databases removed during the 2026-09-04 history cleanup. This is a
 permanent regression guard: it prevents an old clone, branch, or tag from
 silently reintroducing the restricted objects. The incident and remediation
 are recorded in `docs/reference/restricted-data-history-incident.md`.
+
+## Optional dated-tree investigation
+
+The mammal prototype pins its public inputs in `config/edge_prototype.toml`.
+The [dated-tree release](https://zenodo.org/records/19049120) declares CC BY
+4.0. Its separate [reference software](https://github.com/jdduke24/dated-complete-tree)
+uses BSD-3-Clause; that software licence does not license the tree data.
+[Open Tree's data policy](https://tree.opentreeoflife.org/about/licenses)
+uses CC0 where pre-existing source terms do not limit it. OTT 3.7.3 includes
+third-party taxonomies, so retain its provenance and review inherited terms
+before distributing derivatives. [NCBI's policy](https://www.ncbi.nlm.nih.gov/home/about/policies/)
+places US-government-created material in the public domain and distinguishes
+third-party copyrighted material.
+
+The [Gumbs et al. 2023 article and S1 Data supplement](https://doi.org/10.1371/journal.pbio.3001991)
+are used for local scientific comparison with attribution. This is a separate
+source from ZSL's website priority lists. All downloaded trees, taxonomies,
+supplements, input receipts, species scores and comparison reports remain in
+ignored `data/edge/`. The computed outputs also use authorized IUCN
+assessment data and therefore follow the existing derived-data release rule.
+This optional acquisition is independent of the required global update pipeline.
+
+`config/edge_benchmark.toml` separately pins the original EDGE2 authors' R
+calculator and Upham et al. mammal-tree sample. The R source has no declared
+repository licence: downloaded files and R-library dependencies stay under
+ignored `data/edge/benchmark/` and are not vendored into application code.
+Retain attribution for the [mammal source data](https://doi.org/10.5061/dryad.tb03d03)
+and the Gumbs supplementary methods. Identity mappings and per-species
+benchmarks stay local under the same derived-data release rules. A successful
+arithmetic comparison does not establish redistribution rights or certify
+official EDGE priority lists.
