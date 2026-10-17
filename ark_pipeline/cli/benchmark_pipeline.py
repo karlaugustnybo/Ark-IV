@@ -337,7 +337,8 @@ def plan(args) -> tuple[dict, list[dict], dict]:
                          "--species-systems", systems, "--output-dir", output / "metrics", "--scratch-dir", output / "scratch/metrics",
                          "--memory-limit", args.memory_limit, "--no-progress"])
     add("prepared_inputs", [*python, "ark_pipeline.cli.serving_tiles", "record", "--h3-root", h3, "--parts-dir", output / "metrics", "--build-duckdb", output / "build.duckdb",
-                            "--species", species, "--species-systems", systems, "--metadata-template", output / "coarse-tiles/map-metadata.json", "--output", output / "prepared-inputs.json"])
+                            "--species", species, "--species-systems", systems, "--crosswalk", crosswalk,
+                            "--metadata-template", output / "coarse-tiles/map-metadata.json", "--output", output / "prepared-inputs.json"])
     add("tiles", [*python, "ark_pipeline.cli.serving_tiles", "build", "--prepared-inputs", output / "prepared-inputs.json", "--output-dir", output / "tiles",
                   "--scratch-dir", output / "scratch/tiles", *[value for key, path in boundaries.items() for value in ("--" + key.replace("_", "-"), path)]])
     paths = {"DATA_DIR": output, "SOURCE_DUCKDB_PATH": output / "source.duckdb", "BUILD_DUCKDB_PATH": output / "build.duckdb",
