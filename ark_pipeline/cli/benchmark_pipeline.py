@@ -60,6 +60,27 @@ RESOURCE_FLAGS = ("workers", "spatial_workers", "metric_workers", "duckdb_thread
 BOUNDARY_ENV = dict(zip(BOUNDARIES, ("JURISDICTIONS_PATH", "ADMIN1_BOUNDARIES_PATH", "MUNICIPALITY_BOUNDARIES_PATH", "EEZ_BOUNDARIES_PATH", "CONSERVATION_BOUNDARIES_PATH")))
 
 
+def reviewed_evidence_identity(path: Path | None = None) -> dict:
+    """Match metadata's selected override/default, including an absent input.
+
+    Keep this guard usable on standalone plans predating reconciliation. It
+    conservatively pins the input without importing that optional consumer.
+    """
+    configured = os.environ.get("GLOBAL_IUCN_REVIEWED_EVIDENCE_PATH")
+    selected = path if path is not None else (Path(configured) if configured is not None
+        else REPOSITORY_ROOT / "config/iucn_reviewed_ecosystem_evidence.json")
+    selected = selected.expanduser()
+    # Stage subprocesses run from the repository, even when the caller does not.
+    selected = (REPOSITORY_ROOT / selected).resolve()
+    present = selected.is_file()
+    return {"path": str(selected), "present": present, "sha256": sha256(selected) if present else None}
+
+
+def validate_reviewed_evidence(expected: dict) -> None:
+    if reviewed_evidence_identity(Path(expected["path"])) != expected:
+        raise ValueError("Reviewed ecosystem evidence changed during benchmark or stage replay")
+
+
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__)
     result.add_argument("--root", type=Path, default=Path(os.environ.get("GLOBAL_DATA_ROOT", "data/external")))
@@ -353,6 +374,9 @@ def plan(args) -> tuple[dict, list[dict], dict]:
     for stage in stages:
         if stage["name"] == "tiles":
             stage["serving_contract"] = "dynamic-h3-v1"
+    if not args.dry_run:
+        config["reviewed_evidence"] = reviewed_evidence_identity()
+        env["GLOBAL_IUCN_REVIEWED_EVIDENCE_PATH"] = config["reviewed_evidence"]["path"]
     return config, stages, env
 
 
@@ -370,6 +394,7 @@ def run(args) -> dict:
               "planned_stages": stages, "environment": overrides, "stages": [], "warnings": []}
     if args.dry_run:
         return report
+    reviewed_evidence = config["reviewed_evidence"]
     runtime = runtime_identity(REPOSITORY_ROOT)
     environment_identity = benchmark_environment(runtime)
     identity = {"measurement_environment": environment_identity, "mode": "benchmark", "config": json.loads(json.dumps(config).replace(str(output), "<run>")),
@@ -385,6 +410,8 @@ def run(args) -> dict:
     if resume_output:
         args = argparse.Namespace(**{**vars(args), "output_root": resume_output})
         config, stages, overrides = plan(args)
+        if config["reviewed_evidence"] != reviewed_evidence:
+            raise ValueError("Reviewed ecosystem evidence changed while resuming benchmark")
         output = resume_output
         report = json.loads((output / "benchmark-report.json").read_text())
         validate_inventory(output, report.get("artifacts", {}))
@@ -436,6 +463,7 @@ def run(args) -> dict:
             if sha256(Path(selection["path"])) != selection["sha256"] or sha256(Path(selection["path"]).with_suffix(".json")) != selection["metadata_sha256"]:
                 raise ValueError("Benchmark fixture changed since interruption; start with --fresh")
         for stage in stages:
+            validate_reviewed_evidence(config["reviewed_evidence"])
             if sha256(manifest) != manifest_sha or load_spatial_profile(Path(config["profile"])).digest != config["profile_sha256"]:
                 raise ValueError("Acquisition manifest or spatial profile changed during benchmark")
             if stage["name"] in completed:
@@ -459,26 +487,38 @@ def run(args) -> dict:
             if measured["status"] != "passed":
                 dashboard.global_estimate = None
                 raise RuntimeError(f"{stage['name']} failed; see {measured['log']}")
-            # Reuse the exact offline workload model once pairs/lists exist.
-            if (output / "lists-report.json").is_file():
-                measured_by_name = {s["name"]: s for s in report["stages"]}
-                projected_stages = []
-                for planned in stages:
-                    item = measured_by_name.get(planned["name"])
-                    if item:
-                        projected_stages.append(item)
-                    elif dashboard.forecast.base.get(planned["name"]) is not None:
-                        projected_stages.append({"name": planned["name"], "wall_seconds": dashboard.forecast.base[planned["name"]]})
-                projection = estimate(projected_stages, json.loads((output / "population.json").read_text()),
-                                      json.loads((output / "pairs-report.json").read_text()), json.loads((output / "lists-report.json").read_text()),
-                                      serving_contract=config["serving_contract"])
-                if len(projected_stages) == len(stages):
-                    dashboard.global_estimate = projection["total_seconds"]
-                report["live_projection"] = projection
-            report["artifacts"] = artifact_inventory(output)
+            try:
+                validate_reviewed_evidence(config["reviewed_evidence"])
+                # Reuse the exact offline workload model once pairs/lists exist.
+                if (output / "lists-report.json").is_file():
+                    measured_by_name = {s["name"]: s for s in report["stages"]}
+                    projected_stages = []
+                    for planned in stages:
+                        item = measured_by_name.get(planned["name"])
+                        if item:
+                            projected_stages.append(item)
+                        elif dashboard.forecast.base.get(planned["name"]) is not None:
+                            projected_stages.append({"name": planned["name"], "wall_seconds": dashboard.forecast.base[planned["name"]]})
+                    projection = estimate(projected_stages, json.loads((output / "population.json").read_text()),
+                                          json.loads((output / "pairs-report.json").read_text()), json.loads((output / "lists-report.json").read_text()),
+                                          serving_contract=config["serving_contract"])
+                    if len(projected_stages) == len(stages):
+                        dashboard.global_estimate = projection["total_seconds"]
+                    report["live_projection"] = projection
+                report["artifacts"] = artifact_inventory(output)
+            except (Exception, KeyboardInterrupt) as error:
+                # A successful subprocess is reusable only after its outputs are accepted.
+                status = "interrupted" if isinstance(error, KeyboardInterrupt) else "failed"
+                measured.update(status=status, error=str(error) or "Interrupted")
+                dashboard.global_estimate = None
+                dashboard.accept({"kind": "stage_end", "stage": stage["name"], "status": status,
+                                  "time": time.time(), "elapsed": measured["wall_seconds"] - previous_attempt,
+                                  "message": measured["error"]})
+                raise
             save()
         if sha256(manifest) != manifest_sha:
             raise ValueError("Acquisition manifest changed during benchmark")
+        validate_reviewed_evidence(config["reviewed_evidence"])
         population = json.loads((output / "population.json").read_text())
         pairs = json.loads((output / "pairs-report.json").read_text())
         lists = json.loads((output / "lists-report.json").read_text())
