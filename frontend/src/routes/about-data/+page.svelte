@@ -322,16 +322,107 @@
       <div class="section-divider"><span>#</span></div>
     </section>
 
-    <section class="tutorial-section"><div class="tutorial-subsection layout-single-column is-visible">
-      <div class="about-content"><h2>Licences and credits</h2><p>Ark-IV application code is dedicated to the public domain under <a href="https://github.com/karlaugustnybo/DIKUs-Ark/blob/main/LICENSE" target="_blank" rel="noreferrer">CC0-1.0</a>. That code dedication does not grant permission to redistribute a dataset. The public code release excludes IUCN and EDGE rows, global distributions, and generated serving databases.</p></div>
-      <ul class="source-ledger">
-        <li><span class="source-index">IUCN</span><div><strong>IUCN 2026, Red List version 2026-1</strong><p>Used under the <a href="https://www.iucnredlist.org/terms/terms-of-use" target="_blank" rel="noreferrer">IUCN Red List Terms of Use</a>; raw, tabular, and spatial data are not bundled. Browser-delivered derivatives and APIs require a separate publication review.</p></div></li>
-        <li><span class="source-index">HYDRO</span><div><strong><a href="https://www.hydrosheds.org/products/hydrobasins" target="_blank" rel="noreferrer">HydroBASINS v1c</a></strong><p>Standard level 1–12 basin geometry from HydroSHEDS. Provider terms and attribution apply to basin-derived products.</p></div></li>
-        <li><span class="source-index">GBIF</span><div><strong><a href="https://doi.org/10.15468/39omei" target="_blank" rel="noreferrer">GBIF Backbone Taxonomy (2023)</a></strong><p>CC BY 4.0; accessed 26 August 2026.</p></div></li>
-        <li><span class="source-index">EDGE</span><div><strong><a href="https://www.edgeofexistence.org/terms-and-conditions/" target="_blank" rel="noreferrer">ZSL EDGE of Existence</a></strong><p>EDGE rows and ranks are kept outside the code release unless express redistribution permission is obtained.</p></div></li>
-        <li><span class="source-index">MAP</span><div><strong>Boundary and basemap sources</strong><p><a href="https://www.naturalearthdata.com/about/terms-of-use/" target="_blank" rel="noreferrer">Natural Earth</a> (public domain), <a href="https://www.geoboundaries.org/api.html" target="_blank" rel="noreferrer">geoBoundaries gbOpen</a> and <a href="https://ecoregions.appspot.com/" target="_blank" rel="noreferrer">RESOLVE Ecoregions 2017</a> (CC BY 4.0), and <a href="https://www.marineregions.org/sources.php" target="_blank" rel="noreferrer">Marine Regions World EEZ v12</a> (CC BY 4.0). The basemap retains © OpenStreetMap contributors © CARTO in-map attribution.</p></div></li>
-      </ul>
-    </div><div class="section-divider"><span>#</span></div></section>
+    <section class="tutorial-section">
+      <div class="tutorial-subsection layout-single-column is-visible">
+        <div class="about-content">
+          <h2>Licences and credits</h2>
+          <p>
+            Ark-IV application code is dedicated to the public domain under <a
+              href="https://github.com/karlaugustnybo/DIKUs-Ark/blob/main/LICENSE"
+              target="_blank"
+              rel="noreferrer">CC0-1.0</a
+            >. That code dedication does not grant permission to redistribute a dataset. The public
+            code release excludes IUCN and EDGE rows, global distributions, and generated serving
+            databases.
+          </p>
+        </div>
+        <ul class="source-ledger">
+          <li>
+            <span class="source-index">IUCN</span>
+            <div>
+              <strong>IUCN 2026, Red List version 2026-1</strong>
+              <p>
+                Used under the <a
+                  href="https://www.iucnredlist.org/terms/terms-of-use"
+                  target="_blank"
+                  rel="noreferrer">IUCN Red List Terms of Use</a
+                >; raw, tabular, and spatial data are not bundled. Browser-delivered derivatives and
+                APIs require a separate publication review.
+              </p>
+            </div>
+          </li>
+          <li>
+            <span class="source-index">HYDRO</span>
+            <div>
+              <strong
+                ><a
+                  href="https://www.hydrosheds.org/products/hydrobasins"
+                  target="_blank"
+                  rel="noreferrer">HydroBASINS v1c</a
+                ></strong
+              >
+              <p>
+                Standard level 1–12 basin geometry from HydroSHEDS. Provider terms and attribution
+                apply to basin-derived products.
+              </p>
+            </div>
+          </li>
+          <li>
+            <span class="source-index">GBIF</span>
+            <div>
+              <strong
+                ><a href="https://doi.org/10.15468/39omei" target="_blank" rel="noreferrer"
+                  >GBIF Backbone Taxonomy (2023)</a
+                ></strong
+              >
+              <p>CC BY 4.0; accessed 26 August 2026.</p>
+            </div>
+          </li>
+          <li>
+            <span class="source-index">EDGE</span>
+            <div>
+              <strong
+                ><a
+                  href="https://www.edgeofexistence.org/terms-and-conditions/"
+                  target="_blank"
+                  rel="noreferrer">ZSL EDGE of Existence</a
+                ></strong
+              >
+              <p>
+                EDGE rows and ranks are kept outside the code release unless express redistribution
+                permission is obtained.
+              </p>
+            </div>
+          </li>
+          <li>
+            <span class="source-index">MAP</span>
+            <div>
+              <strong>Boundary and basemap sources</strong>
+              <p>
+                <a
+                  href="https://www.naturalearthdata.com/about/terms-of-use/"
+                  target="_blank"
+                  rel="noreferrer">Natural Earth</a
+                >
+                (public domain),
+                <a href="https://www.geoboundaries.org/api.html" target="_blank" rel="noreferrer"
+                  >geoBoundaries gbOpen</a
+                >
+                and
+                <a href="https://ecoregions.appspot.com/" target="_blank" rel="noreferrer"
+                  >RESOLVE Ecoregions 2017</a
+                >
+                (CC BY 4.0), and
+                <a href="https://www.marineregions.org/sources.php" target="_blank" rel="noreferrer"
+                  >Marine Regions World EEZ v12</a
+                > (CC BY 4.0). The basemap retains © OpenStreetMap contributors © CARTO in-map attribution.
+              </p>
+            </div>
+          </li>
+        </ul>
+      </div>
+      <div class="section-divider"><span>#</span></div>
+    </section>
 
     <section class="tutorial-section layout-single-column about-notes">
       <div class="about-content"><h2>Interpretation notes</h2></div>

@@ -2,7 +2,13 @@
   import { onDestroy, tick } from 'svelte';
   import { Search, X } from 'lucide-svelte';
   import { api, type SpeciesSuggestion } from '$lib/api/client';
-  import { includePassage, passageAvailable, selectedSpecies, speciesHighlight, speciesHighlightGradient } from '$lib/stores/species';
+  import {
+    includePassage,
+    passageAvailable,
+    selectedSpecies,
+    speciesHighlight,
+    speciesHighlightGradient
+  } from '$lib/stores/species';
   import { parseCellSearch, type CellSearchSelection } from '$lib/map/cellSearch';
 
   export let cellSearch: (selection: CellSearchSelection) => string | null;
@@ -269,7 +275,10 @@
           {:else}<div class="species-result-message">No matching species</div>{/if}
         </div>
       {/if}
-      <label title="Adds a coarse passage range supplement; map scores stay unchanged"><input type="checkbox" bind:checked={$includePassage} disabled={!$passageAvailable} /> Include passage in species range</label>
+      <label title="Adds a coarse passage range supplement; map scores stay unchanged"
+        ><input type="checkbox" bind:checked={$includePassage} disabled={!$passageAvailable} /> Include
+        passage in species range</label
+      >
       <div class="highlight-footer">
         {#if $selectedSpecies}
           <div

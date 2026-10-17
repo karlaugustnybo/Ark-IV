@@ -346,74 +346,78 @@
       </dl>
     </section>
     {#if $cellDetails.species_data_unavailable}
-      <p role="status">Species records for this fine cell are unavailable. Aggregate map scores remain available.</p>
+      <p role="status">
+        Species records for this fine cell are unavailable. Aggregate map scores remain available.
+      </p>
     {:else}
-    <div class="cell-stats">
-      {#each [['Total species', $cellDetails.stats?.total ?? 0], ['Critically Endangered', $cellDetails.stats?.CR ?? 0], ['Endangered', $cellDetails.stats?.EN ?? 0], ['Vulnerable', $cellDetails.stats?.VU ?? 0], ['Near Threatened', $cellDetails.stats?.NT ?? 0], ['Data Deficient', $cellDetails.stats?.DD ?? 0], ['Least Concern', $cellDetails.stats?.LC ?? 0], ['Missing species DNA', $cellDetails.stats?.missing_species_dna ?? 0], ['Missing genus DNA', $cellDetails.stats?.missing_genus_dna ?? 0], ['Missing family DNA', $cellDetails.stats?.missing_family_dna ?? 0], ['GoaT data deficient', $cellDetails.stats?.goat_data_deficient ?? 0]] as stat}
-        <div class="stat-card">
-          <span class="stat-value">{stat[1]}</span><span class="stat-label">{stat[0]}</span>
+      <div class="cell-stats">
+        {#each [['Total species', $cellDetails.stats?.total ?? 0], ['Critically Endangered', $cellDetails.stats?.CR ?? 0], ['Endangered', $cellDetails.stats?.EN ?? 0], ['Vulnerable', $cellDetails.stats?.VU ?? 0], ['Near Threatened', $cellDetails.stats?.NT ?? 0], ['Data Deficient', $cellDetails.stats?.DD ?? 0], ['Least Concern', $cellDetails.stats?.LC ?? 0], ['Missing species DNA', $cellDetails.stats?.missing_species_dna ?? 0], ['Missing genus DNA', $cellDetails.stats?.missing_genus_dna ?? 0], ['Missing family DNA', $cellDetails.stats?.missing_family_dna ?? 0], ['GoaT data deficient', $cellDetails.stats?.goat_data_deficient ?? 0]] as stat}
+          <div class="stat-card">
+            <span class="stat-value">{stat[1]}</span><span class="stat-label">{stat[0]}</span>
+          </div>
+        {/each}
+      </div>
+      <aside class="cell-knowledge" aria-label="Cell knowledge limits and occupancy caveat">
+        <h3>Knowledge limits</h3>
+        <p class="cell-knowledge-shares">{knowledgeLimits}</p>
+        <p class="cell-knowledge-note">{occupancyCaveatText(displayResolution)}</p>
+      </aside>
+      <div class="cell-table-filters">
+        <label
+          ><span class="sr-only">Filter species in this cell</span><input
+            type="search"
+            bind:value={cellSearch}
+            placeholder="Filter this cell by species or family"
+          /></label
+        >
+        <div class="cell-filter-row">
+          <span>IUCN</span
+          >{#each [['Critically Endangered', 'CR'], ['Endangered', 'EN'], ['Vulnerable', 'VU'], ['Near Threatened', 'NT'], ['Data Deficient', 'DD'], ['Least Concern', 'LC']] as option}<button
+              type="button"
+              class:active={redlistFilters.includes(option[0])}
+              on:click={() => toggleFilter('redlist', option[0])}>{option[1]}</button
+            >{/each}
         </div>
-      {/each}
-    </div>
-    <aside class="cell-knowledge" aria-label="Cell knowledge limits and occupancy caveat">
-      <h3>Knowledge limits</h3>
-      <p class="cell-knowledge-shares">{knowledgeLimits}</p>
-      <p class="cell-knowledge-note">{occupancyCaveatText(displayResolution)}</p>
-    </aside>
-    <div class="cell-table-filters">
-      <label
-        ><span class="sr-only">Filter species in this cell</span><input
-          type="search"
-          bind:value={cellSearch}
-          placeholder="Filter this cell by species or family"
-        /></label
-      >
-      <div class="cell-filter-row">
-        <span>IUCN</span
-        >{#each [['Critically Endangered', 'CR'], ['Endangered', 'EN'], ['Vulnerable', 'VU'], ['Near Threatened', 'NT'], ['Data Deficient', 'DD'], ['Least Concern', 'LC']] as option}<button
-            type="button"
-            class:active={redlistFilters.includes(option[0])}
-            on:click={() => toggleFilter('redlist', option[0])}>{option[1]}</button
-          >{/each}
-      </div>
-      <div class="cell-filter-row">
-        <span>DNA</span
-        >{#each ['GoaT Data Deficient', 'Missing Family', 'Missing Genus', 'Missing Species', 'Sampled'] as option}<button
-            type="button"
-            class:active={dnaFilters.includes(option)}
-            on:click={() => toggleFilter('dna', option)}>{option}</button
-          >{/each}
-      </div>
-      <label class="page-size"
-        >Rows <select bind:value={perPage} on:change={() => (page = 1)}
-          ><option value={10}>10</option><option value={25}>25</option><option value={50}>50</option
-          ></select
-        ></label
-      >
-    </div>
-    <SpeciesDataTable
-      rows={visible}
-      {sort}
-      {order}
-      loading={$cellLoading}
-      onSort={changeSort}
-      emptyMessage={cellSearch.trim() || redlistFilters.length || dnaFilters.length
-        ? 'No species match these filters.'
-        : 'No species records for this cell.'}
-    />
-    <div class="pagination" id="cell-pagination">
-      <span class="page-info"
-        ><strong>{scored.length.toLocaleString()}</strong> of {(
-          $cellDetails.species ?? []
-        ).length.toLocaleString()} species · Page {page} of {pages}</span
-      >
-      <div class="pagination-buttons">
-        <button class="btn-secondary" disabled={page === 1} on:click={() => page--}>Previous</button
-        ><button class="btn-secondary" disabled={page === pages} on:click={() => page++}
-          >Next</button
+        <div class="cell-filter-row">
+          <span>DNA</span
+          >{#each ['GoaT Data Deficient', 'Missing Family', 'Missing Genus', 'Missing Species', 'Sampled'] as option}<button
+              type="button"
+              class:active={dnaFilters.includes(option)}
+              on:click={() => toggleFilter('dna', option)}>{option}</button
+            >{/each}
+        </div>
+        <label class="page-size"
+          >Rows <select bind:value={perPage} on:change={() => (page = 1)}
+            ><option value={10}>10</option><option value={25}>25</option><option value={50}
+              >50</option
+            ></select
+          ></label
         >
       </div>
-    </div>
+      <SpeciesDataTable
+        rows={visible}
+        {sort}
+        {order}
+        loading={$cellLoading}
+        onSort={changeSort}
+        emptyMessage={cellSearch.trim() || redlistFilters.length || dnaFilters.length
+          ? 'No species match these filters.'
+          : 'No species records for this cell.'}
+      />
+      <div class="pagination" id="cell-pagination">
+        <span class="page-info"
+          ><strong>{scored.length.toLocaleString()}</strong> of {(
+            $cellDetails.species ?? []
+          ).length.toLocaleString()} species · Page {page} of {pages}</span
+        >
+        <div class="pagination-buttons">
+          <button class="btn-secondary" disabled={page === 1} on:click={() => page--}
+            >Previous</button
+          ><button class="btn-secondary" disabled={page === pages} on:click={() => page++}
+            >Next</button
+          >
+        </div>
+      </div>
     {/if}
   {/if}
 </section>

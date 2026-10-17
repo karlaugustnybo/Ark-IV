@@ -92,10 +92,7 @@ async function loadCoarseSnapshot(descriptor: CoarseSnapshotDescriptor): Promise
   // development server and API deliberately run on different ports).
   const metadataUrl = new URL(config.mapMetadataUrl, window.location.href);
   const snapshotUrl = withCoverageProfile(new URL(descriptor.url, metadataUrl).toString());
-  const [initialResponse, arrow] = await Promise.all([
-    fetch(snapshotUrl),
-    import('apache-arrow')
-  ]);
+  const [initialResponse, arrow] = await Promise.all([fetch(snapshotUrl), import('apache-arrow')]);
   // A failed response can outlive a development-server restart in the HTTP
   // cache. Retry that exceptional path from the network; successful hashed
   // artifacts remain cached normally via their immutable response headers.

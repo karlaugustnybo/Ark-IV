@@ -7,14 +7,14 @@
   let error = $state('');
   onMount(() => {
     const controller = new AbortController();
-    api.coverageProfiles(controller.signal)
+    api
+      .coverageProfiles(controller.signal)
       .then((result) => {
-        passageAvailable = result.profiles.some(
-          (p) => p.id === 'with-passage' && p.available
-        );
+        passageAvailable = result.profiles.some((p) => p.id === 'with-passage' && p.available);
       })
       .catch((reason) => {
-        if (!controller.signal.aborted) error = reason instanceof Error ? reason.message : 'Coverage settings unavailable';
+        if (!controller.signal.aborted)
+          error = reason instanceof Error ? reason.message : 'Coverage settings unavailable';
       })
       .finally(() => (loading = false));
     return () => controller.abort();

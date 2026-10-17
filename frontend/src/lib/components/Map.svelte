@@ -31,7 +31,9 @@
   import { colourPaletteLuts, type ColourPaletteId } from '$lib/map/colourPalettes';
   import { colourScalePosition } from '$lib/map/colourScales';
   import {
-    includePassage, passageAvailable, selectedSpecies,
+    includePassage,
+    passageAvailable,
+    selectedSpecies,
     speciesHighlight,
     speciesHighlightGradient,
     type SelectedSpecies

@@ -31,8 +31,9 @@
 <nav class="site-navbar">
   <div class="nav-left"><a class="nav-brand" href={withCoverageProfile('/')}>Ark-<i>IV</i></a></div>
   <div class="nav-right" role="navigation" aria-label="Main">
-    <a href={withCoverageProfile('/table')} aria-current={page.url.pathname === '/table' ? 'page' : undefined}
-      ><span>Table</span></a
+    <a
+      href={withCoverageProfile('/table')}
+      aria-current={page.url.pathname === '/table' ? 'page' : undefined}><span>Table</span></a
     ><a
       href={withCoverageProfile('/map')}
       aria-current={page.url.pathname === '/map' ? 'page' : undefined}
@@ -40,9 +41,12 @@
       onpointerenter={warmMap}
       onfocus={warmMap}
       onpointerdown={warmMap}><span>Map</span></a
-    ><a href={withCoverageProfile('/tutorial')} aria-current={page.url.pathname === '/tutorial' ? 'page' : undefined}
-      ><span>Tutorial</span></a
-    ><a href={withCoverageProfile('/methodology')} aria-current={page.url.pathname === '/methodology' ? 'page' : undefined}
+    ><a
+      href={withCoverageProfile('/tutorial')}
+      aria-current={page.url.pathname === '/tutorial' ? 'page' : undefined}><span>Tutorial</span></a
+    ><a
+      href={withCoverageProfile('/methodology')}
+      aria-current={page.url.pathname === '/methodology' ? 'page' : undefined}
       ><span>Methodology</span></a
     >
   </div>

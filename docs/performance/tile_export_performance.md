@@ -115,4 +115,3 @@ and does not supply a dynamic `serving.json` for managed startup or SQL loading.
 Deployment and database loading remain separate. The old low-level
 `ark_pipeline.builders.fine_metrics tiles` command remains available for diagnostics; its
 direct output is not managed by these receipts.
-
