@@ -1,0 +1,10 @@
+.env
+.venv/
+results/
+__pycache__/
+
+archive/layout-before-cleanup.tar.gz
+.env.*
+artifacts/
+receipts/
+wandb/
