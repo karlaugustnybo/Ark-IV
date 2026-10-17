@@ -20,6 +20,8 @@ stage-based CLI names and artifact-based builders.
 8. [Coverage profiles and serving bundles](pipeline/coverage_profiles.md)
 9. [End-to-end benchmark](pipeline/08_pipeline_benchmark.md)
 
+- [Map and table interaction](frontend.md)
+
 ## Reference
 
 - [Source inventory](reference/global_source_data.md)

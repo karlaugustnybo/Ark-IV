@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { ignoresWindowShortcut } from '$lib/map/keyboardShortcuts';
   import { onMount } from 'svelte';
   import { get } from 'svelte/store';
   import { api, type SpeciesPage } from '$lib/api/client';
@@ -104,12 +105,7 @@
   }
 
   function keydown(event: KeyboardEvent) {
-    if (
-      event.target instanceof HTMLInputElement ||
-      event.target instanceof HTMLTextAreaElement ||
-      !result
-    )
-      return;
+    if (ignoresWindowShortcut(event) || !result) return;
     if (event.key === 'ArrowLeft' && result.page > 1) {
       event.preventDefault();
       page(-1);
@@ -129,21 +125,24 @@
     }
   }
 
-  const subscriptions = [
-    weights,
-    tableSearch,
-    tableRedlist,
-    tableDna,
-    tableSystems,
-    boundaryFilters
-  ].map((store) =>
-    store.subscribe(() => {
-      if (result) schedule(true);
-    })
-  );
   onMount(() => {
-    load();
+    let ready = false;
+    const subscriptions = [
+      weights,
+      tableSearch,
+      tableRedlist,
+      tableDna,
+      tableSystems,
+      boundaryFilters
+    ].map((store) =>
+      store.subscribe(() => {
+        if (ready) schedule(true);
+      })
+    );
+    ready = true;
+    void load();
     return () => {
+      ready = false;
       subscriptions.forEach((unsubscribe) => unsubscribe());
       clearTimeout(debounce);
       requestId += 1;

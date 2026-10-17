@@ -9,7 +9,7 @@ import {
 } from '$lib/map/mapPerformance';
 
 export type MapPerformanceTraceSpecification = {
-  scenario: 'zoom-10-res7-loading-pan';
+  scenario: 'zoom-10-res7-loading-pan' | 'res7-zoom-reversal' | 'multi-region-zoom-reversal';
   center: [number, number];
   zoom: number;
   pitch: number;
@@ -18,6 +18,8 @@ export type MapPerformanceTraceSpecification = {
   panPixels: number;
   panDurationMs: number;
   cooldownMs: number;
+  zoomTargets?: readonly number[];
+  locations?: readonly [number, number][];
 };
 
 export const ZOOM_10_LOADING_TRACE: MapPerformanceTraceSpecification = {
@@ -30,6 +32,31 @@ export const ZOOM_10_LOADING_TRACE: MapPerformanceTraceSpecification = {
   panPixels: -330,
   panDurationMs: 300,
   cooldownMs: 450
+};
+
+export const RES7_ZOOM_REVERSAL_TRACE: MapPerformanceTraceSpecification = {
+  ...ZOOM_10_LOADING_TRACE,
+  scenario: 'res7-zoom-reversal',
+  zoom: 6,
+  pitch: 25,
+  panCount: 0,
+  panDurationMs: 250,
+  zoomTargets: [11, 7, 11, 7, 11, 7, 11, 7, 11, 7]
+};
+
+export const MULTI_REGION_ZOOM_TRACE: MapPerformanceTraceSpecification = {
+  ...RES7_ZOOM_REVERSAL_TRACE,
+  scenario: 'multi-region-zoom-reversal',
+  zoom: 4,
+  panDurationMs: 450,
+  zoomTargets: [14, 2, 13, 4, 15, 3],
+  locations: [
+    [12.57, 55.68],
+    [-60, -3],
+    [151.21, -33.87],
+    [20, 78],
+    [179.8, -17.7]
+  ]
 };
 
 export type MapPerformanceTraceSummary = {
@@ -59,6 +86,8 @@ type RunZoom10MapPerformanceTraceOptions = {
   isDisposed: () => boolean;
   onRunStart?: (runNumber: number) => void;
   onRunComplete?: (result: MapPerformanceResult, runNumber: number) => void;
+  scenario?: string | null;
+  locationOffset?: number;
 };
 
 const READY_TIMEOUT_MS = 20_000;
@@ -163,7 +192,12 @@ function runCameraMove(map: MapLibreMap, move: () => void): Promise<void> {
 export async function runZoom10MapPerformanceTrace(
   options: RunZoom10MapPerformanceTraceOptions
 ): Promise<MapPerformanceTraceSummary> {
-  const specification = ZOOM_10_LOADING_TRACE;
+  const specification =
+    options.scenario === 'multi-region-zoom-reversal'
+      ? MULTI_REGION_ZOOM_TRACE
+      : options.scenario === 'res7-zoom-reversal'
+        ? RES7_ZOOM_REVERSAL_TRACE
+        : ZOOM_10_LOADING_TRACE;
   const requestedRunCount = Number.isFinite(options.runCount) ? Math.floor(options.runCount) : 3;
   const runCount = Math.min(10, Math.max(1, requestedRunCount));
   const results: MapPerformanceResult[] = [];
@@ -175,20 +209,35 @@ export async function runZoom10MapPerformanceTrace(
       throwIfDisposed(options.isDisposed);
       await runCameraMove(options.map, () => {
         options.map.jumpTo({
-          center: specification.center,
+          center:
+            specification.locations?.[
+              (runIndex + (options.locationOffset ?? 0)) % specification.locations.length
+            ] ?? specification.center,
           zoom: specification.zoom,
           pitch: specification.pitch,
           bearing: specification.bearing
         });
       });
       await waitForMapIdle(options.map);
-      await waitForFineGuard(options.isFineGuardReady, options.isDisposed);
+      if (!specification.zoomTargets) {
+        await waitForFineGuard(options.isFineGuardReady, options.isDisposed);
+      }
       await nextAnimationFrame();
       await nextAnimationFrame();
 
       options.onRunStart?.(runIndex + 1);
       options.monitor.start();
       recording = true;
+      for (const zoom of specification.zoomTargets ?? []) {
+        throwIfDisposed(options.isDisposed);
+        await runCameraMove(options.map, () => {
+          options.map.easeTo({
+            zoom,
+            duration: specification.panDurationMs,
+            easing: (progress) => progress
+          });
+        });
+      }
       for (let panIndex = 0; panIndex < specification.panCount; panIndex += 1) {
         throwIfDisposed(options.isDisposed);
         await runCameraMove(options.map, () => {
@@ -217,7 +266,7 @@ export async function runZoom10MapPerformanceTrace(
     environment,
     runCount: results.length,
     firstPathRun: results[0],
-    repeatRuns: summarizePerformanceRuns(results.slice(1)),
+    repeatRuns: specification.locations ? null : summarizePerformanceRuns(results.slice(1)),
     allRuns,
     runs: results
   };

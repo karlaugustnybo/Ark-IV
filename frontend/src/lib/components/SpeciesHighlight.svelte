@@ -3,10 +3,16 @@
   import { Search, X } from 'lucide-svelte';
   import { api, type SpeciesSuggestion } from '$lib/api/client';
   import { includePassage, passageAvailable, selectedSpecies, speciesHighlight, speciesHighlightGradient } from '$lib/stores/species';
+  import { parseCellSearch, type CellSearchSelection } from '$lib/map/cellSearch';
+
+  export let cellSearch: (selection: CellSearchSelection) => string | null;
 
   let expanded = false;
   let inputEl: HTMLInputElement | undefined;
+  let toggleEl: HTMLButtonElement | undefined;
   let query = '';
+  let cellQuery = '';
+  let cellError = '';
   let results: SpeciesSuggestion[] = [];
   let loading = false;
   let error = '';
@@ -53,6 +59,7 @@
       open = true;
       return;
     }
+    results = [];
     loading = true;
     open = true;
     searchTimer = setTimeout(() => search(nextQuery), 180);
@@ -81,7 +88,17 @@
     }
   }
 
+  function cancelSearch() {
+    requestId += 1;
+    clearTimeout(searchTimer);
+    abortController?.abort();
+    abortController = null;
+    loading = false;
+  }
+
   function select(row: SpeciesSuggestion) {
+    if (loading || !results.includes(row)) return;
+    cancelSearch();
     query = row.species_name;
     speciesHighlightGradient.set(false);
     selectedSpecies.set({ gbif_accepted_id: row.gbif_accepted_id, species_name: row.species_name });
@@ -104,17 +121,30 @@
     includePassage.set(false);
   }
 
-  function collapse() {
+  function submitCell() {
+    const result = parseCellSearch(cellQuery);
+    if (!result.ok) {
+      cellError = result.message;
+      return;
+    }
+    cellError = cellSearch(result) ?? '';
+  }
+
+  async function collapse() {
+    cancelSearch();
+    results = [];
     expanded = false;
     open = false;
     activeIndex = -1;
+    await tick();
+    toggleEl?.focus({ preventScroll: true });
   }
 
   async function expand() {
     expanded = true;
     await tick();
     inputEl?.focus();
-    if (query.trim().length >= 2 && !$selectedSpecies) open = true;
+    if (query.trim().length >= 2 && !$selectedSpecies) scheduleSearch();
   }
 
   function windowKeydown(event: KeyboardEvent) {
@@ -123,8 +153,13 @@
   }
 
   function keydown(event: KeyboardEvent) {
-    if (!open || !results.length) {
-      if (event.key === 'Escape' && $selectedSpecies) clear();
+    if (event.defaultPrevented) return;
+    if (!open || loading || !results.length) {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        if ($selectedSpecies) clear();
+        else void collapse();
+      }
       return;
     }
     if (event.key === 'ArrowDown') {
@@ -164,9 +199,22 @@
 <section
   class="species-highlight"
   class:is-expanded={expanded}
-  aria-label="Species distribution highlight"
+  aria-label="Species and cell search"
   on:focusout={focusout}
 >
+  <button
+    type="button"
+    class="species-toggle"
+    class:has-selection={Boolean($selectedSpecies)}
+    class:is-active={expanded}
+    aria-expanded={expanded}
+    aria-controls="species-highlight-panel"
+    title="Species and cell search"
+    bind:this={toggleEl}
+    on:click={() => (expanded ? collapse() : expand())}
+  >
+    <Search size={17} strokeWidth={1.9} aria-hidden="true" />
+  </button>
   {#if expanded}
     <div id="species-highlight-panel" class="species-panel">
       <button
@@ -194,7 +242,7 @@
           on:input={scheduleSearch}
           on:keydown={keydown}
           on:focus={() => {
-            if (query.trim().length >= 2 && !$selectedSpecies) open = true;
+            if (query.trim().length >= 2 && !$selectedSpecies) scheduleSearch();
           }}
         />
         {#if query}<button
@@ -214,7 +262,8 @@
                 role="option"
                 aria-selected={activeIndex === index}
                 class:is-active={activeIndex === index}
-                on:mousedown|preventDefault={() => select(row)}
+                on:mousedown|preventDefault
+                on:click={() => select(row)}
                 ><em>{row.species_name}</em><span>{row.family || 'Family unknown'}</span></button
               >{/each}
           {:else}<div class="species-result-message">No matching species</div>{/if}
@@ -246,27 +295,51 @@
           /><span class="gradient-switch" aria-hidden="true"><span></span></span></label
         >
       </div>
+      <hr class="cell-search-divider" />
+      <form class="cell-search" on:submit|preventDefault={submitCell}>
+        <label for="cell-search-input">Find a cell</label>
+        <div class="cell-search-row">
+          <input
+            id="cell-search-input"
+            type="text"
+            placeholder="H3 index, e.g. 871f05831ffffff"
+            spellcheck="false"
+            autocomplete="off"
+            maxlength="48"
+            class:has-error={Boolean(cellError)}
+            aria-invalid={cellError ? 'true' : undefined}
+            aria-errormessage={cellError ? 'cell-search-status' : undefined}
+            bind:value={cellQuery}
+            on:keydown={(event) => {
+              if (event.key === 'Escape') {
+                event.preventDefault();
+                void collapse();
+              }
+            }}
+            on:input={() => {
+              cellError = '';
+            }}
+          />
+          <button type="submit">Find</button>
+        </div>
+        <p
+          id="cell-search-status"
+          class="cell-search-status"
+          class:is-error={Boolean(cellError)}
+          aria-live="polite"
+        >
+          {cellError}
+        </p>
+      </form>
     </div>
-  {:else}
-    <button
-      type="button"
-      class="species-toggle"
-      class:has-selection={Boolean($selectedSpecies)}
-      aria-expanded={false}
-      aria-controls="species-highlight-panel"
-      title="Highlight a species"
-      on:click={expand}
-    >
-      <Search size={17} strokeWidth={1.9} aria-hidden="true" />
-    </button>
   {/if}
 </section>
 
 <svelte:window on:keydown={windowKeydown} />
 
 <style>
-  .species-highlight:not(.is-expanded) {
-    width: auto;
+  .species-highlight {
+    pointer-events: none;
     padding: 0;
     background: transparent;
     border: 0;
@@ -274,6 +347,7 @@
     backdrop-filter: none;
   }
   .species-toggle {
+    pointer-events: auto;
     position: relative;
     display: grid;
     place-items: center;
@@ -283,7 +357,7 @@
     color: var(--color-accent-brown);
     background: rgba(252, 251, 247, 0.96);
     border: 1px solid rgba(93, 78, 60, 0.2);
-    border-radius: var(--map-radius, 4px);
+    border-radius: var(--map-radius);
     box-shadow: 0 9px 30px rgba(40, 32, 20, 0.16);
     cursor: pointer;
     backdrop-filter: blur(12px);
@@ -292,9 +366,12 @@
       color 0.16s ease,
       border-color 0.16s ease;
   }
+  .species-toggle.is-active,
   .species-toggle:hover {
     color: var(--color-primary-green);
     border-color: rgba(93, 78, 60, 0.35);
+  }
+  .species-toggle:hover:not(.is-active) {
     transform: translateY(-1px);
   }
   .species-toggle:focus-visible {
@@ -313,9 +390,20 @@
     box-shadow: 0 0 0 2px rgba(252, 251, 247, 0.96);
   }
   .species-panel {
-    position: relative;
+    pointer-events: auto;
+    position: absolute;
+    top: calc(2.85rem + 0.65rem);
+    left: 0;
+    width: 100%;
+    padding: 0.8rem;
+    color: var(--color-black);
+    background: rgba(252, 251, 247, 0.96);
+    border: 1px solid rgba(93, 78, 60, 0.2);
+    border-radius: var(--map-radius, 4px);
+    box-shadow: 0 9px 30px rgba(40, 32, 20, 0.16);
+    backdrop-filter: blur(12px);
     text-align: left;
-    animation: species-pop 0.18s cubic-bezier(0.2, 0.9, 0.3, 1.2);
+    animation: species-pop 160ms ease-out;
     transform-origin: top left;
   }
   .species-panel > label {
@@ -336,8 +424,8 @@
   .species-close {
     position: absolute;
     z-index: 1;
-    top: -0.35rem;
-    right: -0.35rem;
+    top: 0.45rem;
+    right: 0.45rem;
     display: grid;
     place-items: center;
     width: 1.7rem;
@@ -346,7 +434,7 @@
     color: var(--color-gray-600);
     background: var(--color-light-cream);
     border: 1px solid var(--color-tinted-cream);
-    border-radius: 50%;
+    border-radius: var(--map-radius);
     cursor: pointer;
     box-shadow: 0 2px 8px rgba(40, 32, 20, 0.12);
     transition:
@@ -359,13 +447,112 @@
     background: var(--color-gray-100);
     transform: scale(1.06);
   }
+  .cell-search-divider {
+    width: 100%;
+    margin: 0.8rem 0 0.7rem;
+    border: 0;
+    border-top: 1px solid var(--color-tinted-cream);
+  }
+  .cell-search {
+    display: flex;
+    flex-direction: column;
+    gap: 0.45rem;
+  }
+  .cell-search label {
+    display: block;
+    margin: 0 0 0 0.1rem;
+    color: var(--color-accent-brown);
+    font-family: var(--font-sans);
+    font-size: 0.7rem;
+    font-weight: 750;
+    letter-spacing: 0.095em;
+    text-transform: uppercase;
+  }
+  .cell-search-row {
+    display: flex;
+    gap: 0.4rem;
+  }
+  .cell-search input {
+    flex: 1 1 auto;
+    min-width: 0;
+    height: 2.65rem;
+    padding: 0 0.55rem;
+    color: var(--color-black);
+    background: var(--color-cream);
+    border: 1px solid var(--color-tinted-cream);
+    border-radius: var(--map-radius);
+    outline: none;
+    box-shadow: inset 0 1px 2px rgba(40, 32, 20, 0.03);
+    font-family: var(--font-sans);
+    font-size: 0.9rem;
+    transition:
+      border-color 0.16s ease,
+      box-shadow 0.16s ease,
+      background 0.16s ease;
+  }
+  .cell-search input::placeholder {
+    color: var(--color-gray-500);
+  }
+  .cell-search input:focus {
+    background: #fffefb;
+    border-color: var(--color-primary-green);
+    box-shadow: 0 0 0 3px var(--color-primary-green-20);
+  }
+  .cell-search input.has-error {
+    border-color: #9f2e22;
+  }
+  .cell-search button {
+    flex: 0 0 auto;
+    height: 2.65rem;
+    padding: 0 0.95rem;
+    color: #fffefb;
+    background: var(--color-primary-green);
+    border: 1px solid rgba(20, 40, 28, 0.35);
+    border-radius: var(--map-radius);
+    font-family: var(--font-sans);
+    font-size: 0.8rem;
+    font-weight: 700;
+    cursor: pointer;
+    transition: filter 0.16s ease;
+  }
+  .cell-search button:hover {
+    filter: brightness(1.08);
+  }
+  .cell-search button:focus-visible {
+    outline: 2px solid var(--color-primary-green);
+    outline-offset: 2px;
+  }
+  .cell-search-status {
+    margin: 0;
+    min-height: 0.95rem;
+    color: var(--color-gray-700);
+    font-family: var(--font-sans);
+    font-size: 0.68rem;
+    line-height: 0.95rem;
+  }
+  .cell-search-status.is-error {
+    color: #9f2e22;
+  }
   @keyframes species-pop {
     from {
       opacity: 0;
-      transform: translateY(-0.4rem) scale(0.94);
+      transform: translateY(-4px);
     }
     to {
       opacity: 1;
+      transform: none;
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .species-panel {
+      animation: none;
+    }
+    .species-toggle,
+    .species-close {
+      transition: none;
+    }
+    .species-toggle:hover:not(.is-active),
+    .species-close:hover {
       transform: none;
     }
   }

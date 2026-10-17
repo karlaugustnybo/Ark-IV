@@ -32,6 +32,8 @@ function performanceResult(overrides: Partial<MapPerformanceResult> = {}): MapPe
     durationMs: 2000,
     frameCount: 120,
     p95FrameMs: 17,
+    p99FrameMs: 55,
+    under18MsPercent: 98,
     worstFrameMs: 55,
     overBudgetFrameCount: 10,
     longFrameCount: 1,
@@ -40,6 +42,7 @@ function performanceResult(overrides: Partial<MapPerformanceResult> = {}): MapPe
     uncoveredFrameCount: 0,
     resolutionFlashFrameCount: 0,
     loadingFrameCount: 12,
+    fineFrameCount: 100,
     res7RequestCount: 8,
     cameraTravelDegrees: 2.3,
     zoomTravel: 0,
@@ -56,12 +59,22 @@ function performanceResult(overrides: Partial<MapPerformanceResult> = {}): MapPe
 }
 
 describe('map performance summaries', () => {
+  test('uses a strict 18 ms threshold and includes the slow tail in P99', () => {
+    const passing = summarizeFrameTimes([...Array<number>(99).fill(17), 18]);
+    expect(passing.p99FrameMs).toBe(17);
+    expect(passing.under18MsPercent).toBe(99);
+    const failing = summarizeFrameTimes([...Array<number>(98).fill(17), 18, 50]);
+    expect(failing.p99FrameMs).toBe(18);
+    expect(failing.under18MsPercent).toBe(98);
+  });
   test('calculates deterministic frame budgets and percentiles', () => {
     expect(percentile([40, 10, 30, 20], 0.5)).toBe(20);
     expect(percentile([40, 10, 30, 20], 0.95)).toBe(40);
     expect(summarizeFrameTimes([10, 17, 51])).toEqual({
       frameCount: 3,
       p95FrameMs: 51,
+      p99FrameMs: 51,
+      under18MsPercent: 66.67,
       worstFrameMs: 51,
       overBudgetFrameCount: 2,
       longFrameCount: 1
@@ -129,6 +142,7 @@ describe('map performance summaries', () => {
     expect(result?.uncoveredFrameCount).toBe(1);
     expect(result?.resolutionFlashFrameCount).toBe(1);
     expect(result?.loadingFrameCount).toBe(1);
+    expect(result?.fineFrameCount).toBe(3);
     expect(result?.res7RequestCount).toBe(1);
     expect(result?.minFineTileCount).toBe(30);
     expect(result?.maxFineTileCount).toBe(36);
@@ -174,6 +188,8 @@ describe('map performance summaries', () => {
       runCount: 3,
       medianP95FrameMs: 16,
       worstP95FrameMs: 17,
+      worstP99FrameMs: 55,
+      minUnder18MsPercent: 98,
       worstFrameMs: 55,
       medianOverBudgetFrameCount: 6,
       totalLongFrameCount: 2,

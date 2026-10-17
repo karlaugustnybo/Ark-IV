@@ -6,6 +6,7 @@
   export let open = false;
 
   function setWeight(key: WeightKey, value: string) {
+    if (!value.trim()) return;
     const parsed = Math.min(10, Math.max(0, Number(value)));
     if (Number.isFinite(parsed)) weights.update((current) => ({ ...current, [key]: parsed }));
   }
@@ -28,13 +29,14 @@
       fill="none"
       stroke="currentColor"
       stroke-width="1.5"
+      aria-hidden="true"
     >
       <path d="m19.5 8.25-7.5 7.5-7.5-7.5" />
     </svg>
   </button>
   <div class:js-hidden={!open} class="dropdown-panel">
     <div class="dropdown-grid">
-      {#each controls as control}
+      {#each controls as control (control.key)}
         <div class="weight-row">
           <label for={control.key}>{control.label}</label>
           <div class="weight-controls">
@@ -55,7 +57,7 @@
               max="10"
               step={control.step ?? 0.5}
               value={$weights[control.key]}
-              on:change={(event) => setWeight(control.key, event.currentTarget.value)}
+              on:input={(event) => setWeight(control.key, event.currentTarget.value)}
             />
           </div>
         </div>

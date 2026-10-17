@@ -1,5 +1,11 @@
+<script module lang="ts">
+  // Instances share output stores; only the newest request may publish them.
+  let requestOwner: symbol | null = null;
+</script>
+
 <script lang="ts">
-  import { tick } from 'svelte';
+  import { ignoresWindowShortcut } from '$lib/map/keyboardShortcuts';
+  import { onDestroy, tick } from 'svelte';
   import { api, type CellDetailsResponse, type CellSpeciesRow } from '$lib/api/client';
   import SpeciesDataTable from '$lib/components/SpeciesDataTable.svelte';
   import { dnaStatus, type SpeciesSortKey, type SpeciesTableRow } from '$lib/species-table';
@@ -12,6 +18,7 @@
     selectedH3Resolution
   } from '$lib/stores/map';
   import { weights } from '$lib/stores/weights';
+  import { knowledgeLimitsText, occupancyCaveatText } from '$lib/map/cellCaveats';
 
   type ScoredSpecies = CellSpeciesRow & SpeciesTableRow & { threat: number; dna: number };
   type BoundaryMembership = NonNullable<CellDetailsResponse['boundaries']>[number];
@@ -39,6 +46,9 @@
   let redlistFilters: string[] = [];
   let dnaFilters: string[] = [];
   let perPage = 10;
+  const owner = Symbol();
+  let disposed = false;
+  let copyGeneration = 0;
   let cellAbortController: AbortController | null = null;
   let copyState: '' | 'copied' | 'failed' = '';
   let copyResetTimer: ReturnType<typeof setTimeout> | null = null;
@@ -126,6 +136,14 @@
   $: if (page > pages) page = pages;
   $: visible = scored.slice((page - 1) * perPage, page * perPage);
   $: displayResolution = $cellDetails?.resolution ?? cellResolution;
+  $: knowledgeLimits = knowledgeLimitsText({
+    total: $cellDetails?.stats?.total ?? 0,
+    dd: $cellDetails?.stats?.DD ?? 0,
+    ms: $cellDetails?.stats?.missing_species_dna ?? 0,
+    mg: $cellDetails?.stats?.missing_genus_dna ?? 0,
+    mf: $cellDetails?.stats?.missing_family_dna ?? 0,
+    gdd: $cellDetails?.stats?.goat_data_deficient ?? 0
+  });
   $: boundaryGroups = (() => {
     const memberships = $cellDetails?.boundaries ?? [];
     const known = locationFrameworks.map(({ framework, label }) => ({
@@ -150,6 +168,7 @@
     cellAbortController?.abort();
     const controller = new AbortController();
     cellAbortController = controller;
+    requestOwner = owner;
     cellLoading.set(true);
     error = '';
     try {
@@ -158,16 +177,16 @@
         new URLSearchParams({ resolution: String(activeResolution), system: activeSystem }),
         controller.signal
       );
-      if (controller.signal.aborted) return;
+      if (disposed || controller.signal.aborted || requestOwner !== owner) return;
       cellDetails.set(details);
       page = 1;
       await tick();
       panel?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     } catch (reason) {
-      if (controller.signal.aborted) return;
+      if (disposed || controller.signal.aborted || requestOwner !== owner) return;
       error = reason instanceof Error ? reason.message : 'Failed to load cell.';
     } finally {
-      if (cellAbortController === controller) {
+      if (cellAbortController === controller && requestOwner === owner) {
         cellAbortController = null;
         cellLoading.set(false);
       }
@@ -178,6 +197,7 @@
   $: requestKey = $selectedH3 ? `${$selectedH3}:${cellResolution}:${$habitatSystem}` : '';
   $: if (requestKey && requestKey !== lastRequestKey && $selectedH3) {
     lastRequestKey = requestKey;
+    copyGeneration += 1;
     copyState = '';
     if (copyResetTimer) clearTimeout(copyResetTimer);
     load($selectedH3, cellResolution, $habitatSystem);
@@ -206,6 +226,8 @@
     if (copyResetTimer) clearTimeout(copyResetTimer);
     copyResetTimer = null;
     copyState = '';
+    copyGeneration += 1;
+    cellLoading.set(false);
     lastRequestKey = '';
     selectedH3.set(null);
     selectedH3Resolution.set(null);
@@ -214,10 +236,13 @@
 
   async function copyCellId() {
     if (!$selectedH3) return;
+    const generation = ++copyGeneration;
     try {
       await navigator.clipboard.writeText($selectedH3);
+      if (disposed || generation !== copyGeneration) return;
       copyState = 'copied';
     } catch {
+      if (disposed || generation !== copyGeneration) return;
       copyState = 'failed';
     }
     if (copyResetTimer) clearTimeout(copyResetTimer);
@@ -240,15 +265,22 @@
   }
 
   function keydown(event: KeyboardEvent) {
-    if (
-      !$selectedH3 ||
-      event.target instanceof HTMLInputElement ||
-      event.target instanceof HTMLTextAreaElement
-    )
-      return;
+    if (!$selectedH3 || ignoresWindowShortcut(event)) return;
     if (event.key === 'ArrowLeft' && page > 1) page -= 1;
     if (event.key === 'ArrowRight' && page < pages) page += 1;
   }
+  onDestroy(() => {
+    disposed = true;
+    copyGeneration += 1;
+    cellAbortController?.abort();
+    cellAbortController = null;
+    if (copyResetTimer) clearTimeout(copyResetTimer);
+    copyResetTimer = null;
+    if (requestOwner === owner) {
+      requestOwner = null;
+      cellLoading.set(false);
+    }
+  });
 </script>
 
 <svelte:window on:keydown={keydown} />
@@ -314,6 +346,11 @@
         </div>
       {/each}
     </div>
+    <aside class="cell-knowledge" aria-label="Cell knowledge limits and occupancy caveat">
+      <h3>Knowledge limits</h3>
+      <p class="cell-knowledge-shares">{knowledgeLimits}</p>
+      <p class="cell-knowledge-note">{occupancyCaveatText(displayResolution)}</p>
+    </aside>
     <div class="cell-table-filters">
       <label
         ><span class="sr-only">Filter species in this cell</span><input
@@ -491,6 +528,37 @@
   .cell-boundary-none {
     color: var(--color-gray-500);
     font-style: italic;
+  }
+  .cell-knowledge {
+    display: grid;
+    gap: 0.22rem;
+    margin: 0 0 0.85rem;
+    padding: 0.5rem 0.72rem 0.55rem;
+    border: 1px solid var(--color-gray-200);
+    border-radius: var(--border-radius-base);
+    background: var(--color-cream);
+    font-family: var(--font-sans);
+  }
+  .cell-knowledge h3 {
+    margin: 0;
+    color: var(--color-gray-600);
+    font-size: 0.62rem;
+    font-weight: 700;
+    letter-spacing: 0.025em;
+    text-transform: uppercase;
+  }
+  .cell-knowledge-shares {
+    margin: 0;
+    color: var(--color-gray-800);
+    font-size: 0.68rem;
+    line-height: 1.35;
+  }
+  .cell-knowledge-note {
+    margin: 0;
+    color: var(--color-gray-500);
+    font-size: 0.62rem;
+    font-style: italic;
+    line-height: 1.3;
   }
   .cell-table-filters {
     display: grid;

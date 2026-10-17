@@ -191,6 +191,7 @@ export class FineTileCoordinator {
   private timer: ReturnType<typeof setTimeout> | null = null;
   private generation = 0;
   private requestedSignature = '';
+  private requestedSourceKey = '';
   private disposed = false;
 
   constructor(options: CoordinatorOptions) {
@@ -211,6 +212,7 @@ export class FineTileCoordinator {
       .join(',')}`;
     if (signature === this.requestedSignature) return;
     this.requestedSignature = signature;
+    this.requestedSourceKey = source.key;
     // Every distinct camera signature supersedes all older visible and guard
     // work. Previously the covered-viewport fast path reused a generation,
     // allowing a slower obsolete guard to publish after the current camera.
@@ -243,6 +245,7 @@ export class FineTileCoordinator {
   reset(): void {
     this.generation += 1;
     this.requestedSignature = '';
+    this.requestedSourceKey = '';
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
     this.onLoadingChange(false);
@@ -272,12 +275,15 @@ export class FineTileCoordinator {
   ): Promise<void> {
     this.onLoadingChange(true);
     try {
-      await Promise.all(visibleIndices.map((index) => this.loadTile(source, index)));
+      const tiles = await Promise.all(visibleIndices.map((index) => this.loadTile(source, index)));
       if (this.disposed || generation !== this.generation) return;
-      this.commit(source.key, visibleIndices);
+      this.commit(source.key, visibleIndices, tiles);
       await this.loadAndCommitGuard(generation, source, guardedIndices);
     } catch (reason) {
-      if (generation === this.generation) this.onError(reason);
+      if (!this.disposed && generation === this.generation) {
+        this.requestedSignature = '';
+        this.onError(reason);
+      }
     } finally {
       if (generation === this.generation) this.onLoadingChange(false);
     }
@@ -292,7 +298,10 @@ export class FineTileCoordinator {
     try {
       await this.loadAndCommitGuard(generation, source, indices);
     } catch (reason) {
-      if (!this.disposed && generation === this.generation) this.onError(reason);
+      if (!this.disposed && generation === this.generation) {
+        this.requestedSignature = '';
+        this.onError(reason);
+      }
     } finally {
       if (generation === this.generation) this.onLoadingChange(false);
     }
@@ -303,12 +312,12 @@ export class FineTileCoordinator {
     source: FineTileSource,
     indices: FineTileIndex[]
   ): Promise<void> {
-    await Promise.all(indices.map((index) => this.loadTile(source, index)));
+    const tiles = await Promise.all(indices.map((index) => this.loadTile(source, index)));
     if (this.disposed || generation !== this.generation) return;
-    this.commit(source.key, indices);
+    this.commit(source.key, indices, tiles);
   }
 
-  private commit(sourceKey: string, indices: FineTileIndex[]): void {
+  private commit(sourceKey: string, indices: FineTileIndex[], tiles?: CompactTile[]): void {
     const tileKeys = new Set(indices.map((index) => this.tileKey(index)));
     if (
       sourceKey === this.committedSourceKey &&
@@ -316,7 +325,11 @@ export class FineTileCoordinator {
       [...tileKeys].every((key) => this.committedTileKeys.has(key))
     )
       return;
-    const chunks = this.chunksForTiles(sourceKey, tileKeys);
+    // A viewport may exceed the LRU capacity. Publish the loaded results
+    // directly so eviction cannot silently remove cells from this commit.
+    const chunks = tiles
+      ? indices.map((index, i) => ({ key: this.tileKey(index), cells: tiles[i].cells }))
+      : this.chunksForTiles(sourceKey, tileKeys);
     this.committedSourceKey = sourceKey;
     this.committedTileKeys = tileKeys;
     this.committedChunks = chunks;
@@ -341,7 +354,14 @@ export class FineTileCoordinator {
     if (existing) return existing;
     const request = source
       .load(index)
+      .catch(async (reason) => {
+        // Retry a transient request once even when the camera is stationary.
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        if (this.disposed || source.key !== this.requestedSourceKey) throw reason;
+        return source.load(index);
+      })
       .then((tile) => {
+        if (this.disposed) return tile;
         this.cache.set(key, { sourceKey: source.key, tile });
         while (this.cache.size > this.maxCachedTiles) {
           const oldest = this.cache.keys().next().value;

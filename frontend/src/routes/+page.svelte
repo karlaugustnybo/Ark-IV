@@ -8,7 +8,6 @@
   const statDefinitions: { key: keyof StatsResponse; label: string }[] = [
     { key: 'total', label: 'Species' },
     { key: 'critically_endangered', label: 'Critically Endangered' },
-    { key: 'edge_species', label: 'EDGE Species' },
     { key: 'needs_dna_sampling', label: 'Needs DNA Sampling' },
     { key: 'res3_cells', label: 'Large H3 Cells' },
     { key: 'res7_cells', label: 'Small H3 Cells' }

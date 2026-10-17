@@ -7,6 +7,103 @@ import {
   fineTileIndices,
   type FineTileIndex
 } from '../src/lib/map/fineTileCoordinator';
+import type { CompactTile } from '../src/lib/map/compactTiles';
+
+const settle = (ms = 0) => new Promise((resolve) => setTimeout(resolve, ms));
+const tileKey = ({ z, x, y }: FineTileIndex) => `${z}/${x}/${y}`;
+
+test('obsolete guards cannot evict the current viewport or valid empty tiles', async () => {
+  const view = { longitude: 0, latitude: 0, zoom: 11, width: 1024, height: 640 };
+  const pending = new Map<string, (empty?: boolean) => void>();
+  const commits: Array<{ keys: string[]; chunks: number; cells: number }> = [];
+  const source = {
+    key: 'pressure',
+    minZoom: 10,
+    maxZoom: 10,
+    load: (index: FineTileIndex) =>
+      new Promise<CompactTile>((resolve) => {
+        const key = tileKey(index);
+        pending.set(key, (empty = false) => resolve({ cells: empty ? [] : [[key, 1]] }));
+      })
+  };
+  const coordinator = new FineTileCoordinator({
+    debounceMs: 0,
+    onCommit: ({ tileKeys, chunks, cellCount }) =>
+      commits.push({ keys: [...tileKeys], chunks: chunks.length, cells: cellCount })
+  });
+  const finish = (key: string, empty = false) => {
+    pending.get(key)?.(empty);
+    pending.delete(key);
+  };
+  for (let i = 0; i < 12; i += 1) {
+    const moved = { ...view, longitude: i * 5 };
+    coordinator.schedule(moved, source);
+    await settle(3);
+    for (const index of fineTileIndices(moved, 10, 10, 0)) finish(tileKey(index));
+    await settle();
+  }
+  const latest = { ...view, longitude: 100 };
+  coordinator.schedule(latest, source);
+  await settle(3);
+  const visible = fineTileIndices(latest, 10, 10, 0).map(tileKey);
+  visible.slice(0, -1).forEach((key, i) => finish(key, i === 0));
+  await settle();
+  const obsolete = [...pending.keys()].filter((key) => !visible.includes(key));
+  expect(obsolete.length).toBeGreaterThan(256);
+  obsolete.forEach((key) => finish(key));
+  await settle();
+  finish(visible[visible.length - 1]);
+  await settle();
+  expect(commits.at(-1)).toEqual({
+    keys: visible,
+    chunks: visible.length,
+    cells: visible.length - 1
+  });
+  expect(coordinator.hasCoverage(latest, source)).toBe(true);
+  const commitCount = commits.length;
+  coordinator.dispose();
+  for (const finish of pending.values()) finish();
+  await settle();
+  expect(commits).toHaveLength(commitCount);
+  expect(coordinator.hasCoverage(latest, source)).toBe(false);
+});
+
+test('repeated failure retries once and source replacement/disposal cancel delayed retries', async () => {
+  for (const mode of ['failure', 'replacement', 'dispose'] as const) {
+    let calls = 0;
+    let errors = 0;
+    const view = { ...camera, width: 1, height: 1, longitude: 10.1, latitude: 20.1, zoom: 11 };
+    const source = {
+      key: 'failed',
+      minZoom: 10,
+      maxZoom: 10,
+      load: async () => {
+        calls += 1;
+        throw new Error('Synthetic failure');
+      }
+    };
+    const coordinator = new FineTileCoordinator({
+      guardTiles: 0,
+      debounceMs: 0,
+      onCommit: () => {},
+      onError: () => {
+        errors += 1;
+      }
+    });
+    coordinator.schedule(view, source);
+    await settle(10);
+    const firstCalls = calls;
+    if (mode === 'replacement')
+      coordinator.schedule(view, { ...source, key: 'new', load: async () => ({ cells: [] }) });
+    if (mode === 'dispose') coordinator.dispose();
+    await settle(250);
+    expect(calls).toBe(firstCalls * (mode === 'failure' ? 2 : 1));
+    expect(errors).toBe(mode === 'failure' ? 1 : 0);
+    await settle(220);
+    expect(calls).toBe(firstCalls * (mode === 'failure' ? 2 : 1));
+    coordinator.dispose();
+  }
+});
 
 const camera = {
   longitude: 179.8,
@@ -219,6 +316,90 @@ describe('FineTileCoordinator', () => {
     await new Promise((resolve) => setTimeout(resolve, 5));
     expect(coordinator.hasCoverage(camera, source)).toBe(true);
     expect(coordinator.hasCoverage({ ...camera, longitude: 120 }, source)).toBe(false);
+    coordinator.dispose();
+  });
+});
+
+describe('fine tile loading recovery', () => {
+  test('publishes every loaded tile even when the viewport exceeds the cache', async () => {
+    const tileCounts: number[] = [];
+    const coordinator = new FineTileCoordinator({
+      guardTiles: 1,
+      debounceMs: 0,
+      maxCachedTiles: 2,
+      onCommit: ({ chunks, tileCount, cellCount }) => {
+        tileCounts.push(tileCount);
+        expect(chunks).toHaveLength(tileCount);
+        expect(cellCount).toBe(tileCount);
+      }
+    });
+    const source = {
+      key: 'small-cache',
+      minZoom: 9,
+      maxZoom: 9,
+      load: async (index: FineTileIndex) => ({
+        cells: [[`${index.z}/${index.x}/${index.y}`, 1] as [string, ...number[]]]
+      })
+    };
+    coordinator.schedule(camera, source);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(tileCounts).toHaveLength(2);
+    expect(tileCounts[0]).toBeGreaterThan(2);
+    expect(coordinator.hasCoverage(camera, source)).toBe(true);
+    coordinator.dispose();
+  });
+
+  test('retries a transient failure without requiring camera movement', async () => {
+    let attempts = 0;
+    const errors: unknown[] = [];
+    const coordinator = new FineTileCoordinator({
+      guardTiles: 0,
+      debounceMs: 0,
+      onCommit: () => {},
+      onError: (reason) => errors.push(reason)
+    });
+    const source = {
+      key: 'transient',
+      minZoom: 9,
+      maxZoom: 9,
+      load: async () => {
+        if (++attempts === 1) throw new Error('Temporary tile failure');
+        return { cells: [] };
+      }
+    };
+    coordinator.schedule(camera, source);
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    expect(coordinator.hasCoverage(camera, source)).toBe(true);
+    expect(errors).toHaveLength(0);
+    coordinator.dispose();
+  });
+
+  test('can reschedule the same viewport after requests fail', async () => {
+    let failing = true;
+    const errors: unknown[] = [];
+    const coordinator = new FineTileCoordinator({
+      guardTiles: 0,
+      debounceMs: 0,
+      onCommit: () => {},
+      onError: (reason) => errors.push(reason)
+    });
+    const source = {
+      key: 'recover',
+      minZoom: 9,
+      maxZoom: 9,
+      load: async () => {
+        if (failing) throw new Error('Tile unavailable');
+        return { cells: [] };
+      }
+    };
+    coordinator.schedule(camera, source);
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    expect(errors).toHaveLength(1);
+    expect(coordinator.hasCoverage(camera, source)).toBe(false);
+    failing = false;
+    coordinator.schedule(camera, source);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(coordinator.hasCoverage(camera, source)).toBe(true);
     coordinator.dispose();
   });
 });
