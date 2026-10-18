@@ -1,14 +1,17 @@
-# Static tile export
+# Managed serving and optional static tile export
 
-`just data-tiles` reads the verified prepared-input report and builds a static
-PMTiles generation. The default remains static export; database loading and
-public data deployment are separate actions. Use a new isolated output directory
+`just data-tiles` reads the verified prepared-input report and builds a managed
+generation with coarse PMTiles and dynamic fine serving. Add `--static-fine` to
+build the optional full coarse/fine PMTiles archive in its separate static
+namespace. Database loading and public data deployment are separate actions.
+Use a new isolated output directory
 for experiments and follow [the data policy](../../DATA_POLICY.md) before releasing
 any generated artifact.
 
-## Encoding and compilation
+## Optional static export: encoding and compilation
 
-Managed streams omit metric properties whose value is zero. The metadata declares
+For `just data-tiles --static-fine`, managed streams omit metric properties whose
+value is zero. The metadata declares
 `tile_metric_encoding: sparse-zero-v1` and `tile_metric_default: 0`. Consumers must
 interpret an absent declared metric as zero; this is a transport encoding of a
 calculated count, not a replacement for missing scientific evidence. Null metric
@@ -43,7 +46,7 @@ does not cap Arrow, Shapely, producer workers or compiler memory. Budget disk sp
 for binary inputs, compiler scratch, cached archives and retained generations.
 Automatic pruning is not implemented.
 
-## Publication and recovery
+## Optional static export: publication and recovery
 
 Prepared inputs are checksummed and require complete coarse/fine coverage and
 current metric receipts. All five boundary inputs are required. Compiler identity
@@ -52,7 +55,8 @@ Each completed resolution group has a checksum receipt; a failed join reuses the
 groups. Per-base-cell shard receipts support finer recovery when explicitly chosen.
 
 The builder validates compiler success, emitted counts and PMTiles format, then
-writes metadata and switches `current` atomically only after a complete generation.
+writes metadata and switches `tiles/static/current` atomically only after a
+complete generation.
 Handled failures and interruptions retain the previous selected generation.
 Failed compiler launches stop processes already started by that compilation.
 Consumers needing archive and metadata across requests should pin the immutable
@@ -87,9 +91,9 @@ pipe-write, binary byte counts and compiler/join time. Producer encoding totals
 sum worker CPU durations and can exceed elapsed wall time. Repeat comparable
 runs and keep source-derived reports and outputs local.
 
-## Managed serving and optional static export
+## Default managed serving
 
-This pins one source generation, aggregates the pairs, builds species metadata
+Managed preparation pins one source generation, aggregates the pairs, builds species metadata
 and coarse/fine metrics, records the verified preparation, and creates the coarse
 archive with dynamic fine serving. A reviewed crosswalk matching the source
 snapshots is required.
