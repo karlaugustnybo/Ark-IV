@@ -33,8 +33,12 @@
     );
   }
 
-  function ariaSort(key: SpeciesSortKey): 'ascending' | 'descending' | 'none' {
-    return sort === key ? (order === 'asc' ? 'ascending' : 'descending') : 'none';
+  function ariaSort(
+    key: SpeciesSortKey,
+    activeSort: SpeciesSortKey,
+    activeOrder: 'asc' | 'desc'
+  ): 'ascending' | 'descending' | 'none' {
+    return activeSort === key ? (activeOrder === 'asc' ? 'ascending' : 'descending') : 'none';
   }
 
   function chooseSort(event: Event) {
@@ -72,7 +76,7 @@
         ><tr
           >{#each columns as column}<th
               class:numeric-column={column.numeric}
-              aria-sort={ariaSort(column.key)}
+              aria-sort={ariaSort(column.key, sort, order)}
               ><button class="table-sort-link" type="button" on:click={() => onSort(column.key)}
                 ><span>{column.label}</span><span
                   class:sort-active={sort === column.key}
