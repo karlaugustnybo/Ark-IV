@@ -12,10 +12,14 @@ versions. See [the pipeline guide](01_data_pipeline.md) for the complete sequenc
 
 After generating pairs, `just data-prepare` performs that handoff automatically:
 pair aggregation, species metadata, the coarse map, and fine metrics.
-Add `--tiles` to continue through the complete static PMTiles archive. The
+Add `--tiles` to build coarse PMTiles and prepare dynamic fine serving. The
 managed export is also available as `just data-tiles`; it reads the verified
-preparation record and publishes archive/metadata together under
-`GLOBAL_PREVIEW_ROOT/tiles/current/`. See [tile profiling and publication](../performance/tile_export_performance.md).
+preparation record and publishes the coarse archive, metadata, pinned fine
+partitions and `serving.json` under `GLOBAL_PREVIEW_ROOT/tiles/current/`.
+The optional `just data-tiles --static-fine` full coarse/fine archive publishes
+separately under `GLOBAL_PREVIEW_ROOT/tiles/static/current/`; it preserves the
+dynamic bundle and does not replace its managed startup/SQL-loading configuration.
+See [tile profiling and publication](../performance/tile_export_performance.md).
 Use `--dry-run` to inspect paths first. Subsequent serving commands still need
 `GLOBAL_H3_ROOT` set to the same source generation, as described in the guide.
 

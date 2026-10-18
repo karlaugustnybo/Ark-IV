@@ -77,8 +77,10 @@ its feature timings include backpressure and overlap native compilation.
 A complete managed sample build also passed: 12,000 fine cells, 343 distinct
 coarse cells and 3,000,214 fine species relationships. Its initial shard-based
 trial exposed a 13.74-second merge pass, erasing the cold-build feature gain.
-Consequently, **the default streams all partitions through one compiler**.
-Per-base-cell tile checkpoints are an explicit option for long, interruption-prone
+Consequently, **the optional static export streams all partitions through one
+compiler by default**. These measurements describe the static coarse/fine archive,
+not the default coarse/dynamic-fine bundle. Per-base-cell tile checkpoints are
+an explicit static-export option for long, interruption-prone
 runs where resumability is worth the extra merge and storage.
 The subsequent single-pass smoke build completed the same 12,343-cell archive
 in 14.82 seconds, including input verification, boundary loading, compilation and
@@ -98,20 +100,25 @@ Tile export verifies checksums and current metric code/dependencies, and rejects
 changed inputs or incomplete fine coverage. All five boundary inputs are required;
 alternative catalogues can be supplied explicitly to `data-tiles`.
 
-Both modes sort one base cell at a time, stream GeoJSON through a pipe, verify
-outputs, and switch `current` only after the archive and metadata are complete.
+The optional static export sorts one base cell at a time and streams GeoJSON
+through a pipe, using either one compilation or checkpoint shards plus a merge.
+Both static paths verify outputs and switch `tiles/static/current` only after the
+archive and metadata are complete. The default dynamic bundle compiles only coarse
+PMTiles, pins fine aggregate/raw-list partitions, and validates its `serving.json`
+before selecting `tiles/current`.
 Unchanged complete generations are reused after checksum verification. Failed
 builds leave the previously selected generation intact. A single-pass build
 restarts compilation after interruption.
 
-For persistent tile checkpoints:
+For persistent tile checkpoints in the optional static export:
 
 ```bash
 just data-prepare
-just data-tiles --checkpoint-shards
+just data-tiles --static-fine --checkpoint-shards
 ```
 
-This produces one coarse PMTiles shard and one per fine H3 base cell, then merges
+`--checkpoint-shards` alone does not select static export. The command above
+produces one coarse PMTiles shard and one per fine H3 base cell, then merges
 them with `tile-join`. Shard receipts cover the metric input, boundaries, code,
 dependencies, compiler binaries and compiler thread setting. Completed shards
 survive interruption and remain reusable when only unrelated partitions or map

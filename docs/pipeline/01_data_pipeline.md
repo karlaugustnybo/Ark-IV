@@ -136,7 +136,7 @@ To resume after pair generation without repeating source acquisition:
 ```bash
 just data-prepare --crosswalk-mode refresh --dry-run  # inspect the paths and commands
 just data-prepare --crosswalk-mode refresh          # automatic matches, lists, metadata and metrics
-just data-prepare --crosswalk-mode refresh --tiles  # continue through the full PMTiles archive
+just data-prepare --crosswalk-mode refresh --tiles  # coarse PMTiles and dynamic fine serving
 ```
 
 The full `data-build` and `data-update` commands already include these steps.
@@ -159,11 +159,18 @@ metric workers multiply that limit.
 
 Successful preparation also writes `GLOBAL_PREVIEW_ROOT/prepared-inputs.json`,
 binding coarse and fine products to the verified source generation. Use
-`just data-tiles` to build or reuse the full static archive from that record.
-`just global-res7-tiles` is an alias. The final archive and metadata are published
-together under `GLOBAL_PREVIEW_ROOT/tiles/current/`. The default uses a single
-streamed compilation; `just data-tiles --checkpoint-shards` adds resumable
-per-base-cell tiles at the cost of a merge pass and extra disk space. See the
+`just data-tiles` to build or reuse the default coarse PMTiles and dynamic fine
+serving bundle from that record. `just global-res7-tiles` is an alias. The coarse
+archive, metadata, pinned fine partitions and `serving.json` are published
+together under `GLOBAL_PREVIEW_ROOT/tiles/current/`.
+
+For an optional full static coarse/fine archive, use `just data-tiles --static-fine`.
+It publishes separately under `GLOBAL_PREVIEW_ROOT/tiles/static/current/`, preserving
+the dynamic bundle. This static export uses one streamed compilation by default;
+`just data-tiles --static-fine --checkpoint-shards` adds resumable per-base-cell
+tiles at the cost of a merge pass and extra disk space. `--checkpoint-shards`
+alone does not select static export. The static bundle does not supply the
+dynamic `serving.json` required for managed startup and SQL loading. See the
 [tile profiling and publication guide](../performance/tile_export_performance.md).
 
 The spatial workflow now exports the format consumed by the existing serving
@@ -249,8 +256,8 @@ release hardware; synthetic integration tests do not establish global throughput
 | `just spatial` | Build/resume pairs, then run direct aggregation. |
 | `just data-prepare` | Aggregate pairs, then prepare metadata, coarse map and fine metrics. |
 | `just global-prepare` | Both coarse and fine serving products. |
-| `just data-prepare --tiles` | Complete post-pair pipeline through the static PMTiles archive. |
-| `just data-tiles` | Build/reuse PMTiles from the recorded preparation. |
+| `just data-prepare --tiles` | Complete post-pair pipeline through coarse PMTiles and dynamic fine serving. |
+| `just data-tiles` | Build/reuse coarse PMTiles and dynamic fine serving from the recorded preparation; `--static-fine` selects the separate full static archive. |
 | `just data-boundaries` | Acquire/install global ADM2 geometry and country catalogues. |
 | `just global-res7-tiles` | Alias for `data-tiles`. |
 
