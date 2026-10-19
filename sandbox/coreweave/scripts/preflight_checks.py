@@ -66,7 +66,6 @@ def reconcile_basins(root, relations, output, *, audit=None, write_missing=None)
     if audit is None or write_missing is None:
         try:
             from ark_pipeline.cli.sources_check_hydrobasins import audit
-
             from ark_pipeline.cli.spatial_pairs import (
                 write_missing_basin_relationships as write_missing,
             )
