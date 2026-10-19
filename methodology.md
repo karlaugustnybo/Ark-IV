@@ -200,8 +200,16 @@ technical debt against the [pipeline requirements](docs/reference/data_pipeline_
 
 The matcher normalizes case and whitespace, restricts GoaT candidates to species
 rank, generates current-name and authoritative synonym matches, reconstructs
-lineage, ranks candidates, and writes accepted and unresolved decisions
+lineage, combines evidence per distinct candidate TaxID, ranks candidates, and writes accepted and unresolved decisions
 separately. Names alone are not sufficient biological evidence of equivalence.
+NCBI `includes` and `in-part` relationships are partial concepts, retained as
+review evidence rather than equivalent synonyms. Alone they leave the accepted
+ID null and cannot transfer species-level DNA, EBP, or resampling traits.
+Corroborating evidence for the same TaxID does not create another candidate;
+competing TaxIDs retain the ambiguity guards. Class/phylum rank shifts reduce
+conflicts only when the supplied label is an actual scientific-name ancestor in
+the registered NCBI lineage. Exported GoaT lineage can fill gaps for taxa absent
+from the pinned NCBI dump, with its source recorded separately.
 
 The executable acceptance branches in `crosswalk_match.py` are:
 
@@ -211,6 +219,7 @@ The executable acceptance branches in `crosswalk_match.py` are:
 | Exact-name/synonym branch with optional external validation | `gbif_confirmed` true, at least two lineage agreements and at most one conflict |
 | GBIF accepted-name bridge | At least two lineage agreements, at most one conflict, and either a unique candidate or an agreement advantage of at least two over the runner-up |
 | Near-name candidate | External confirmation, edit distance at most two, similarity at least 0.94, at least two lineage agreements, at most one conflict |
+| SIS-provenance bridge or corroboration | Direct GoaT Red List provenance records the row's IUCN SIS ID, the candidate set has one distinct TaxID, and the lineage guard holds |
 | Insufficient evidence | Accepted ID remains null; candidate evidence is retained for review |
 
 All automatic branches now enforce the same minimum lineage evidence and
@@ -220,7 +229,8 @@ the unresolved queue. It improves consistency but does not establish match
 precision, which still requires independent review.
 
 `safe_for_automatic_species_trait_transfer` means an accepted match maps to only
-one IUCN species within the supplied crosswalk. It protects against detected
+one IUCN species within the supplied crosswalk and has accepted equivalence
+evidence rather than a partial-name relationship alone. It protects against detected
 split/lump relationships; it does not prove that the match is correct or that
 an assembly belongs to the same biological concept. The label `AI-review
 (GPT-5.6 Sol)` records the implemented review-policy label, not independent
@@ -232,6 +242,13 @@ coverage of 126,285/171,604 species (73.59%) is therefore not the expected
 coverage of a fresh deterministic run, and neither percentage estimates match
 precision. A stratified independently reviewed reference set is still needed.
 See the [crosswalk history and workflow](docs/pipeline/06_iucn_goat_global_crosswalk.md).
+
+GoaT native `redlist_category`, `redlist_population_trend`, and `redlist_scopes`
+are retained alongside their per-field origin and recorded SIS/assessment IDs.
+Only direct identifier provenance may bridge or corroborate a unique candidate;
+ancestry-derived values are not species identity evidence. Category agreement
+is an audit signal, not independent identity evidence or a replacement for the
+IUCN assessment. Legacy exports remain supported with empty native fields.
 
 The audited September benchmark crosswalk, whose IUCN/GoaT hashes match the
 registered sources, contains 122,392 accepted links among 171,604 IUCN IDs
@@ -323,12 +340,35 @@ not point count, sampling intensity, or local abundance.
 
 Eligible IUCN table rows are first reduced to distinct `(hybas_id, IUCN SIS ID)`
 relationships with DuckDB's spillable sort. The numeric HydroBASINS identifier
-encodes region and Pfafstetter level. For every referenced region/level, the
+normally encodes region and Pfafstetter level. IUCN-added island IDs in the
+100000000–199999999 namespace are resolved by exact ID from its separately
+inventoried base layer, without inferring a region or basin level. The
+customized-with-lakes layer takes precedence for shared IDs, with standard
+v1c polygons as fallback. This retains provider distribution units; it does
+not infer habitat suitability or clip marine/terrestrial ranges.
+Each layer must have exactly one case-insensitive `HYBAS_ID` field. Inspection,
+the checker and the builder preserve its actual spelling for Arrow reads;
+missing or ambiguous key fields fail before coverage outputs are published.
+For every referenced region/level, the
 pipeline scans only the small DBF identifier/FID columns, then asks GDAL for the
 WKB of referenced FIDs. Each referenced HydroBASINS v1c polygon is covered once
 with the same any-touch polygon kernel and cached as `(hybas_id, H3 cell)`.
 Species pairs are produced by a native DuckDB join to that reusable basin index.
-Missing referenced IDs fail the stage instead of silently dropping species.
+Requested IDs are reconciled before H3 filling; duplicate requested IDs in a
+selected source layer fail. Missing referenced IDs fail by default. A profile
+may explicitly set `hydrobasin_coverage.missing_geometry_policy` to
+`exclude-with-audit`. That mode records every omitted source relationship in
+`missing_relationships.parquet`, plus source/distinct relationship and affected
+species counts, referenced/covered/missing basin counts, and an explicit partial
+coverage status. Missing geometry is unresolved coverage, never absence evidence.
+The receipt binds the profile, source inventories, requested IDs, output schemas
+and hashes; partial receipts additionally bind relationship-table hashes.
+The read-only `sources_check_hydrobasins` CLI reports exact-ID and nonempty
+polygon coverage with distinct basin/species denominators using the same lake-first
+exact-ID selection. Standard-only inventory counts remain separate diagnostics;
+a present but unusable lake row is unresolved even when standard has a polygon.
+The checker does not perform
+H3 filling or establish biological accuracy. Its reports remain local.
 
 ### Repair policy
 
@@ -387,11 +427,25 @@ include cell c exactly when G intersects H(c), including edge or vertex contact
 ```
 
 The pipeline uses h3ronpy's native `geometry_to_cells` with
-`ContainmentMode.IntersectsBoundary` on clipped pieces, followed by a union of
-cell IDs. It does not use cell-centre containment as the final rule, require a
-whole cell inside the range, or apply a production border-expansion buffer.
+`ContainmentMode.IntersectsBoundary` to seed candidates on clipped pieces.
+Native overlap can omit exact shared-edge contacts, so it is not the final
+membership decision. Cells wholly contained in each clipped piece are accepted;
+the remaining native frontier is expanded by one H3 neighbour ring and checked
+with the closed GEOS `intersects` predicate against the decision geometry and
+adjacent longitude copies. The halo is only a candidate set: non-intersecting
+neighbours are rejected, without a buffer or positive-area threshold.
+
+Partition pieces are split at every longitude world boundary before native
+filling, including grids that do not divide 180°. Partition size is intended to
+change execution only. Pole-containing H3 rings close through the corresponding
+pole before canonical splitting; scalar boundary membership, tile batches and
+GeoJSON export share that closure. The native coverage path uses the same
+closure on h3ronpy's vectorized coordinates. Native and scalar bindings can
+differ by floating-point roundoff; this is not a displacement allowance or a
+biological boundary uncertainty estimate.
+
 The profile's `candidate_mode = "bbox_overlap"` is a retained configuration
-label; the current production call actually uses `IntersectsBoundary`.
+label; the current production seed call uses `IntersectsBoundary`.
 Historical hierarchy/candidate-buffer settings are not proof that those
 experimental routes execute in the active direct kernel.
 
@@ -432,7 +486,14 @@ tested tail polygons, but that is a measured sample rather than a global proof.
 | Fallback | Try `preserve_topology=True`, then retain original if rejected | Whole-geometry fallback |
 
 Shapely uses Douglas–Peucker simplification, and topology preservation adds
-checks against collapses and ring intersections.
+checks against collapses and ring intersections. The fallback groups potentially
+interacting rings using expanded short-section envelopes for geometries with
+at least 256 rings and a bounding-box area of at least 3000 square degrees.
+It reconstructs the original polygon/component structure and applies the same
+validity and component-count acceptance guards. Smaller cases retain the
+whole-geometry topology-preserving operation. Synthetic comparisons check
+equivalent outputs for interacting holes, nested islands, remote components
+and irregular clusters; they do not establish global equivalence or speedup.
 [Shapely simplification](https://shapely.readthedocs.io/en/stable/reference/shapely.simplify.html).
 The fast candidate may remove holes while preserving the number of outer
 components. Equal component count does not establish that each original
@@ -514,6 +575,23 @@ Species present in H3 lists but absent from metadata are retained as explicit
 GoaT-data-deficient status. This preserves relationships, but does not recover
 missing biology. All-system richness can contain placeholders with no
 terrestrial, freshwater or marine classification.
+
+Registered spatial rows can recover labels, family and affirmative system flags
+for those exact source IDs. Conflicting names/families/categories remain empty
+and are reported. Spatial threat labels are retained separately; they do not
+replace an assessment or `Not Assessed`. No realm is inferred from archive names.
+Missing affirmative ecosystem evidence is distinct from missing taxonomy.
+
+Optional completed IUCN API intake can enrich the same SIS ID with one exact
+global assessment. Existing assessment identities/categories remain pinned,
+including historical assessments; latest-global lookup applies only to IDs
+without an assessment. Returned taxon, assessment and scope identities must
+agree. Names and synonyms select investigations, never merge identities or
+transfer DNA, EBP or resampling evidence. Original system memberships remain.
+Reviewed habitat/ecology evidence is a private input, pinned to exact IDs and
+text or taxon name/authority plus assessment-source provenance. Its selected
+path/checksum is recorded and checked for changes; a missing file supplies no
+affirmative evidence. The optional file is not part of this code release.
 
 Systems are species-level labels. Assessment text beginning with `Freshwater`
 is normalized to `Freshwater`; `Terrestrial` and `Marine` are retained.
@@ -730,24 +808,39 @@ builds avoid expanding tens of billions of relationships into PostgreSQL.
 Fine metrics evaluate predicates once per species, gather those flags by numeric
 ID, and reduce within Arrow lists with NumPy. This avoids a full expanded SQL
 relationship join while retaining the canonical metric definitions. Input is
-batched at 256 cells with a 250,000-relationship target; an individual cell is
+batched at 16,384 cells with a 250,000-relationship target; an individual cell is
 not split. Output buffers are bounded. Missing metadata maps to zero flags in
 the reducer, but publication reconciliation must reject the resulting missing
 relationships rather than silently publish reduced totals.
 
+The default `just data-tiles` export prepares coarse PMTiles and pinned fine
+aggregate/raw-list partitions for dynamic fine delivery, with metadata and
+`serving.json` under `GLOBAL_PREVIEW_ROOT/tiles/current/`. The optional
+`just data-tiles --static-fine` export builds a full coarse/fine archive separately
+under `GLOBAL_PREVIEW_ROOT/tiles/static/current/`, preserving the dynamic bundle.
+The static archive does not supply managed dynamic startup/SQL-loading configuration.
+
 The coarse map uses a compact Arrow snapshot. PMTiles features carry cell ID,
 resolution, compact metric names, system prefixes, and delimiter-encoded
-boundary memberships. The managed compiler streams GeoJSON sequences into
-Tippecanoe without materializing a global GeoJSON file. It disables feature and
+boundary memberships. Managed static tiles encode zero metric counts by absent
+properties, with `sparse-zero-v1` and default zero declared in map metadata. Null
+metric inputs are rejected; missing scientific evidence retains its upstream
+meaning. Dense diagnostic features remain available. The managed compiler uses
+bounded GeoJSON sequences or ordered partitioned FlatGeobuf inputs, without
+materializing a global GeoJSON file. Coarse and fine zoom groups compile separately
+and are joined after validation. It disables feature and
 tile-size limits and preserves input order; it does not promise pixel-perfect
 source geometry at every zoom. Tile geometry is a display representation, not
-the authoritative pair relation. Current build zoom ranges are 0–6 for coarse
-features and 8–12 for fine features; frontend transition behavior is a separate
-rendering concern.
+the authoritative pair relation. Build zoom ranges are 0–6 for coarse
+features and 8–12 for optional static fine features; frontend transition behavior
+is a separate rendering concern.
 
-The default export is one streamed compilation; optional base-cell shards trade
-extra storage and a merge pass for checkpoint reuse. Feature streaming can be
-limited by Python boundary/feature work, database reads, or compiler
+Within optional static export, the default caches separately compiled resolution
+groups and joins them into the final archive. Optional base-cell shards provide finer checkpoint reuse
+at the cost of extra storage; both static modes require the final join.
+`just data-tiles --static-fine --checkpoint-shards` selects those shards;
+`--checkpoint-shards` alone does not select static export. Feature streaming
+can be limited by Python boundary/feature work, database reads, or compiler
 backpressure. Aggregate counts alone cannot identify the bottleneck.
 
 A rendered aggregate is not a complete species list. Exact selected-cell
@@ -1027,3 +1120,101 @@ this document and its assumption audit, the relevant configuration/fingerprints,
 validation evidence, and affected roadmap entry. Preserve old results as dated
 history. Do not edit old receipts to make new code appear compatible, and do not
 mark a scientific review complete merely because an implementation test passes.
+
+
+### Serving profiles and unavailable fine evidence
+
+Whole-map resident/passage selection scopes SQL and map artifacts together;
+[coverage profiles](docs/pipeline/coverage_profiles.md) documents preparation,
+registration and validation limits. The default accepted seasons and scoring
+weights remain unchanged. A separately built passage dataset accepts season 4
+throughout spatial membership and aggregation. The optional species-range
+supplement instead uses direct unsimplified resolution-3 any-touch passage
+coverage, joined through explicit SIS metadata, and never changes map scores.
+
+Unavailable raw fine lists return an explicit availability flag with null
+statistics. Available partitions without the requested cell return an empty
+result. Aggregate fine map scores remain available independently. Optional
+metadata fields identify unresolved spatial-only records and historical
+assessments without transferring source categories into scoring. Mutable static
+archives carry a representation version independent of tile schema, reject
+stale version URLs, and require ETag revalidation for full and range responses.
+
+## Optional dated-tree research
+
+A separate optional [dated-tree mammal prototype](docs/pipeline/09_edge_prototype.md)
+now computes ED and original EDGE (`ln(1 + ED) + GE ln(2)`), plus ED2/GE2/EDGE2
+components using the pinned Duke reference engine. It operates on the complete
+released mammal crown before joining reviewed IUCN assessments, reports every
+join failure, and compares scores with the published mammal supplement. Both
+scoring entry points require the canonical NCBI concept to be present at species
+rank in the registered current nodes snapshot before assigning assessment risk
+or attempting current-name rescue. Rejected tips retain unjoined pooled risk.
+Its 256 seeded risk draws use one median tree, so the reported intervals omit
+phylogenetic uncertainty. Output status is `prototype_unvalidated`; these
+descriptive artifacts are separate from the species dimension and supply no
+map score weights. The guide describes provenance and limitations.
+
+The follow-up `just edge-validate` adds conservative exact NCBI-name bridges
+with agreeing genus/family, no conflicting identifier and unique assignments.
+It compares configured median/sample trees using identical per-species uniform risk
+draws, audits extra nonmammalian environmental samples and keeps the full
+retained mammal universe for branch sharing. It reports pilot rank ranges,
+top-100 frequencies and published terminal-branch discrepancies. These small
+convenience samples do not establish official EDGE2 lists or full-ensemble
+confidence. The two median trees differ in topology, and the current date
+cache postdates the release; interpolation-method effects and release-specific
+date provenance remain unresolved.
+
+### Extinction-status precedence for dated-tree calculations
+
+**Verified IUCN species assessments overrule OTT/tree extinction flags.**
+For an identified species with a verified global assessment, use its registered
+IUCN category for conservation status and extinction classification. An OTT
+`extinct` or `extinct_inherited` flag cannot turn an IUCN EN, LC or other non-EX
+assessment into EX, exclude an otherwise valid scored leaf, or erase its DNA
+evidence. EX is classified extinct; EW remains a separate category. Possibly
+extinct assessment flags are retained without silently converting CR to EX.
+For DD, the effective flag means "not classified EX", not proof of living
+individuals. Missing/NE assessments remain unresolved and do not assert an
+IUCN status override.
+
+The calculation records the original OTT flags, IUCN SIS/assessment IDs and
+category, `effective_extinct`, `extinction_status_source`, conflict and override
+flags. Raw source files are preserved. Overrides resolve status only: unique
+species identity, genomic-transfer permissions, DNA-quality rules and dated
+branch availability retain their existing checks. A species whose dated leaf
+is missing remains unscored for branch-based metrics; the explicit reason is
+`iucn_status_override_tree_leaf_missing`, rather than an exclusion as extinct.
+No branch length is inferred merely from its IUCN category.
+
+Historical research artifacts remain local; rebuilt outputs carry their own source and code receipts.
+
+## Exploratory serving notebooks
+
+The three [serving notebooks](notebooks/README.md) are descriptive investigations,
+not production replacements. They preserve the default threat/DNA ladder and
+check executable SQL against production predicates, including NULL and
+contradictory evidence states. A configured input identity hashes consumed
+files, including the crosswalk; it is not proof of compatible source releases.
+
+Range analysis uses coarse mapped extent, excludes unknown DNA observations
+from representation-rate denominators, and reports family-clustered logistic
+associations. Logit coefficients are converted with `exp(beta)`; conditional
+mapping and representation odds ratios are separate, never an asserted joint
+population bias. Assessment-cohort coverage is a cross-section, not a time series
+of sequencing progress. Species-level flags use the website evidence rule and
+must not be relabelled completed reference genomes.
+
+Score exploration checks range-rarity conservation against one weight per
+listed species and independently checks declared range lengths. Country shares
+use overlapping country-scope contact cells (nonempty `admin0`), including
+possible EEZ-only contacts; this is not a terrestrial mask. Ecoregion fractions
+keep country-contacted species with zero coverage and intersect the numerator
+with that same country-contact denominator. Ecoregions are not protected areas.
+Moran permutations use the same
+zero-based adjacency and normalization as observed values. Rank comparisons
+keep zero-score cells in a consistent selected universe; constant correlations
+are undefined. Parent aggregation repeats child budgets rather than rebuilding
+deduplicated parent-species membership. Fixtures validate these code contracts,
+not global coverage, biological accuracy, causal inference or data-release rights.

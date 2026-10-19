@@ -133,14 +133,21 @@ dev: start
 test:
     uv run python -m unittest discover -s tests -v
 
-# Lint Python source and tests.
+# Lint Python and JavaScript/TypeScript source and tests.
 [group('03 - Validation')]
 lint:
     uv run ruff check .
+    cd frontend && bun run lint
+
+# Format frontend source and the JavaScript pipeline helper with Oxfmt.
+[group('03 - Validation')]
+frontend-format:
+    cd frontend && bun run format
 
 # Type-check, test, and build the frontend.
 [group('03 - Validation')]
 frontend-check:
+    cd frontend && bun run format:check
     cd frontend && bun run check
     cd frontend && bun test
     cd frontend && bun run build
@@ -158,6 +165,33 @@ release-history-check:
 # Run the complete repository verification suite.
 [group('03 - Validation')]
 check: lint test frontend-check release-check
+
+# Check notebook graphs without opening or reading serving snapshots.
+[group('03 - Validation')]
+nb-graph-check:
+    uvx --from 'marimo>=0.19' marimo check --strict notebooks/data_overview.py notebooks/range_dna_investigation.py notebooks/score_surfaces_investigation.py
+
+# Explicit opt-in execution. PEP 723 preserves each notebook's own dependencies.
+# Configure ARK_NOTEBOOK_EXPORTS and ARK_NOTEBOOK_CROSSWALK for an isolated snapshot.
+[group('03 - Validation')]
+nb-check:
+    uv run notebooks/data_overview.py
+    uv run notebooks/range_dna_investigation.py
+    uv run notebooks/score_surfaces_investigation.py
+
+# Local HTML only; sandbox reads each PEP 723 header (range notebook uses pandas 2).
+# Choose an explicit output directory. Nothing is uploaded or automatically removed.
+[group('03 - Validation')]
+nb-export-smoke output:
+    mkdir -p '{{ output }}'
+    uvx --from 'marimo>=0.19' marimo export html --sandbox notebooks/data_overview.py -o '{{ output }}/data_overview.html'
+    uvx --from 'marimo>=0.19' marimo export html --sandbox notebooks/range_dna_investigation.py -o '{{ output }}/range_dna_investigation.html'
+    uvx --from 'marimo>=0.19' marimo export html --sandbox notebooks/score_surfaces_investigation.py -o '{{ output }}/score_surfaces_investigation.html'
+
+# Generate invented data in a new/empty directory; no downloads or pipeline build.
+[group('03 - Validation')]
+nb-fixture output:
+    uv run notebooks/_synthetic_exports.py '{{ output }}'
 
 # Validate the configured H3 list files without requiring a crosswalk.
 [group('03 - Validation')]
@@ -248,6 +282,7 @@ global-prepare: global-build-preview global-res7-aggregate
       --build-duckdb data/global/build.duckdb \
       --species data/global/species/species.parquet \
       --species-systems data/global/species/species_systems.parquet \
+      --crosswalk "{{ global_crosswalk_path }}" \
       --metadata-template data/global/tiles/map-metadata.json \
       --output "{{ global_preview_root }}/prepared-inputs.json"
 
@@ -287,8 +322,8 @@ global-db-configure:
 # Load the compact global preview exports into the separate preview database.
 [group('05 - Serving stages')]
 global-db-load:
-    DATABASE_URL='{{ global_database_url }}' EXPORT_DIR=./data/global/exports \
-      uv run python -m backend.load_postgres
+    DATABASE_URL='{{ global_database_url }}' uv run python -m ark_pipeline.cli.map_serving load \
+      --config "${GLOBAL_SERVING_CONFIG:-{{ global_preview_root }}/tiles/current/serving.json}"
 
 # Resume global resolution-7 aggregation; stale metric schemas rebuild automatically.
 [positional-arguments]
@@ -302,7 +337,7 @@ global-res7-aggregate *args:
       --scratch-dir "{{ global_preview_root }}/scratch" \
       --memory-limit "${DUCKDB_MEMORY_LIMIT:-750MB}" "$@"
 
-# Resume a full PMTiles snapshot from the exact recorded preparation generation.
+# Prepare coarse PMTiles and dynamic fine H3 serving from recorded inputs.
 [positional-arguments]
 [group('02 - Data workflow')]
 data-tiles *args:
@@ -311,7 +346,7 @@ data-tiles *args:
       --output-dir "{{ global_preview_root }}/tiles" \
       --scratch-dir "{{ global_preview_root }}/scratch/tippecanoe" "$@"
 
-# Compatibility alias for the managed static snapshot build.
+# Compatibility alias for managed map serving.
 [group('05 - Serving stages')]
 global-res7-tiles: data-tiles
 
@@ -326,22 +361,63 @@ data-boundaries:
 global-start:
     #!/usr/bin/env zsh
     set -euo pipefail
-    source_parts="{{ global_h3_root }}/res7_merged_parts"
-    aggregate_parts="{{ global_preview_root }}/res7_aggregates"
-    test -d "$source_parts" || {
-      print -u2 "Global resolution-7 source partitions are unavailable: $source_parts"
-      exit 1
-    }
-    test -d "$aggregate_parts" || {
-      print -u2 "Global resolution-7 aggregate partitions are unavailable: $aggregate_parts"
-      exit 1
-    }
-    DATABASE_URL='{{ global_database_url }}' \
-      SOURCE_DUCKDB_PATH=./data/global/source.duckdb \
-      BUILD_DUCKDB_PATH=./data/global/build.duckdb \
-      EXPORT_DIR=./data/global/exports TILE_DIR=./data/global/tiles \
-      PMTILES_PATH=./data/global/tiles/priorities.pmtiles \
-      MAP_METADATA_PATH=./data/global/tiles/map-metadata.json \
-      RES7_PARTS_DIR="$source_parts" \
-      RES7_AGGREGATE_PARTS_DIR="$aggregate_parts" \
-      just serve
+    source_args=(--preview-root "{{ global_preview_root }}")
+    if [[ -n "${GLOBAL_SERVING_CONFIG:-}" ]]; then
+      source_args=(--config "$GLOBAL_SERVING_CONFIG")
+    fi
+    DATABASE_URL='{{ global_database_url }}' uv run python -m ark_pipeline.cli.map_serving start "${source_args[@]}"
+
+# Fetch pinned public dated-tree, OTT taxonomy and mammal comparison inputs.
+[group('04 - Scientific investigations')]
+edge-download:
+    uv run --group edge python -m ark_pipeline.cli.edge_prototype --download-only
+
+# Run the optional mammal EDGE-style prototype, with coverage and residual reports.
+[group('04 - Scientific investigations')]
+edge-prototype samples="256" seed="42":
+    uv run --group edge python -m ark_pipeline.cli.edge_prototype --download --root '{{ global_data_root }}' --crosswalk '{{ global_crosswalk_path }}' --samples '{{ samples }}' --seed '{{ seed }}'
+
+# Extract reproducible mammal crowns from the official alternative-tree archives.
+[group('04 - Scientific investigations')]
+edge-tree-download trees="8":
+    uv run --group edge python -m ark_pipeline.cli.edge_tree_download --trees-per-archive '{{ trees }}'
+
+# Check exact-name matching, reference disagreements and tree sensitivity.
+[group('04 - Scientific investigations')]
+edge-validate samples="128" seed="42":
+    uv run --group edge python -m ark_pipeline.cli.edge_validate --root '{{ global_data_root }}' --crosswalk '{{ global_crosswalk_path }}' --samples '{{ samples }}' --seed '{{ seed }}'
+
+# Install optional R reference-calculator dependencies into ignored local data.
+[group('04 - Scientific investigations')]
+edge-benchmark-setup:
+    Rscript -e 'dir.create("data/edge/benchmark/r-library", recursive=TRUE, showWarnings=FALSE); install.packages(c("ape", "phylobase", "data.table"), lib="data/edge/benchmark/r-library", repos="https://cloud.r-project.org")'
+
+# Check original-author arithmetic and compare trees with identical mammal risks.
+[group('04 - Scientific investigations')]
+edge-benchmark seed="42":
+    uv run --group edge python -m ark_pipeline.cli.edge_benchmark --download --seed '{{ seed }}'
+
+# Link Ark assessments to the unchanged Duke global tree, with identity audits.
+[group('04 - Scientific investigations')]
+edge-link:
+    uv run --group edge python -m ark_pipeline.cli.edge_link --root '{{ global_data_root }}' --crosswalk '{{ global_crosswalk_path }}'
+
+# Recover independent IUCN/tree identities without altering genomic transfers.
+[group('04 - Scientific investigations')]
+edge-link-expand:
+    uv run --group edge python -m ark_pipeline.cli.edge_link_expand --root '{{ global_data_root }}'
+
+# Investigate documented species-name changes and retain unresolved concept reviews.
+[group('04 - Scientific investigations')]
+edge-link-synonyms:
+    uv run --group edge python -m ark_pipeline.cli.edge_link_synonyms --root '{{ global_data_root }}'
+
+# Compare rooted mammal DNA gaps with the website's existing genus/family score.
+[group('04 - Scientific investigations')]
+phylogenetic-gap legacy_validation budget="20":
+    uv run --group edge python -m ark_pipeline.cli.phylogenetic_gap --root '{{ global_data_root }}' --crosswalk '{{ global_crosswalk_path }}' --legacy-validation '{{ legacy_validation }}' --budget '{{ budget }}'
+
+# Review missing DNA-positive mammal identities before rebuilding the gap pilot.
+[group('04 - Scientific investigations')]
+edge-baseline-review:
+    uv run --group edge python -m ark_pipeline.cli.edge_baseline_review

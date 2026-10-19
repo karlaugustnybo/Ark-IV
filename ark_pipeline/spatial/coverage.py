@@ -13,17 +13,21 @@ import json
 import math
 import tomllib
 from dataclasses import dataclass, replace
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 
 import h3.api.numpy_int as h3_int
 import numpy as np
 import shapely
-from h3ronpy import ContainmentMode
+from h3ronpy import ContainmentMode, uncompact
 from h3ronpy.vector import cells_to_wkb_polygons, geometry_to_cells
 from shapely import affinity, make_valid
 from shapely.geometry import MultiPolygon, Polygon, box
 from shapely.geometry.base import BaseGeometry
+
+from ark_pipeline.spatial.boundaries import h3_ring_polygon
+from ark_pipeline.spatial.simplification import simplify_grouped
 
 
 class GeometryCoverageError(ValueError):
@@ -100,6 +104,9 @@ def canonical_json(value: Any) -> bytes:
 def load_spatial_profile(path: Path) -> SpatialProfile:
     payload = tomllib.loads(path.read_text(encoding="utf-8"))
     digest = hashlib.sha256(canonical_json(payload)).hexdigest()
+    missing_policy = payload.get("hydrobasin_coverage", {}).get("missing_geometry_policy", "error")
+    if missing_policy not in {"error", "exclude-with-audit"}:
+        raise ValueError("hydrobasin missing_geometry_policy must be error or exclude-with-audit")
     coverage = payload["coverage"]
     policy = payload["row_policy"]
     repair = payload["geometry_repair"]
@@ -287,6 +294,43 @@ def _ring_crosses_dateline(ring) -> bool:
     return bool(np.any(np.abs(np.diff(coordinates[:, 0])) > 180))
 
 
+def _provider_latitude_closure(polygon: Polygon) -> bool:
+    """Keep a valid provider range closed on a latitude boundary.
+
+    Some global ranges are clipped at a constant latitude, including polar
+    caps. Their single long horizontal closing edge is intentional. Replacing
+    it with the shortest seam crossing gives the ring a full longitude winding
+    and a false self-intersection. This exception preserves source coordinates
+    only when the attempted unwrapping failed, with no crossing holes.
+    """
+    coordinates = np.asarray(polygon.exterior.coords)
+    jumps = np.flatnonzero(np.abs(np.diff(coordinates[:, 0])) > 180)
+    if len(jumps) != 1 or not polygon.is_valid:
+        return False
+    start, end = coordinates[jumps[0]], coordinates[jumps[0] + 1]
+    min_x, min_y, max_x, max_y = polygon.bounds
+    latitude = float(start[1])
+    # Pole-aware H3 rings may live in an adjacent longitude copy. Their
+    # horizontal pole closure represents the full cap, not a shortest edge.
+    if (abs(latitude) == 90 and float(end[1]) == latitude
+            and min_y >= -90 and max_y <= 90
+            and not any(_ring_crosses_dateline(ring) for ring in polygon.interiors)):
+        return True
+    # Provider cut boundaries can have sub-millidegree vertex overshoot.
+    # This tolerance classifies the edge; it never moves any coordinates.
+    unwrapped = _unwrap_ring(coordinates)
+    winding = unwrapped[-1][0] - unwrapped[0][0]
+    return bool(
+        min_x >= -180 and max_x <= 180
+        and min_y >= -90 and max_y <= 90
+        and math.isclose(abs(winding), 360, abs_tol=1e-8)
+        and math.isclose(latitude, float(end[1]), abs_tol=1e-8)
+        and (math.isclose(latitude, min_y, abs_tol=1e-3)
+             or math.isclose(latitude, max_y, abs_tol=1e-3))
+        and not any(_ring_crosses_dateline(ring) for ring in polygon.interiors)
+    )
+
+
 def _unwrap_polygon(polygon: Polygon) -> Polygon:
     # Already split/provider-normalized polygons need no transformation. In a
     # wide global shell, a hole can legitimately be >180 degrees away from the
@@ -299,6 +343,8 @@ def _unwrap_polygon(polygon: Polygon) -> Polygon:
     shell = _unwrap_ring(polygon.exterior.coords)
     shell_polygon = Polygon(shell)
     if not shell_polygon.is_valid:
+        if _provider_latitude_closure(polygon):
+            return polygon
         raise GeometryCoverageError(
             "Longitude unwrapping produced an invalid shell: "
             + shapely.is_valid_reason(shell_polygon)
@@ -438,33 +484,124 @@ def _candidate_tile_size(geometry: BaseGeometry, profile: SpatialProfile) -> flo
     return profile.candidate_tile_degrees
 
 
+def _ring_boundary_index(polygon):
+    """Index short ring sections so global shells do not defeat bbox pruning."""
+    sections = []
+    for ring in (polygon.exterior, *polygon.interiors):
+        coordinates = np.asarray(ring.coords)
+        sections.extend(
+            shapely.LineString(coordinates[start:start + 65])
+            for start in range(0, len(coordinates) - 1, 64)
+        )
+    return shapely.STRtree(sections)
+
+
 def _candidate_tile_jobs(geometry, tile_size):
     for polygon in _iter_polygons(geometry):
+        shapely.prepare(polygon)
+        boundary_index = _ring_boundary_index(polygon) if len(polygon.interiors) >= 64 else None
         min_x, min_y, max_x, max_y = polygon.bounds
         x = math.floor(min_x / tile_size) * tile_size
         while x < max_x or math.isclose(x, max_x):
             y = math.floor(min_y / tile_size) * tile_size
             while y < max_y or math.isclose(y, max_y):
-                yield polygon, x, y, tile_size
+                tile = box(x, y, x + tile_size, y + tile_size)
+                # Classify in the producer: prepared predicates are never
+                # initialized concurrently by helper threads. Full/empty tiles
+                # need no overlay against a coastline with thousands of holes.
+                if boundary_index is not None:
+                    # With no boundary crossing, a connected tile is entirely
+                    # inside or outside. Avoid covers() repeatedly scanning all
+                    # hole representatives in a global ocean polygon.
+                    if boundary_index.query(tile, predicate="intersects").size:
+                        yield polygon, x, y, tile_size
+                    elif polygon.contains(tile.centroid):
+                        yield tile, x, y, tile_size
+                    else:
+                        yield None, x, y, tile_size
+                elif not polygon.intersects(tile):
+                    yield None, x, y, tile_size
+                elif polygon.covers(tile):
+                    yield tile, x, y, tile_size
+                else:
+                    yield polygon, x, y, tile_size
                 y += tile_size
             x += tile_size
 
 
+def _fill_complex_overlap(geometry, resolution, depth=0):
+    """Bound polygon complexity per native fill, retaining the closed union."""
+    if shapely.get_num_coordinates(geometry) > 48 and depth < 4:
+        x0, y0, x1, y1 = geometry.bounds
+        if max(x1 - x0, y1 - y0) > 0.25:
+            if x1 - x0 >= y1 - y0:
+                middle = (x0 + x1) / 2
+                windows = (box(x0, y0, middle, y1), box(middle, y0, x1, y1))
+            else:
+                middle = (y0 + y1) / 2
+                windows = (box(x0, y0, x1, middle), box(x0, middle, x1, y1))
+            chunks = []
+            for window in windows:
+                part = polygonal_parts(geometry.intersection(window))
+                if part is not None and not part.is_empty:
+                    chunks.append(_fill_complex_overlap(part, resolution, depth + 1))
+            return np.concatenate(chunks) if chunks else np.empty(0, dtype=np.uint64)
+    return np.asarray(geometry_to_cells(
+        geometry, resolution, ContainmentMode.IntersectsBoundary,
+    ), dtype=np.uint64)
+
+
+_SHARED_FULL_TILES = None
+
+
+def configure_full_tile_cache(shared=None):
+    """Start a build-local cache; no coverage survives a worker initialization."""
+    global _SHARED_FULL_TILES
+    _SHARED_FULL_TILES = shared
+    _compact_full_tile.cache_clear()
+
+
+@lru_cache(maxsize=4096)
+def _compact_full_tile(x, y, tile_size, resolution):
+    key = (x, y, tile_size, resolution)
+    if _SHARED_FULL_TILES is not None:
+        cached = _SHARED_FULL_TILES.get(key)
+        if cached is not None:
+            return cached
+    cells = np.asarray(geometry_to_cells(
+        _canonical_piece(box(x, y, x + tile_size, y + tile_size)),
+        resolution, ContainmentMode.IntersectsBoundary, compact=True,
+    ), dtype=np.uint64)
+    if _SHARED_FULL_TILES is not None and len(_SHARED_FULL_TILES) < 16384:
+        _SHARED_FULL_TILES[key] = cells
+    return cells
+
+
 def _fill_candidate_tile(job, resolution, include_guaranteed):
     polygon, x, y, tile_size = job
-    clipped = polygon.intersection(box(x, y, x + tile_size, y + tile_size))
-    polygonal = polygonal_parts(clipped)
     empty = np.empty(0, dtype=np.uint64)
+    if polygon is None:
+        return empty, empty
+    tile = box(x, y, x + tile_size, y + tile_size)
+    if not include_guaranteed and polygon.equals_exact(tile, 0):
+        return np.asarray(uncompact(_compact_full_tile(x, y, tile_size, resolution), resolution), dtype=np.uint64), empty
+    clipped = polygon.intersection(tile)
+    polygonal = polygonal_parts(clipped)
     if polygonal is None or polygonal.is_empty:
         return empty, empty
-    canonical = _canonical_piece(polygonal)
-    candidates = np.asarray(geometry_to_cells(
-        canonical, resolution, ContainmentMode.IntersectsBoundary,
-    ), dtype=np.uint64)
-    guaranteed = np.asarray(geometry_to_cells(
-        canonical, resolution, ContainmentMode.ContainsBoundary,
-    ), dtype=np.uint64) if include_guaranteed else empty
-    return candidates, guaranteed
+    candidate_chunks = []
+    guaranteed_chunks = []
+    for canonical in _iter_longitude_normalized_pieces(polygonal):
+        # Keep guaranteed cells on the unsplit piece; optimized candidates use
+        # recursive closed-window subdivision within each canonical world copy.
+        candidate_chunks.append(np.asarray(geometry_to_cells(
+            canonical, resolution, ContainmentMode.IntersectsBoundary,
+        ), dtype=np.uint64) if include_guaranteed else _fill_complex_overlap(canonical, resolution))
+        if include_guaranteed:
+            guaranteed_chunks.append(np.asarray(geometry_to_cells(
+                canonical, resolution, ContainmentMode.ContainsBoundary,
+            ), dtype=np.uint64))
+    return _sorted_unique_chunks(candidate_chunks), _sorted_unique_chunks(guaranteed_chunks)
 
 
 def _iter_candidate_cell_batches(
@@ -533,29 +670,16 @@ def _candidate_cells_untiled(
     profile: SpatialProfile,
     resolution: int,
 ) -> tuple[np.ndarray, np.ndarray]:
-    canonical = _canonical_piece(geometry)
-    return (
-        np.unique(
-            np.asarray(
-                geometry_to_cells(
-                    canonical,
-                    resolution,
-                    ContainmentMode.IntersectsBoundary,
-                ),
-                dtype=np.uint64,
-            )
-        ),
-        np.unique(
-            np.asarray(
-                geometry_to_cells(
-                    canonical,
-                    resolution,
-                    ContainmentMode.ContainsBoundary,
-                ),
-                dtype=np.uint64,
-            )
-        ),
-    )
+    candidates = []
+    guaranteed = []
+    for canonical in _iter_longitude_normalized_pieces(geometry):
+        candidates.append(np.asarray(geometry_to_cells(
+            canonical, resolution, ContainmentMode.IntersectsBoundary,
+        ), dtype=np.uint64))
+        guaranteed.append(np.asarray(geometry_to_cells(
+            canonical, resolution, ContainmentMode.ContainsBoundary,
+        ), dtype=np.uint64))
+    return _sorted_unique_chunks(candidates), _sorted_unique_chunks(guaranteed)
 
 
 def cell_polygon(cell: str) -> Polygon:
@@ -578,7 +702,9 @@ def _native_cell_polygons(cells: np.ndarray) -> np.ndarray:
     bounds = np.asarray(shapely.bounds(polygons), dtype=np.float64)
     antimeridian = np.flatnonzero(bounds[:, 2] - bounds[:, 0] > 180)
     for index in antimeridian:
-        polygons[index] = _unwrap_polygon(polygons[index])
+        polygons[index] = h3_ring_polygon([
+            list(point) for point in polygons[index].exterior.coords[:-1]
+        ])
     return polygons
 
 
@@ -645,10 +771,9 @@ def direct_any_touch_intersecting_cells_native(
 ) -> NativeCoverageResult:
     """Return the exact resolution-7 H3 overlap set, including point touches.
 
-    ``ContainmentMode.IntersectsBoundary`` is H3's overlap-at-any-point mode.
-    It already includes cells wholly contained by the source, so unlike the
-    legacy positive-area kernel it needs neither GEOS cell construction nor a
-    second topological predicate pass.
+    Native overlap supplies candidates, not a complete closed-contact decision.
+    Fully contained cells are accepted directly; a one-ring frontier is checked
+    against the decision geometry with GEOS, including longitude copies.
     """
     from ark_pipeline.runtime.progress import emit
 
@@ -665,7 +790,8 @@ def direct_any_touch_intersecting_cells_native(
     ):
         emit(phase=f"Simplify polygon · {profile.decision_simplification_degrees}°", fraction=None, force=True)
         decision = _simplified_decision_geometry(
-            unwrapped, profile.decision_simplification_degrees, audit=simplification_audit
+            unwrapped, profile.decision_simplification_degrees, audit=simplification_audit,
+            source_validated=True,
         )
         simplification_applied = decision is not unwrapped
         if not simplification_applied:
@@ -695,16 +821,26 @@ def _direct_any_touch_prepared(
     """Direct any-touch kernel for an already prepared, unwrapped geometry."""
     chunks: list[np.ndarray] = []
     candidate_count = 0
-    for overlap, _ in _iter_candidate_cell_batches(
+    for overlap, guaranteed in _iter_candidate_cell_batches(
         unwrapped,
         profile,
         profile.resolution,
-        include_guaranteed=False,
+        include_guaranteed=True,
         tile_budget=tile_budget,
     ):
-        candidate_count += int(overlap.size)
-        if overlap.size:
-            chunks.append(overlap)
+        frontier = _one_ring(np.setdiff1d(overlap, guaranteed))
+        candidate_count += int(guaranteed.size + frontier.size)
+        if guaranteed.size:
+            chunks.append(guaranteed)
+        for start in range(0, frontier.size, 65536):
+            batch = frontier[start:start + 65536]
+            polygons = _native_cell_polygons(batch)
+            hits = np.zeros(batch.size, dtype=bool)
+            for turn in (-1, 0, 1):
+                decision = affinity.translate(unwrapped, xoff=turn * 360) if turn else unwrapped
+                hits |= shapely.intersects(decision, polygons)
+            if hits.any():
+                chunks.append(batch[hits])
     from ark_pipeline.runtime.progress import emit
 
     emit(phase="Deduplicating polygon cells", fraction=None, force=True)
@@ -728,7 +864,7 @@ def _bbox_area(geometry: BaseGeometry) -> float:
 def _simplified_decision_geometry(
     source: BaseGeometry,
     tolerance: float,
-    *, audit: dict | None = None,
+    *, audit: dict | None = None, source_validated: bool = False,
 ) -> BaseGeometry:
     """Return the explicit approximate decision geometry for a profile.
 
@@ -742,7 +878,7 @@ def _simplified_decision_geometry(
     if audit is None:
         audit = {}
     audit.update(method="original", rejections=[], original_coordinates=int(shapely.get_num_coordinates(source)),
-                 original_validity=shapely.is_valid_reason(source))
+                 original_validity="Valid Geometry" if source_validated else shapely.is_valid_reason(source))
     source_polygons = list(_iter_polygons(source))
 
     def accepted(candidate, method):
@@ -750,6 +886,9 @@ def _simplified_decision_geometry(
         if candidate is None or candidate.is_empty:
             reasons.append("empty or non-polygonal result")
         else:
+            # Audit contract: a rejected attempt names every defect found, so
+            # record validity and component-count defects together instead of
+            # short-circuiting on the first one.
             if not candidate.is_valid:
                 reasons.append("invalid: " + shapely.is_valid_reason(candidate))
             components = len(list(_iter_polygons(candidate)))
@@ -767,7 +906,7 @@ def _simplified_decision_geometry(
     if accepted(simplified, "fast"):
         return simplified
     topology_preserved = polygonal_parts(
-        shapely.simplify(source, tolerance, preserve_topology=True)
+        simplify_grouped(source, tolerance)
     )
     if not accepted(topology_preserved, "topology-preserving"):
         audit["result_coordinates"] = audit["original_coordinates"]

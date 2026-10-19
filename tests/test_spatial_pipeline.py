@@ -3,9 +3,11 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import math
 import tempfile
 import unittest
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
@@ -16,10 +18,17 @@ import h3.api.numpy_int as h3_int
 import numpy as np
 import pyarrow.parquet as pq
 import pyogrio
+from h3ronpy import ContainmentMode, compact
+from h3ronpy.vector import geometry_to_cells
 from shapely.geometry import MultiPolygon, Polygon, box
 
 from ark_pipeline.cli.spatial_pairs import (
     GeometryWorkerFailure,
+    GeometryWorkerSuccess,
+    _iter_zipped_csv_batches,
+    _pair_writer,
+    _process_tagged_bounded,
+    _write_pair_table,
     build,
     build_parser,
     exclusion_reason_values,
@@ -30,23 +39,136 @@ from ark_pipeline.cli.spatial_pairs import (
 from ark_pipeline.runtime.provenance import sha256
 from ark_pipeline.spatial.coverage import (
     GeometryCoverageError,
+    _candidate_tile_jobs,
     _candidate_tile_size,
+    _canonical_piece,
+    _fill_candidate_tile,
+    _fill_complex_overlap,
     _simplified_decision_geometry,
     cell_polygon,
     direct_any_touch_intersecting_cells_native,
     exact_intersecting_cells_native,
     load_spatial_profile,
+    polygonal_parts,
 )
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 ANY_TOUCH_PROFILE_PATH = REPOSITORY_ROOT / "config" / "spatial_semantics_any_touch_v2.toml"
 RICHNESS_PROFILE_PATH = REPOSITORY_ROOT / "config" / "spatial_semantics_iucn_richness_v3.toml"
+PARTIAL_PROFILE_PATH = REPOSITORY_ROOT / "config" / "spatial_semantics_iucn_richness_v3_partial_basins.toml"
+PASSAGE_PROFILE_PATH = REPOSITORY_ROOT / "config" / "spatial_semantics_iucn_richness_v3_with_passage_partial_basins.toml"
 
 
 class AnyTouchSpatialSemanticsTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.profile = load_spatial_profile(ANY_TOUCH_PROFILE_PATH)
+
+    def test_relationship_csv_streams_quoted_newlines_across_blocks(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "relations.zip"
+            rows = 60000
+            with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr(
+                    "relations.csv",
+                    'hybas_id,id_no,presence,origin,seasonal,notes\n'
+                    + '1120000010,42,1,1,1,"first line\nsecond line"\n' * rows,
+                )
+            columns = ["hybas_id", "id_no", "presence", "origin", "seasonal"]
+            batches = list(_iter_zipped_csv_batches(
+                {"resolved_path": path, "logical_name": "relations.zip", "format": "hydrobasin"},
+                columns, 1,
+            ))
+            self.assertGreater(len(batches), 1)
+            self.assertEqual(sum(batch.num_rows for _, batch in batches), rows)
+            for member, batch in batches:
+                self.assertEqual(member, "relations.csv")
+                self.assertEqual(batch.schema.names, columns)
+                self.assertEqual(set(batch["hybas_id"].to_pylist()), {1120000010})
+                self.assertEqual(set(batch["id_no"].to_pylist()), {42})
+
+    def test_subdivision_preserves_native_overlap_with_many_holes(self) -> None:
+        holes = [box(12 + x * .03, 55 + y * .03, 12.01 + x * .03, 55.01 + y * .03)
+                 for x in range(1, 10) for y in range(1, 10)]
+        geometry = Polygon(box(12, 55, 12.4, 55.4).exterior.coords,
+                           [hole.exterior.coords for hole in holes])
+        expected = np.unique(np.asarray(geometry_to_cells(
+            geometry, 7, ContainmentMode.IntersectsBoundary), dtype=np.uint64))
+        np.testing.assert_array_equal(np.unique(_fill_complex_overlap(geometry, 7)), expected)
+        actual = direct_any_touch_intersecting_cells_native(geometry, self.profile)
+        np.testing.assert_array_equal(actual.cells, expected)
+
+    def test_delta_pair_encoding_round_trips_across_polygon_resets(self) -> None:
+        cells = np.asarray([608531686325485567, 608531686325485568,
+                            608531686006718463, 608531686006718464], dtype=np.uint64)
+        ids = np.asarray([19, 19, 4, 4], dtype=np.int64)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "pairs.parquet"
+            with _pair_writer(path) as writer:
+                _write_pair_table(writer, cells, ids)
+            table = pq.read_table(path)
+            np.testing.assert_array_equal(table["h3_index"].to_numpy(), cells)
+            np.testing.assert_array_equal(table["iucn_sis_id"].to_numpy(), ids)
+
+    def test_compact_worker_transport_preserves_fine_cells(self) -> None:
+        polygon = box(12.4, 55.5, 12.7, 55.8)
+        coverage = exact_intersecting_cells_native(polygon, self.profile)
+        packed = np.asarray(compact(coverage.cells), dtype=np.uint64)
+        self.assertLess(len(packed), len(coverage.cells))
+        result = GeometryWorkerSuccess(replace(coverage, cells=packed), 1.0, True)
+        with patch("ark_pipeline.cli.spatial_pairs._polyfill_wkb", return_value=result), ThreadPoolExecutor(max_workers=2) as executor:
+            restored = list(_process_tagged_bounded(executor, (({"row": i}, b"fixture") for i in range(6))))
+        self.assertEqual(sorted(tag["row"] for tag, _ in restored), list(range(6)))
+        for _, item in restored:
+            self.assertFalse(item.cells_compacted)
+            np.testing.assert_array_equal(item.coverage.cells, coverage.cells)
+
+    def test_preclassified_tiles_preserve_overlap_and_guaranteed_cell_sets(self) -> None:
+        fixtures = [
+            box(12, 55, 12.3, 55.3),
+            box(12, 55, 12.3, 55.3).difference(box(12.1, 55.1, 12.2, 55.2)),
+            MultiPolygon([box(12, 55, 12.12, 55.12), box(12.2, 55.2, 12.3, 55.3)]),
+            box(179.8, 10, 180.2, 10.2),
+            box(-180.2, -10.2, -179.8, -10),
+            box(20, 85, 20.2, 85.2),
+            Polygon(box(12, 55, 12.4, 55.4).exterior.coords,
+                    [box(12 + x * .03, 55 + y * .03, 12.01 + x * .03, 55.01 + y * .03).exterior.coords
+                     for x in range(1, 10) for y in range(1, 10)]),
+        ]
+        tile_size = .1
+        empty_tiles = full_tiles = 0
+        for geometry in fixtures:
+            original = []
+            polygons = list(geometry.geoms) if isinstance(geometry, MultiPolygon) else [geometry]
+            for polygon in polygons:
+                x0, y0, x1, y1 = polygon.bounds
+                x = math.floor(x0 / tile_size) * tile_size
+                while x < x1 or math.isclose(x, x1):
+                    y = math.floor(y0 / tile_size) * tile_size
+                    while y < y1 or math.isclose(y, y1):
+                        original.append((polygon, x, y, tile_size))
+                        y += tile_size
+                    x += tile_size
+            optimized = list(_candidate_tile_jobs(geometry, tile_size))
+            self.assertEqual(len(original), len(optimized))
+            for before, after in zip(original, optimized, strict=True):
+                empty_tiles += after[0] is None
+                full_tiles += after[0] is not None and after[0].equals(box(after[1], after[2], after[1] + tile_size, after[2] + tile_size))
+                for guaranteed in (False, True):
+                    polygon, x, y, size = before
+                    clipped = polygonal_parts(polygon.intersection(box(x, y, x + size, y + size)))
+                    if clipped is None or clipped.is_empty:
+                        expected = (np.empty(0, dtype=np.uint64), np.empty(0, dtype=np.uint64))
+                    else:
+                        canonical = _canonical_piece(clipped)
+                        expected = (np.asarray(geometry_to_cells(canonical, 7, ContainmentMode.IntersectsBoundary), dtype=np.uint64),
+                                    np.asarray(geometry_to_cells(canonical, 7, ContainmentMode.ContainsBoundary), dtype=np.uint64)
+                                    if guaranteed else np.empty(0, dtype=np.uint64))
+                    actual = _fill_candidate_tile(after, 7, guaranteed)
+                    for left, right in zip(expected, actual, strict=True):
+                        np.testing.assert_array_equal(np.sort(left), np.sort(right))
+        self.assertGreater(empty_tiles, 0)
+        self.assertGreater(full_tiles, 0)
 
     def test_production_rejects_superseded_kernel_profiles(self) -> None:
         profile = replace(self.profile, production_kernel="direct-tiled-exact-v1")
@@ -451,6 +573,120 @@ class SpatialBuildTests(unittest.TestCase):
                 ].to_pylist()
             )
             self.assertTrue({201, 204}.issubset(species))
+
+    def test_hydrobasins_resolves_lakes_islands_and_standard_fallback(self) -> None:
+        import pyarrow as pa
+
+        from ark_pipeline.cli.spatial_pairs import BASIN_RELATION_SCHEMA, build_hydrobasin_index
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            records = []
+            # Shared ID has different geometry: the IUCN lake format must win.
+            fixtures = [
+                ("hybas_af_lev01-12_v1c.zip", "hybas_af_lev08_v1c", "HYBAS_ID",
+                 [1080000010, 1080000020], [box(0, 0, .01, .01), box(12.56, 55.67, 12.57, 55.68)], "hydrobasins"),
+                ("hybas_lake_af_lev01-12_v1c.zip", "hybas_lake_af_lev08_v1c", "HYBAS_ID",
+                 [1080000010, 1089000011], [box(12.56, 55.67, 12.57, 55.68)] * 2, "hydrobasins"),
+                ("HydroBASINS_level08_w_attributes_2023_08.zip", "HydroBASINS_level08_w_attributes_2023_08", "hybas_id",
+                 [100000000], [box(12.56, 55.67, 12.57, 55.68)], "hydrobasins-iucn-islands"),
+            ]
+            for name, layer, column, ids, geometries, source in fixtures:
+                folder = root / layer
+                folder.mkdir()
+                pyogrio.write_dataframe(gpd.GeoDataFrame({column: ids, "geometry": geometries}, crs="EPSG:4326"), folder / f"{layer}.shp")
+                archive_path = root / name
+                with zipfile.ZipFile(archive_path, "w") as archive:
+                    for member in folder.iterdir():
+                        archive.write(member, member.name)
+                records.append({"logical_name": name, "resolved_path": archive_path,
+                                "release": "v1c", "source_id": source, "bytes": archive_path.stat().st_size,
+                                "sha256": sha256(archive_path)})
+            ids = [1080000010, 1080000020, 1089000011, 100000000]
+            relations = root / "archives/fixture/basin_species.parquet"
+            relations.parent.mkdir(parents=True)
+            pq.write_table(pa.Table.from_pydict({"hybas_id": ids, "iucn_sis_id": [1] * 4}, schema=BASIN_RELATION_SCHEMA), relations)
+            report = build_hydrobasin_index([relations], records, root / "out",
+                load_spatial_profile(RICHNESS_PROFILE_PATH), "fixture", None,
+                scratch_dir=root / "scratch", memory_limit="256MB", threads=1, force=False)
+            self.assertEqual(report["referenced_basins"], 4)
+            cells = pq.read_table(report["path"]).to_pydict()
+            by_id = {i: set() for i in ids}
+            for i, cell in zip(cells["hybas_id"], cells["h3_index"]):
+                by_id[i].add(cell)
+            self.assertTrue(by_id[100000000])
+            self.assertEqual(by_id[1080000010], by_id[1089000011])
+            self.assertEqual(by_id[1080000020], by_id[100000000])
+            from ark_pipeline.cli.sources_check_hydrobasins import audit
+            with patch("ark_pipeline.cli.sources_check_hydrobasins.hydrobasin_files", return_value=records):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    audited = audit(root, root)
+            self.assertEqual(audited["unique_missing_ids"], 0)
+            self.assertEqual(audited["unique_recovered_ids"], 2)
+
+            # Missing provider IDs must fail before any expensive geometry filling.
+            previous_digest = sha256(report["path"])
+            pq.write_table(pa.Table.from_pydict({"hybas_id": [*ids, 100000099],
+                "iucn_sis_id": [1] * 4 + [99]}, schema=BASIN_RELATION_SCHEMA), relations)
+            with patch("ark_pipeline.cli.spatial_pairs._polyfill_wkb", side_effect=AssertionError("must reconcile IDs first")):
+                with self.assertRaisesRegex(ValueError, "100000099.*Reconcile inputs"):
+                    build_hydrobasin_index([relations], records, root / "out",
+                        load_spatial_profile(RICHNESS_PROFILE_PATH), "fixture", None,
+                        scratch_dir=root / "scratch", memory_limit="256MB", threads=1, force=False)
+            self.assertEqual(sha256(report["path"]), previous_digest)
+
+            partial_profile = load_spatial_profile(PARTIAL_PROFILE_PATH)
+            partial_report = build_hydrobasin_index([relations], records, root / "partial-out",
+                partial_profile, "fixture", None, scratch_dir=root / "scratch", memory_limit="256MB", threads=1, force=False)
+            self.assertEqual(partial_report["coverage_status"], "partial-missing-basin-geometries")
+            self.assertEqual(partial_report["covered_basins"], 4)
+            self.assertEqual(partial_report["missing_geometry_basins"], 1)
+            self.assertEqual(partial_report["omitted_distinct_relationships"], 1)
+            missing = pq.read_table(root / "partial-out/hydrobasins/missing_relationships.parquet").to_pylist()
+            self.assertEqual(missing, [{"source_archive": "fixture", "hybas_id": 100000099,
+                                       "iucn_sis_id": 99, "reason": "missing_geometry"}])
+            included = pq.read_table(partial_report["path"])["hybas_id"].to_pylist()
+            self.assertNotIn(100000099, included)
+            self.assertEqual(set(included), set(ids))
+            from ark_pipeline.cli.spatial_pairs import build_hydrobasin_pairs
+            pair_dir = root / "partial-out/archives/fixture"
+            pair_dir.mkdir(parents=True)
+            joined = build_hydrobasin_pairs({"logical_name": "fixture.zip"}, root / "partial-out",
+                {"profile_sha256": partial_profile.digest}, {"path": relations}, partial_report["path"],
+                scratch_dir=root / "scratch", memory_limit="256MB", threads=1, force=False)
+            pairs = pq.read_table(pair_dir / "res7_pairs.parquet")
+            self.assertGreater(joined["output_relationships"], 0)
+            self.assertEqual(set(pairs["iucn_sis_id"].to_pylist()), {1})
+            cached = build_hydrobasin_index([relations], records, root / "partial-out",
+                partial_profile, "fixture", None, scratch_dir=root / "scratch", memory_limit="256MB", threads=1, force=False)
+            self.assertEqual(cached["status"], "reused")
+            # A different seasonal profile cannot reuse even identical basin membership.
+            passage_profile = load_spatial_profile(PASSAGE_PROFILE_PATH)
+            passage_report = build_hydrobasin_index([relations], records, root / "partial-out",
+                passage_profile, "fixture", None, scratch_dir=root / "scratch",
+                memory_limit="256MB", threads=1, force=False)
+            self.assertEqual(passage_report["status"], "built")
+            self.assertEqual(passage_report["omitted_distinct_relationships"], 1)
+            self.assertEqual(pq.read_table(passage_report["path"])["hybas_id"].to_pylist(), included)
+            identity = json.loads((root / "partial-out/hydrobasins/receipt.json").read_text())["identity"]
+            self.assertEqual(identity["semantic_profile"], {
+                "id": passage_profile.profile_id, "sha256": passage_profile.digest})
+            self.assertEqual(identity["hydrobasins"][0]["source_id"], "hydrobasins")
+            self.assertEqual(identity["hydrobasins"][-1]["source_id"], "hydrobasins-iucn-islands")
+            # Omitted relationships are receipt inputs even when basin IDs stay fixed.
+            pq.write_table(pa.Table.from_pydict({"hybas_id": [*ids, 100000099],
+                "iucn_sis_id": [1] * 4 + [100]}, schema=BASIN_RELATION_SCHEMA), relations)
+            rebuilt = build_hydrobasin_index([relations], records, root / "partial-out",
+                partial_profile, "fixture", None, scratch_dir=root / "scratch",
+                memory_limit="256MB", threads=1, force=False)
+            self.assertEqual(rebuilt["status"], "built")
+            self.assertEqual(pq.read_table(root / "partial-out/hydrobasins/missing_relationships.parquet")
+                             ["iucn_sis_id"].to_pylist(), [100])
+            # A partial receipt cannot satisfy the strict profile.
+            with self.assertRaisesRegex(ValueError, "Reconcile inputs"):
+                build_hydrobasin_index([relations], records, root / "partial-out",
+                    load_spatial_profile(RICHNESS_PROFILE_PATH), "fixture", None,
+                    scratch_dir=root / "scratch", memory_limit="256MB", threads=1, force=False)
 
     def test_worker_failure_reports_geometry_error_without_publishing_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

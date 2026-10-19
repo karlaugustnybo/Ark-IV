@@ -35,8 +35,10 @@ Ambiguous and near-name decisions are documented as:
 
 The reviewer label identifies the policy author and expert-review stage. It
 does not imply that a model-generated guess was accepted without source
-evidence. Every accepted AI-review row also requires authoritative lineage and
-independent GBIF/Catalogue of Life concept evidence.
+evidence. Accepted AI-review rows require compatible authoritative lineage.
+Near-name rows additionally require independent GBIF/Catalogue of Life evidence
+or a unique direct GoaT-native SIS concept identity; the output distinguishes
+`GBIF_CORROBORATED_NEAR_NAME` from `GOAT_SIS_CORROBORATED_NEAR_NAME`.
 
 ## Sources
 
@@ -96,6 +98,33 @@ validation rejected 136 of those superficially plausible candidates. After
 supplemental GoaT lineage was added, the final accepted Tier C set contains 79
 rows.
 
+### SIS-provenance bridge (deterministic, automatic refresh)
+
+GoaT's own `redlist_category` attribute carries field provenance that records
+the IUCN SIS taxon ID and assessment ID GoaT itself matched when it ingested
+the Red List summary (`source_slug`, e.g. `101/1101`). The matcher now
+parses these identifiers from the GoaT export's per-field provenance JSON and
+uses them as independent, identifier-level evidence:
+
+- For an IUCN row with **no other candidate**, a GoaT taxon whose recorded SIS
+  ID equals the row's `internalTaxonId` becomes a deterministic bridge
+  candidate (`match_method = GOAT_REDLIST_SIS_PROVENANCE`, Tier B,
+  reviewer `deterministic`).
+- For a row with exactly one candidate that the tier rules alone rejected, the
+  same recorded identifier corroborates that unique candidate and accepts it;
+  ambiguous rows with more than one candidate are never accepted this way.
+- Both paths still require the same lineage guard (at least two agreements,
+  at most one conflict), and estimated (ancestry-derived) redlist values are
+  ignored because they are not anchored to an IUCN concept.
+
+The bridge relies on recorded SIS IDs rather than shared status codes. This
+keeps identifier evidence separate from category agreement; it does not prove
+biological equivalence independently of the upstream match. The exported columns
+`goat_redlist_category`, `goat_redlist_population_trend`, `goat_redlist_scopes`,
+`goat_redlist_status_source`, `goat_redlist_source_date`, `goat_iucn_*` and
+`goat_redlist_category_agrees` keep the native values and code-level
+agreement visible for auditing.
+
 ### Tier D — unresolved
 
 The accepted TaxID remains null. The best candidate and its evidence are kept
@@ -131,7 +160,7 @@ Coverage differs substantially by kingdom:
   `NO_GOAT_NCBI_CANDIDATE`.
 - `confidence_tier`: A, B, or C for accepted matches.
 - `match_method` and `reviewer`: how the accepted decision was made.
-- `lineage_source`: `NCBI_TAXDUMP` or `GOAT_API`.
+- `lineage_source`: `NCBI_TAXDUMP`, `GOAT_API`, or `GOAT_EXPORT`.
 - `taxonomic_concept_relation`: distinguishes current-name, synonym,
   GBIF-corroborated, and IUCN-split/NCBI-lump relationships.
 - `ncbi_taxid_iucn_taxon_count`: number of supplied IUCN species mapped to the
@@ -139,6 +168,22 @@ Coverage differs substantially by kingdom:
 - `safe_for_automatic_species_trait_transfer`: recommended gate for automatic
   species-level GoaT metadata joins.
 - `review_candidate_*`: evidence retained for unresolved rows.
+- `goat_redlist_category`, `goat_redlist_population_trend`,
+  `goat_redlist_scopes`, `goat_redlist_status_source`,
+  `goat_redlist_source_date`: GoaT's own IUCN summary import for the accepted
+  TaxID ("direct" means the GoaT taxon carries its own value; anything else is
+  ancestry-derived and must not be treated as a species assessment).
+- `goat_iucn_source_slug`, `goat_iucn_sis_id`, `goat_iucn_assessment_id`,
+  `goat_iucn_sis_confirmed`, `goat_redlist_sis_id_agrees`: provenance
+  identifiers recorded by GoaT and the identity checks used by the
+  SIS-provenance bridge.
+- `goat_redlist_category_agrees`: code-level agreement between the IUCN
+  assessment category and GoaT's native status; null for legacy pre-2001
+  categories that the modern code set cannot represent.
+- `iucn_scopes` and `iucn_systems`: the assessment's recorded scopes and the
+  pipe-joined realm systems (`Terrestrial`, `Freshwater`, `Marine`) copied from
+  the registered assessments file, retained for downstream interpretation; the current species builder still
+  reads the assessment file.
 
 Never deduplicate IUCN assessments by NCBI or GBIF ID. Keep threat category and
 assessment scope keyed by `iucn_sis_id` and `iucn_assessment_id`.
@@ -184,3 +229,27 @@ node archive/crosswalk/fetch_goat_lineages.mjs TAXIDS.json OUTPUT.json
 
 All API responses are cached as build inputs so the final crosswalk can be
 reproduced without silently changing decisions during a later taxonomy update.
+
+### Candidate identity and partial names
+
+Candidate counts and runner-up comparisons use distinct TaxIDs after combining
+all evidence routes. Exact names and a bridge to the same TaxID corroborate one
+candidate; the bridge key and evidence sources remain in the output. Distinct
+TaxIDs remain ambiguous under the existing acceptance guards.
+
+NCBI `includes` and `in-part` name classes remain explicit review evidence, not
+synonyms. Alone they yield a null accepted TaxID and an unsafe trait-transfer
+flag, even when only one IUCN split member occurs in the supplied input.
+Independent direct SIS provenance can corroborate a concept; partial names
+alone cannot. Genuine synonym/current-name rules retain their lineage guards.
+
+### Native SIS ambiguity
+
+All native `rawValues` identities are inspected before accepting SIS evidence.
+`goat_iucn_sis_ids` retains distinct positive SIS concepts and
+`goat_iucn_raw_values` retains the complete raw provenance, including multiple
+assessment identities. More than one native SIS concept cannot corroborate an
+accepted equivalence or authorize automatic species traits, even when only one
+concept is present in the supplied IUCN taxonomy. Such SIS bridges stay in the
+review queue. Repeated assessments of one SIS concept remain eligible with the
+same lineage guard. Ambiguous scalar SIS/assessment/slug fields are null.

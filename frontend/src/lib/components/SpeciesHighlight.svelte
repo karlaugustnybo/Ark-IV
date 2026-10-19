@@ -2,11 +2,23 @@
   import { onDestroy, tick } from 'svelte';
   import { Search, X } from 'lucide-svelte';
   import { api, type SpeciesSuggestion } from '$lib/api/client';
-  import { selectedSpecies, speciesHighlight, speciesHighlightGradient } from '$lib/stores/species';
+  import {
+    includePassage,
+    passageAvailable,
+    selectedSpecies,
+    speciesHighlight,
+    speciesHighlightGradient
+  } from '$lib/stores/species';
+  import { parseCellSearch, type CellSearchSelection } from '$lib/map/cellSearch';
+
+  export let cellSearch: (selection: CellSearchSelection) => string | null;
 
   let expanded = false;
   let inputEl: HTMLInputElement | undefined;
+  let toggleEl: HTMLButtonElement | undefined;
   let query = '';
+  let cellQuery = '';
+  let cellError = '';
   let results: SpeciesSuggestion[] = [];
   let loading = false;
   let error = '';
@@ -53,6 +65,7 @@
       open = true;
       return;
     }
+    results = [];
     loading = true;
     open = true;
     searchTimer = setTimeout(() => search(nextQuery), 180);
@@ -68,7 +81,10 @@
       results = response.rows ?? [];
       cache(searchQuery.toLocaleLowerCase(), results);
     } catch (reason) {
-      if (currentRequest === requestId && !(reason instanceof DOMException && reason.name === 'AbortError')) {
+      if (
+        currentRequest === requestId &&
+        !(reason instanceof DOMException && reason.name === 'AbortError')
+      ) {
         results = [];
         error = reason instanceof Error ? reason.message : 'Search unavailable';
       }
@@ -78,7 +94,17 @@
     }
   }
 
+  function cancelSearch() {
+    requestId += 1;
+    clearTimeout(searchTimer);
+    abortController?.abort();
+    abortController = null;
+    loading = false;
+  }
+
   function select(row: SpeciesSuggestion) {
+    if (loading || !results.includes(row)) return;
+    cancelSearch();
     query = row.species_name;
     speciesHighlightGradient.set(false);
     selectedSpecies.set({ gbif_accepted_id: row.gbif_accepted_id, species_name: row.species_name });
@@ -98,38 +124,64 @@
     loading = false;
     error = '';
     selectedSpecies.set(null);
+    includePassage.set(false);
   }
 
-  function collapse() {
+  function submitCell() {
+    const result = parseCellSearch(cellQuery);
+    if (!result.ok) {
+      cellError = result.message;
+      return;
+    }
+    cellError = cellSearch(result) ?? '';
+  }
+
+  async function collapse() {
+    cancelSearch();
+    results = [];
     expanded = false;
     open = false;
     activeIndex = -1;
+    await tick();
+    toggleEl?.focus({ preventScroll: true });
   }
 
   async function expand() {
     expanded = true;
     await tick();
     inputEl?.focus();
-    if (query.trim().length >= 2 && !$selectedSpecies) open = true;
+    if (query.trim().length >= 2 && !$selectedSpecies) scheduleSearch();
   }
 
   function windowKeydown(event: KeyboardEvent) {
-    if (event.key === 'Escape' && expanded && !(event.target instanceof HTMLInputElement)) collapse();
+    if (event.key === 'Escape' && expanded && !(event.target instanceof HTMLInputElement))
+      collapse();
   }
 
   function keydown(event: KeyboardEvent) {
-    if (!open || !results.length) {
-      if (event.key === 'Escape' && $selectedSpecies) clear();
+    if (event.defaultPrevented) return;
+    if (!open || loading || !results.length) {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        if ($selectedSpecies) clear();
+        else void collapse();
+      }
       return;
     }
     if (event.key === 'ArrowDown') {
-      event.preventDefault(); activeIndex = (activeIndex + 1) % results.length;
+      event.preventDefault();
+      activeIndex = (activeIndex + 1) % results.length;
     } else if (event.key === 'ArrowUp') {
-      event.preventDefault(); activeIndex = (activeIndex - 1 + results.length) % results.length;
+      event.preventDefault();
+      activeIndex = (activeIndex - 1 + results.length) % results.length;
     } else if (event.key === 'Enter' && activeIndex >= 0) {
-      event.preventDefault(); select(results[activeIndex]);
+      event.preventDefault();
+      select(results[activeIndex]);
     } else if (event.key === 'Escape') {
-      if (open) { open = false; activeIndex = -1; } else collapse();
+      if (open) {
+        open = false;
+        activeIndex = -1;
+      } else collapse();
     }
   }
 
@@ -137,7 +189,8 @@
     const next = event.relatedTarget;
     const section = event.currentTarget as HTMLElement | null;
     if (!(next instanceof Node) || !section?.contains(next)) {
-      open = false; activeIndex = -1;
+      open = false;
+      activeIndex = -1;
     }
   }
 
@@ -149,53 +202,367 @@
   });
 </script>
 
-<section class="species-highlight" class:is-expanded={expanded} aria-label="Species distribution highlight" on:focusout={focusout}>
+<section
+  class="species-highlight"
+  class:is-expanded={expanded}
+  aria-label="Species and cell search"
+  on:focusout={focusout}
+>
+  <button
+    type="button"
+    class="species-toggle"
+    class:has-selection={Boolean($selectedSpecies)}
+    class:is-active={expanded}
+    aria-expanded={expanded}
+    aria-controls="species-highlight-panel"
+    title="Species and cell search"
+    bind:this={toggleEl}
+    on:click={() => (expanded ? collapse() : expand())}
+  >
+    <Search size={17} strokeWidth={1.9} aria-hidden="true" />
+  </button>
   {#if expanded}
     <div id="species-highlight-panel" class="species-panel">
-      <button class="species-close" type="button" aria-label="Close species search" on:click={collapse}><X size={14} strokeWidth={2} /></button>
+      <button
+        class="species-close"
+        type="button"
+        aria-label="Close species search"
+        on:click={collapse}><X size={14} strokeWidth={2} /></button
+      >
       <label for="species-highlight-input">Highlight a species</label>
       <div class="species-search">
         <span class="search-icon" aria-hidden="true"></span>
-        <input bind:this={inputEl} id="species-highlight-input" type="search" maxlength="120" placeholder="Search species…" autocomplete="off" role="combobox" aria-autocomplete="list" aria-controls="species-highlight-results" aria-expanded={open} aria-activedescendant={activeIndex >= 0 ? `species-result-${activeIndex}` : undefined} bind:value={query} on:input={scheduleSearch} on:keydown={keydown} on:focus={() => { if (query.trim().length >= 2 && !$selectedSpecies) open = true; }} />
-        {#if query}<button class="species-clear" type="button" aria-label="Clear species highlight" on:click={clear}>×</button>{/if}
+        <input
+          bind:this={inputEl}
+          id="species-highlight-input"
+          type="search"
+          maxlength="120"
+          placeholder="Search species…"
+          autocomplete="off"
+          role="combobox"
+          aria-autocomplete="list"
+          aria-controls="species-highlight-results"
+          aria-expanded={open}
+          aria-activedescendant={activeIndex >= 0 ? `species-result-${activeIndex}` : undefined}
+          bind:value={query}
+          on:input={scheduleSearch}
+          on:keydown={keydown}
+          on:focus={() => {
+            if (query.trim().length >= 2 && !$selectedSpecies) scheduleSearch();
+          }}
+        />
+        {#if query}<button
+            class="species-clear"
+            type="button"
+            aria-label="Clear species highlight"
+            on:click={clear}>×</button
+          >{/if}
       </div>
       {#if open}
         <div id="species-highlight-results" class="species-results" role="listbox">
           {#if loading}<div class="species-result-message">Searching…</div>
           {:else if error}<div class="species-result-message is-error" role="status">{error}</div>
-          {:else if results.length}{#each results as row, index}<button id={`species-result-${index}`} type="button" role="option" aria-selected={activeIndex === index} class:is-active={activeIndex === index} on:mousedown|preventDefault={() => select(row)}><em>{row.species_name}</em><span>{row.family || 'Family unknown'}</span></button>{/each}
+          {:else if results.length}{#each results as row, index}<button
+                id={`species-result-${index}`}
+                type="button"
+                role="option"
+                aria-selected={activeIndex === index}
+                class:is-active={activeIndex === index}
+                on:mousedown|preventDefault
+                on:click={() => select(row)}
+                ><em>{row.species_name}</em><span>{row.family || 'Family unknown'}</span></button
+              >{/each}
           {:else}<div class="species-result-message">No matching species</div>{/if}
         </div>
       {/if}
+      <label title="Adds a coarse passage range supplement; map scores stay unchanged"
+        ><input type="checkbox" bind:checked={$includePassage} disabled={!$passageAvailable} /> Include
+        passage in species range</label
+      >
       <div class="highlight-footer">
         {#if $selectedSpecies}
-          <div class="highlight-status" class:is-error={$speciesHighlight.status === 'error'} aria-live="polite"><span class="highlight-key" class:has-gradient={$speciesHighlightGradient} aria-hidden="true"></span><span>{#if $speciesHighlight.status === 'loading'}Loading distribution…{:else if $speciesHighlight.status === 'error'}{$speciesHighlight.message || 'Distribution unavailable'}{:else if $speciesHighlight.status === 'ready'}{$speciesHighlight.count.toLocaleString()} cells at resolution {$speciesHighlight.resolution}{/if}</span></div>
+          <div
+            class="highlight-status"
+            class:is-error={$speciesHighlight.status === 'error'}
+            aria-live="polite"
+          >
+            <span
+              class="highlight-key"
+              class:has-gradient={$speciesHighlightGradient}
+              aria-hidden="true"
+            ></span><span
+              >{#if $speciesHighlight.status === 'loading'}Loading distribution…{:else if $speciesHighlight.status === 'error'}{$speciesHighlight.message ||
+                  'Distribution unavailable'}{:else if $speciesHighlight.status === 'ready'}{$speciesHighlight.count.toLocaleString()}
+                cells at resolution {$speciesHighlight.resolution}{/if}</span
+            >
+          </div>
         {:else}<p class="species-hint">Matches show in blue.</p>{/if}
-        <label class="gradient-toggle" title="Show the priority gradient inside highlighted cells"><span>Gradient</span><input type="checkbox" bind:checked={$speciesHighlightGradient} /><span class="gradient-switch" aria-hidden="true"><span></span></span></label>
+        <label class="gradient-toggle" title="Show the priority gradient inside highlighted cells"
+          ><span>Gradient</span><input
+            type="checkbox"
+            bind:checked={$speciesHighlightGradient}
+          /><span class="gradient-switch" aria-hidden="true"><span></span></span></label
+        >
       </div>
+      <hr class="cell-search-divider" />
+      <form class="cell-search" on:submit|preventDefault={submitCell}>
+        <label for="cell-search-input">Find a cell</label>
+        <div class="cell-search-row">
+          <input
+            id="cell-search-input"
+            type="text"
+            placeholder="H3 index, e.g. 871f05831ffffff"
+            spellcheck="false"
+            autocomplete="off"
+            maxlength="48"
+            class:has-error={Boolean(cellError)}
+            aria-invalid={cellError ? 'true' : undefined}
+            aria-errormessage={cellError ? 'cell-search-status' : undefined}
+            bind:value={cellQuery}
+            on:keydown={(event) => {
+              if (event.key === 'Escape') {
+                event.preventDefault();
+                void collapse();
+              }
+            }}
+            on:input={() => {
+              cellError = '';
+            }}
+          />
+          <button type="submit">Find</button>
+        </div>
+        <p
+          id="cell-search-status"
+          class="cell-search-status"
+          class:is-error={Boolean(cellError)}
+          aria-live="polite"
+        >
+          {cellError}
+        </p>
+      </form>
     </div>
-  {:else}
-    <button type="button" class="species-toggle" class:has-selection={Boolean($selectedSpecies)} aria-expanded={false} aria-controls="species-highlight-panel" title="Highlight a species" on:click={expand}>
-      <Search size={17} strokeWidth={1.9} aria-hidden="true" />
-    </button>
   {/if}
 </section>
 
 <svelte:window on:keydown={windowKeydown} />
 
 <style>
-  .species-highlight:not(.is-expanded) { width: auto; padding: 0; background: transparent; border: 0; box-shadow: none; backdrop-filter: none; }
-  .species-toggle { position: relative; display: grid; place-items: center; width: 2.85rem; height: 2.85rem; padding: 0; color: var(--color-accent-brown); background: rgba(252, 251, 247, .96); border: 1px solid rgba(93, 78, 60, .2); border-radius: var(--map-radius, 4px); box-shadow: 0 9px 30px rgba(40, 32, 20, .16); cursor: pointer; backdrop-filter: blur(12px); transition: transform .16s ease, color .16s ease, border-color .16s ease; }
-  .species-toggle:hover { color: var(--color-primary-green); border-color: rgba(93, 78, 60, .35); transform: translateY(-1px); }
-  .species-toggle:focus-visible { outline: 2px solid var(--color-primary-green); outline-offset: 2px; }
-  .species-toggle.has-selection::after { content: ''; position: absolute; top: -.1rem; right: -.1rem; width: .62rem; height: .62rem; background: var(--species-blue-cell-border); border-radius: 50%; box-shadow: 0 0 0 2px rgba(252, 251, 247, .96); }
-  .species-panel { position: relative; text-align: left; animation: species-pop .18s cubic-bezier(.2, .9, .3, 1.2); transform-origin: top left; }
-  .species-panel > label { display: block; margin: 0 0 .9rem .1rem; color: var(--color-accent-brown); font-family: var(--font-sans); font-size: .7rem; font-weight: 750; letter-spacing: .095em; text-align: left; text-transform: uppercase; }
-  .species-hint { width: auto; text-align: left; }
-  .species-close { position: absolute; z-index: 1; top: -.35rem; right: -.35rem; display: grid; place-items: center; width: 1.7rem; height: 1.7rem; padding: 0; color: var(--color-gray-600); background: var(--color-light-cream); border: 1px solid var(--color-tinted-cream); border-radius: 50%; cursor: pointer; box-shadow: 0 2px 8px rgba(40, 32, 20, .12); transition: color .15s ease, background .15s ease, transform .15s ease; }
-  .species-close:hover { color: var(--color-black); background: var(--color-gray-100); transform: scale(1.06); }
+  .species-highlight {
+    pointer-events: none;
+    padding: 0;
+    background: transparent;
+    border: 0;
+    box-shadow: none;
+    backdrop-filter: none;
+  }
+  .species-toggle {
+    pointer-events: auto;
+    position: relative;
+    display: grid;
+    place-items: center;
+    width: 2.85rem;
+    height: 2.85rem;
+    padding: 0;
+    color: var(--color-accent-brown);
+    background: rgba(252, 251, 247, 0.96);
+    border: 1px solid rgba(93, 78, 60, 0.2);
+    border-radius: var(--map-radius);
+    box-shadow: 0 9px 30px rgba(40, 32, 20, 0.16);
+    cursor: pointer;
+    backdrop-filter: blur(12px);
+    transition:
+      transform 0.16s ease,
+      color 0.16s ease,
+      border-color 0.16s ease;
+  }
+  .species-toggle.is-active,
+  .species-toggle:hover {
+    color: var(--color-primary-green);
+    border-color: rgba(93, 78, 60, 0.35);
+  }
+  .species-toggle:hover:not(.is-active) {
+    transform: translateY(-1px);
+  }
+  .species-toggle:focus-visible {
+    outline: 2px solid var(--color-primary-green);
+    outline-offset: 2px;
+  }
+  .species-toggle.has-selection::after {
+    content: '';
+    position: absolute;
+    top: -0.1rem;
+    right: -0.1rem;
+    width: 0.62rem;
+    height: 0.62rem;
+    background: var(--species-blue-cell-border);
+    border-radius: 50%;
+    box-shadow: 0 0 0 2px rgba(252, 251, 247, 0.96);
+  }
+  .species-panel {
+    pointer-events: auto;
+    position: absolute;
+    top: calc(2.85rem + 0.65rem);
+    left: 0;
+    width: 100%;
+    padding: 0.8rem;
+    color: var(--color-black);
+    background: rgba(252, 251, 247, 0.96);
+    border: 1px solid rgba(93, 78, 60, 0.2);
+    border-radius: var(--map-radius, 4px);
+    box-shadow: 0 9px 30px rgba(40, 32, 20, 0.16);
+    backdrop-filter: blur(12px);
+    text-align: left;
+    animation: species-pop 160ms ease-out;
+    transform-origin: top left;
+  }
+  .species-panel > label {
+    display: block;
+    margin: 0 0 0.9rem 0.1rem;
+    color: var(--color-accent-brown);
+    font-family: var(--font-sans);
+    font-size: 0.7rem;
+    font-weight: 750;
+    letter-spacing: 0.095em;
+    text-align: left;
+    text-transform: uppercase;
+  }
+  .species-hint {
+    width: auto;
+    text-align: left;
+  }
+  .species-close {
+    position: absolute;
+    z-index: 1;
+    top: 0.45rem;
+    right: 0.45rem;
+    display: grid;
+    place-items: center;
+    width: 1.7rem;
+    height: 1.7rem;
+    padding: 0;
+    color: var(--color-gray-600);
+    background: var(--color-light-cream);
+    border: 1px solid var(--color-tinted-cream);
+    border-radius: var(--map-radius);
+    cursor: pointer;
+    box-shadow: 0 2px 8px rgba(40, 32, 20, 0.12);
+    transition:
+      color 0.15s ease,
+      background 0.15s ease,
+      transform 0.15s ease;
+  }
+  .species-close:hover {
+    color: var(--color-black);
+    background: var(--color-gray-100);
+    transform: scale(1.06);
+  }
+  .cell-search-divider {
+    width: 100%;
+    margin: 0.8rem 0 0.7rem;
+    border: 0;
+    border-top: 1px solid var(--color-tinted-cream);
+  }
+  .cell-search {
+    display: flex;
+    flex-direction: column;
+    gap: 0.45rem;
+  }
+  .cell-search label {
+    display: block;
+    margin: 0 0 0 0.1rem;
+    color: var(--color-accent-brown);
+    font-family: var(--font-sans);
+    font-size: 0.7rem;
+    font-weight: 750;
+    letter-spacing: 0.095em;
+    text-transform: uppercase;
+  }
+  .cell-search-row {
+    display: flex;
+    gap: 0.4rem;
+  }
+  .cell-search input {
+    flex: 1 1 auto;
+    min-width: 0;
+    height: 2.65rem;
+    padding: 0 0.55rem;
+    color: var(--color-black);
+    background: var(--color-cream);
+    border: 1px solid var(--color-tinted-cream);
+    border-radius: var(--map-radius);
+    outline: none;
+    box-shadow: inset 0 1px 2px rgba(40, 32, 20, 0.03);
+    font-family: var(--font-sans);
+    font-size: 0.9rem;
+    transition:
+      border-color 0.16s ease,
+      box-shadow 0.16s ease,
+      background 0.16s ease;
+  }
+  .cell-search input::placeholder {
+    color: var(--color-gray-500);
+  }
+  .cell-search input:focus {
+    background: #fffefb;
+    border-color: var(--color-primary-green);
+    box-shadow: 0 0 0 3px var(--color-primary-green-20);
+  }
+  .cell-search input.has-error {
+    border-color: #9f2e22;
+  }
+  .cell-search button {
+    flex: 0 0 auto;
+    height: 2.65rem;
+    padding: 0 0.95rem;
+    color: #fffefb;
+    background: var(--color-primary-green);
+    border: 1px solid rgba(20, 40, 28, 0.35);
+    border-radius: var(--map-radius);
+    font-family: var(--font-sans);
+    font-size: 0.8rem;
+    font-weight: 700;
+    cursor: pointer;
+    transition: filter 0.16s ease;
+  }
+  .cell-search button:hover {
+    filter: brightness(1.08);
+  }
+  .cell-search button:focus-visible {
+    outline: 2px solid var(--color-primary-green);
+    outline-offset: 2px;
+  }
+  .cell-search-status {
+    margin: 0;
+    min-height: 0.95rem;
+    color: var(--color-gray-700);
+    font-family: var(--font-sans);
+    font-size: 0.68rem;
+    line-height: 0.95rem;
+  }
+  .cell-search-status.is-error {
+    color: #9f2e22;
+  }
   @keyframes species-pop {
-    from { opacity: 0; transform: translateY(-.4rem) scale(.94); }
-    to { opacity: 1; transform: none; }
+    from {
+      opacity: 0;
+      transform: translateY(-4px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .species-panel {
+      animation: none;
+    }
+    .species-toggle,
+    .species-close {
+      transition: none;
+    }
+    .species-toggle:hover:not(.is-active),
+    .species-close:hover {
+      transform: none;
+    }
   }
 </style>

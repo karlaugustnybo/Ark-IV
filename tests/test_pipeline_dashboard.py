@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -12,6 +13,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import psutil
 from rich.console import Console
 
 from ark_pipeline.runtime.checkpoints import find_checkpoint
@@ -104,7 +106,9 @@ class LiveEstimateTests(unittest.TestCase):
         self.assertEqual(model.counts[1], 7)
 
     def test_live_workload_replaces_sample_density_assumptions(self):
-        model = Forecast(prior(), RESOURCES)
+        stale = Forecast(prior(), RESOURCES)
+        self.assertNotIn("tiles", stale.base)
+        model = Forecast({**prior(), "serving_contract": "dynamic-h3-v1"}, RESOURCES)
         model.accept({"stage": "lists", "kind": "workload", "counts": {"res7_cells": 200, "res7_relationships": 4000, "res3_cells": 20}})
         self.assertEqual(model.base["fine_metrics"], 300)  # average of 2x cells and 4x relationships
         self.assertEqual(model.base["tiles"], 200)
@@ -274,13 +278,68 @@ class EventAndDisplayTests(unittest.TestCase):
                 children.append(child)
                 return child
 
-            with patch("ark_pipeline.runtime.dashboard.subprocess.Popen", side_effect=launch), \
-                 patch.object(display, "tick", side_effect=KeyboardInterrupt), \
-                 self.assertRaises(KeyboardInterrupt):
-                run_command({"name": "pairs", "command": [sys.executable, "-c", "import time; time.sleep(30)"]}, output, dict(os.environ), display)
-            self.assertIsNotNone(children[0].poll())
-            self.assertEqual(display.states["pairs"]["status"], "interrupted")
-            self.assertNotIn("pairs", display.forecast.finished)
+            try:
+                with patch("ark_pipeline.runtime.dashboard.subprocess.Popen", side_effect=launch), \
+                     patch.object(display, "tick", side_effect=KeyboardInterrupt), \
+                     self.assertRaises(KeyboardInterrupt):
+                    run_command({"name": "pairs", "command": [sys.executable, "-c", "import time; time.sleep(30)"]}, output, dict(os.environ), display)
+                self.assertIsNotNone(children[0].poll())
+                self.assertEqual(display.states["pairs"]["status"], "interrupted")
+                self.assertNotIn("pairs", display.forecast.finished)
+            finally:
+                for child in children:
+                    if child.poll() is None:
+                        os.killpg(child.pid, signal.SIGKILL)
+                    child.wait()
+
+    def test_cancellation_kills_term_resistant_descendant_after_leader_exits(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            pid_path = output / "child.pid"
+            display = Dashboard(["pairs"], output, RESOURCES, ui="plain")
+            child_code = ("import os,signal,time; signal.signal(signal.SIGTERM,signal.SIG_IGN); "
+                          f"open({str(pid_path)!r},'w').write(str(os.getpid())); time.sleep(30)")
+            parent_code = ("import subprocess,sys,time; "
+                           f"subprocess.Popen([sys.executable,'-c',{child_code!r}]); time.sleep(30)")
+            leaders = []
+            popen = subprocess.Popen
+
+            def launch(*args, **kwargs):
+                leader = popen(*args, **kwargs)
+                leaders.append(leader)
+                return leader
+
+            def interrupt(*args, **kwargs):
+                deadline = time.monotonic() + 5
+                while not pid_path.exists() and time.monotonic() < deadline:
+                    time.sleep(.01)
+                self.assertTrue(pid_path.exists(), "descendant did not become ready")
+                raise KeyboardInterrupt
+
+            descendant = None
+            try:
+                with patch("ark_pipeline.runtime.dashboard.subprocess.Popen", side_effect=launch), \
+                     patch.object(display, "tick", side_effect=interrupt), self.assertRaises(KeyboardInterrupt):
+                    run_command({"name": "pairs", "command": [sys.executable, "-c", parent_code]},
+                                output, dict(os.environ), display)
+                descendant = psutil.Process(int(pid_path.read_text())) if psutil.pid_exists(int(pid_path.read_text())) else None
+                deadline = time.monotonic() + 3
+                while descendant and descendant.is_running() and descendant.status() != psutil.STATUS_ZOMBIE and time.monotonic() < deadline:
+                    time.sleep(.01)
+                self.assertTrue(descendant is None or not descendant.is_running() or descendant.status() == psutil.STATUS_ZOMBIE)
+                self.assertIsNotNone(leaders[0].poll())
+                self.assertEqual(display.states["pairs"]["status"], "interrupted")
+            finally:
+                # Clean only the recorded group/PID, including on fixture failure.
+                for leader in leaders:
+                    if leader.poll() is None:
+                        os.killpg(leader.pid, signal.SIGKILL)
+                    leader.wait()
+                if pid_path.exists():
+                    try:
+                        os.kill(int(pid_path.read_text()), signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
 
     def test_log_tail_handles_partial_lines_and_bounds_large_output(self):
         with tempfile.TemporaryDirectory() as temporary:

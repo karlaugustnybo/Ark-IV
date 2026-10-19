@@ -390,9 +390,27 @@ def age_days(record: dict[str, Any]) -> float:
 def is_due(source: Source, record: dict[str, Any] | None, force: bool) -> bool:
     if force or record is None:
         return True
-    configured_release = inventory_release(source_inventory(source))
+    inventory = source_inventory(source)
+    if inventory is not None:
+        registered_names = {item["logical_name"] for item in record.get("files", [])}
+        required_names = set(source.get("required_files", [])) | {
+            item["logical_name"] for item in inventory["files"]
+        }
+        if not required_names.issubset(registered_names):
+            return True
+    configured_release = inventory_release(inventory)
     if configured_release is not None:
-        return configured_release != str(record.get("release"))
+        if configured_release != str(record.get("release")):
+            return True
+        registered = {item["logical_name"]: item for item in record.get("files", [])}
+        return any(
+            item["logical_name"] not in registered
+            or (
+                item.get("expected_bytes") is not None
+                and registered[item["logical_name"]].get("bytes") != item["expected_bytes"]
+            )
+            for item in inventory["files"]
+        )
     if source.get("update_policy") == "pinned-discontinued":
         return False
     return age_days(record) >= int(source.get("interval_days", 0))
@@ -502,9 +520,7 @@ def update_public(args: argparse.Namespace, catalogue: Catalogue) -> int:
         raise SystemExit(f"Unknown source(s): {', '.join(unknown)}")
     selected = [catalogue.sources[source_id] for source_id in selected_ids]
     manual = [
-        source.id
-        for source in selected
-        if source.get("access") in {"manual", "browser-assisted"}
+        source.id for source in selected if source.get("access") in {"manual", "browser-assisted"}
     ]
     if manual:
         raise SystemExit(f"Manual source(s) must be registered: {', '.join(manual)}")
@@ -525,15 +541,42 @@ def update_public(args: argparse.Namespace, catalogue: Catalogue) -> int:
         staging.mkdir(parents=True, exist_ok=True)
         inventory = source_inventory(source)
         inventory_downloads = [
-            item
-            for item in (inventory or {}).get("files", [])
-            if item.get("download_url")
+            item for item in (inventory or {}).get("files", []) if item.get("download_url")
         ]
         if source.get("access") == "public-download" and inventory_downloads:
             files: dict[str, Path] = {}
             remote_files: dict[str, dict[str, Any]] = {}
+            reused: dict[str, dict[str, Any]] = {}
+            previous_files = {
+                item["logical_name"]: item for item in (previous or {}).get("files", [])
+            }
             for item in inventory_downloads:
                 logical_name = item["logical_name"]
+                existing = previous_files.get(logical_name)
+                if (
+                    not args.force
+                    and existing
+                    and (previous or {}).get("release") == inventory_release(inventory)
+                ):
+                    path = resolve_stored_path(args.root, existing["path"])
+                    if (
+                        path.is_file()
+                        and path.stat().st_size == existing["bytes"]
+                        and (
+                            item.get("expected_bytes") is None
+                            or existing["bytes"] == item["expected_bytes"]
+                        )
+                        and sha256(path) == existing["sha256"]
+                    ):
+                        files[logical_name] = path
+                        reused[logical_name] = existing
+                        remote_files[logical_name] = (
+                            (previous or {})
+                            .get("remote", {})
+                            .get("files", {})
+                            .get(logical_name, {})
+                        )
+                        continue
                 output = staging / logical_name
                 remote = download(source, None, output, url=item["download_url"])
                 if remote is None:
@@ -548,7 +591,13 @@ def update_public(args: argparse.Namespace, catalogue: Catalogue) -> int:
             release = inventory_release(inventory)
             if release is None:
                 raise ValueError(f"{source.id} public inventory has no release")
-            records = commit_staged_snapshot(args.root, source, release, files)
+            records = commit_staged_snapshot(
+                args.root,
+                source,
+                release,
+                {name: path for name, path in files.items() if name not in reused},
+            ) + list(reused.values())
+            records.sort(key=lambda item: item["logical_name"])
             updates[source.id] = source_record(
                 source,
                 release,
@@ -556,9 +605,7 @@ def update_public(args: argparse.Namespace, catalogue: Catalogue) -> int:
                 acquisition=source.get("access"),
                 remote={"files": remote_files},
             )
-            status.append(
-                {"source": source.id, "status": "updated", "files": len(records)}
-            )
+            status.append({"source": source.id, "status": "updated", "files": len(records)})
             shutil.rmtree(staging)
             continue
         output_name = source.get("output_file")
@@ -572,7 +619,11 @@ def update_public(args: argparse.Namespace, catalogue: Catalogue) -> int:
         elif source.get("access") in {"public-command", "authenticated-command"}:
             if source.get("access") == "authenticated-command":
                 token_env = source.get("token_env")
-                if not os.environ.get(token_env, ""):
+                token_present = bool(os.environ.get(token_env, ""))
+                if source.id == 'iucn-assessment-catalog':
+                    from ark_pipeline.cli.sources_download_iucn import read_iucn_token
+                    token_present = bool(read_iucn_token())
+                if not token_present:
                     raise ValueError(
                         f"{source.id} requires {token_env}; keep the token in the ignored .env file"
                     )
@@ -583,9 +634,7 @@ def update_public(args: argparse.Namespace, catalogue: Catalogue) -> int:
             replacements = {
                 "{output}": str(output),
                 "{previous}": str(previous_files.get(output_name, "")),
-                "{previous_metadata}": str(
-                    previous_files.get(source.get("metadata_file"), "")
-                ),
+                "{previous_metadata}": str(previous_files.get(source.get("metadata_file"), "")),
             }
             command = []
             for part in source.get("command", []):
@@ -608,7 +657,11 @@ def update_public(args: argparse.Namespace, catalogue: Catalogue) -> int:
         if errors:
             raise ValueError(f"{source.id} validation failed: {'; '.join(errors)}")
         digest = sha256(output)
-        release = inventory_release(inventory) or (remote or {}).get("last_modified") or utc_now().date().isoformat()
+        release = (
+            inventory_release(inventory)
+            or (remote or {}).get("last_modified")
+            or utc_now().date().isoformat()
+        )
         if metadata_name:
             metadata = json.loads((staging / metadata_name).read_text(encoding="utf-8"))
             release = metadata.get("red_list_version", release)

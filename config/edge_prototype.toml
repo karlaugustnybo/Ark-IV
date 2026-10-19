@@ -1,0 +1,61 @@
+schema_version = 1
+clade = "Mammalia_ott244265"
+engine_commit = "a82c4ca2531e709f07265eef6f16ef971bf36d76"
+
+[[sources]]
+id = "dated-tree"
+filename = "equal_splits_median_tree.tre"
+url = "https://zenodo.org/api/records/19049120/files/equal_splits_median_tree.tre/content"
+release = "10.5281/zenodo.19049120"
+license = "CC-BY-4.0"
+md5 = "8c667dc557b17bbd8e33d9867c347e9a"
+sha256 = "e34d426feeb76aa87918321d1096f1b17413add627979976f987c817c95f7a11"
+
+[[sources]]
+id = "ott-taxonomy"
+filename = "ott3.7.3.tgz"
+url = "https://files.opentreeoflife.org/ott/ott3.7.3/ott3.7.3.tgz"
+release = "OTT 3.7.3"
+license = "CC0 where not limited by pre-existing terms"
+sha256 = "7603aeb68ff45749773b4885811b1280d057f8c178b93bd903849fb7f237dfb3"
+
+[[sources]]
+id = "mammal-reference"
+filename = "gumbs_2023_s1.xlsx"
+url = "https://journals.plos.org/plosbiology/article/file?id=10.1371/journal.pbio.3001991.s003&type=supplementary"
+release = "Gumbs et al. 2023 S1 Data"
+license = "CC-BY-4.0 article supplement; local comparison only"
+sha256 = "311bd1bcea6837d0b06fda4cfa2be9cc6ba66d1cd6d07fa18f8786ddebaa4252"
+
+[[validation_sources]]
+id = "birth-model-median"
+filename = "birth_model_median_tree.tre"
+url = "https://zenodo.org/api/records/19049120/files/birth_model_median_tree.tre/content"
+release = "10.5281/zenodo.19049120"
+license = "CC-BY-4.0"
+md5 = "a01b2f8290bc10c750a74c9a33eb02fa"
+sha256 = "40663df1a7c3bce19e7abe352b5d9b5a08234dd4599bb5eb9be1dfc5c0684ef7"
+
+[[validation_sources]]
+id = "node-age-cache"
+filename = "node_ages.json"
+url = "https://raw.githubusercontent.com/jdduke24/dated-complete-tree/a82c4ca2531e709f07265eef6f16ef971bf36d76/date_cache/node_ages.json"
+release = "engine a82c4ca2531e709f07265eef6f16ef971bf36d76 age cache"
+license = "Open Tree chronogram sources retain their provenance"
+sha256 = "74c703415b4793d1d37fc65a47162ce78baee7246153ee864eb29a9fa248fa80"
+
+[[tree_archives]]
+id = "birth-topology"
+url = "https://zenodo.org/api/records/19049120/files/birth_model_topo.tar.gz/content"
+release = "10.5281/zenodo.19049120"
+md5 = "e887f4ef99121b08d604361f6a09f7fd"
+total_trees = 101
+variation = "topology with median calibration dates"
+
+[[tree_archives]]
+id = "birth-dates"
+url = "https://zenodo.org/api/records/19049120/files/birth_model_date.tar.gz/content"
+release = "10.5281/zenodo.19049120"
+md5 = "de2c9560defe5dff5261616ad1cfe802"
+total_trees = 101
+variation = "calibration dates with fixed topology"

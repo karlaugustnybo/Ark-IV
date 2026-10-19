@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import csv
+import fcntl
 import io
 import json
 import os
@@ -11,6 +12,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import duckdb
@@ -25,12 +27,15 @@ from ark_pipeline.cli.benchmark_pipeline import (
     build_pairs,
     parser,
     plan,
+    reviewed_evidence_identity,
     run,
     run_stage,
     select_sample,
 )
 from ark_pipeline.cli.benchmark_sample import build_sample
+from ark_pipeline.cli.benchmark_stage import CROSSWALK, INPUT_FLAGS, PREREQUISITES, replay_plan
 from ark_pipeline.runtime.benchmark_estimates import estimate
+from ark_pipeline.runtime.checkpoints import artifact_inventory, benchmark_environment
 from ark_pipeline.runtime.provenance import atomic_json, sha256
 from ark_pipeline.spatial.coverage import load_spatial_profile
 from tests import test_global_adm2
@@ -100,6 +105,36 @@ class BenchmarkModelTests(unittest.TestCase):
         self.assertEqual(result["missing_size_bins"], [1])
         self.assertEqual(result["stages"][1]["estimated_seconds"], 5)
 
+    def test_dynamic_tiles_ignore_fine_counts_and_saved_full_prior_is_coarse_only(self):
+        from ark_pipeline.runtime.forecasts import Forecast
+        from tests.test_pipeline_dashboard import RESOURCES
+
+        pairs = {'pair_rows': 1000, 'write_seconds': 1, 'observations': [
+            {'size_bin': 0, 'kernel_seconds': 1, 'output_pairs': 1000, 'forced_extreme': False}]}
+        population = {'size_bin_counts': [100000]}
+        stages = [{'name': 'tiles', 'wall_seconds': 10, 'serving_contract': 'dynamic-h3-v1'}]
+        projections = []
+        for fine in (1000, 100000):
+            lists = {'res3_cells': 1000, 'res3_relationships': 1000,
+                     'res7_cells': fine, 'res7_relationships': fine}
+            result = estimate(stages, population, pairs, lists)
+            self.assertEqual(result['projected_workload']['res3_cells'], h3.get_num_cells(3))
+            tile = result['stages'][0]
+            self.assertAlmostEqual(tile['estimated_seconds'], 10 * h3.get_num_cells(3) / 1000)
+            projections.append(tile['scenario_seconds'])
+            provisional = estimate([{'name': 'tiles', 'wall_seconds': 10}], population, pairs, lists,
+                                   serving_contract='dynamic-h3-v1')
+            self.assertEqual(provisional['stages'][0], tile)
+            prior = {'serving_contract': 'dynamic-h3-v1', 'estimate': result,
+                     'resources': RESOURCES, 'stages': stages}
+            self.assertEqual(Forecast(prior, RESOURCES, 'full').base['tiles'], tile['estimated_seconds'])
+            # Pre-fix estimates carried only the report tag and must not seed full ETA.
+            old_estimate = {key: value for key, value in result.items() if key != 'serving_contract'}
+            self.assertNotIn('tiles', Forecast({**prior, 'estimate': old_estimate}, RESOURCES, 'full').base)
+            static = estimate([{'name': 'tiles', 'wall_seconds': 10}], population, pairs, lists)
+            self.assertGreater(static['stages'][0]['estimated_seconds'], tile['estimated_seconds'])
+        self.assertEqual(projections[0], projections[1])
+
     def test_census_includes_extremes_and_h3_projection_is_capped(self):
         pairs = self.observations()
         lists = {"res3_cells": 1, "res3_relationships": 3, "res7_cells": 10, "res7_relationships": 100}
@@ -111,7 +146,469 @@ class BenchmarkModelTests(unittest.TestCase):
             estimate([], {"size_bin_counts": [2]}, pairs, lists)
 
 
+class BenchmarkReplayInputTests(unittest.TestCase):
+    def test_rejected_metadata_is_rerun_after_evidence_is_restored(self):
+        with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):
+            root = Path(temporary).resolve()
+            sample, boundary = fixture(root)
+            evidence = root / "outside-config.json"
+            original = b'{"entries": []}\n'
+            evidence.write_bytes(original)
+            output = root / "benchmark"
+            options = ["--root", str(root), "--sample", str(sample), "--output-root", str(output),
+                       "--workers", "1", "--memory-limit", "512MB", "--ui", "plain"]
+            for key in ("admin0", "admin1", "municipality", "eez", "conservation-framework"):
+                options += ["--" + key, str(boundary)]
+
+            def replace_evidence(stage, *args, **kwargs):
+                if stage["name"] == "metadata":
+                    evidence.write_bytes(b'{"entries": [], "changed": true}\n')
+                return run_stage(stage, *args, **kwargs)
+
+            calls = []
+
+            def stop_at_database(stage, *args, **kwargs):
+                calls.append(stage["name"])
+                if stage["name"] == "coarse_db":
+                    raise KeyboardInterrupt
+                return run_stage(stage, *args, **kwargs)
+
+            with patch.dict(os.environ, {"GLOBAL_IUCN_REVIEWED_EVIDENCE_PATH": str(evidence)}), \
+                 patch("ark_pipeline.cli.benchmark_pipeline.shutil.which", return_value="fixture-compiler"):
+                with patch("ark_pipeline.cli.benchmark_pipeline.run_stage", side_effect=replace_evidence):
+                    failed = run(parser().parse_args(options))
+                self.assertEqual(failed["status"], "failed")
+                self.assertIn("Reviewed ecosystem evidence changed", failed["error"])
+                rejected = failed["stages"][-1]
+                self.assertEqual(rejected["name"], "metadata")
+                self.assertEqual(rejected["status"], "failed")
+                self.assertEqual(rejected["exit_code"], 0)
+                self.assertGreater(rejected["wall_seconds"], 0)
+                self.assertEqual(rejected["error"], failed["error"])
+                checkpoint = json.loads((output / "dashboard-state.json").read_text())
+                self.assertEqual(checkpoint["status"], "failed")
+                self.assertEqual(checkpoint["states"]["metadata"]["status"], "failed")
+                self.assertNotIn("species/species.parquet", failed["artifacts"])
+                self.assert_replay_lock_released(output)
+                # Restore only after the rejection is persisted, in a new invocation.
+                evidence.write_bytes(original)
+                with self.assertRaises(ValueError):
+                    replay_plan(self.replay_args(output, root / "rejected-replay", "coarse_db"))
+                self.assertFalse((root / "rejected-replay").exists())
+                with patch("ark_pipeline.cli.benchmark_pipeline.run_stage", side_effect=stop_at_database):
+                    resumed = run(parser().parse_args(options))
+                self.assertEqual(calls, ["metadata", "coarse_db"])
+                self.assertEqual(resumed["status"], "interrupted")
+                accepted = resumed["stages"][-1]
+                self.assertEqual(accepted["name"], "metadata")
+                self.assertEqual(accepted["status"], "passed")
+                self.assertNotEqual(accepted["attempt_id"], rejected["attempt_id"])
+                self.assertIn("species/species.parquet", resumed["artifacts"])
+                checkpoint = json.loads((output / "dashboard-state.json").read_text())
+                self.assertEqual(checkpoint["states"]["metadata"]["status"], "passed")
+                replay = run(self.replay_args(output, root / "accepted-replay", "coarse_db"))
+                self.assertEqual(replay["status"], "passed", replay.get("error"))
+                # An ordinary compatible resume keeps the now-accepted metadata.
+                calls.clear()
+                with patch("ark_pipeline.cli.benchmark_pipeline.run_stage", side_effect=stop_at_database):
+                    run(parser().parse_args(options))
+                self.assertEqual(calls, ["coarse_db"])
+
+    def test_reviewed_evidence_selection_matches_stage_working_directory(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = Path(temporary).resolve()
+            relative = Path("outside-config.json")
+            (repository / relative).write_text('{"entries": []}')
+            with patch("ark_pipeline.cli.benchmark_pipeline.REPOSITORY_ROOT", repository), \
+                 patch.dict(os.environ, {"GLOBAL_IUCN_REVIEWED_EVIDENCE_PATH": str(relative)}):
+                identity = reviewed_evidence_identity()
+                self.assertEqual(identity["path"], str(repository / relative))
+                self.assertTrue(identity["present"])
+                self.assertEqual(identity["sha256"], sha256(repository / relative))
+                os.environ["GLOBAL_IUCN_REVIEWED_EVIDENCE_PATH"] = ""
+                self.assertEqual(reviewed_evidence_identity(),
+                                 {"path": str(repository), "present": False, "sha256": None})
+
+    def test_prepared_replay_rebinds_crosswalk_only_when_consumed(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            source, _, _ = self.saved_run(root)
+            # Synthetic future plan models the recorder's added required flag;
+            # this tests replay wiring/inventory, not the recorder's consumers.
+            for relative in {*INPUT_FLAGS["prepared_inputs"].values(), CROSSWALK}:
+                target = source / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text("synthetic saved input")
+            previous = json.loads((source / "benchmark-report.json").read_text())
+            previous["stages"] = [{"name": name, "status": "passed"}
+                                  for name in PREREQUISITES["prepared_inputs"]]
+            previous["artifacts"] = artifact_inventory(source)
+            atomic_json(source / "benchmark-report.json", previous)
+            before = artifact_inventory(source)
+            args = self.replay_args(source, root / "replay", "prepared_inputs")
+            def old_plan(arguments):
+                config, stages, env = plan(arguments)
+                command = next(item["command"] for item in stages if item["name"] == "prepared_inputs")
+                if "--crosswalk" in command:
+                    index = command.index("--crosswalk")
+                    del command[index:index + 2]
+                return config, stages, env
+
+            with patch("ark_pipeline.cli.benchmark_pipeline.plan", side_effect=old_plan):
+                old_report, old_stage, _, _ = replay_plan(args)
+            self.assertNotIn("--crosswalk", old_stage["command"])
+            self.assertNotIn(CROSSWALK, old_report["input_inventory"])
+
+            def future_plan(arguments):
+                config, stages, env = old_plan(arguments)
+                stage = next(item for item in stages if item["name"] == "prepared_inputs")
+                stage["command"] += ["--crosswalk", str(Path(config["output"]) / CROSSWALK)]
+                return config, stages, env
+
+            with patch("ark_pipeline.cli.benchmark_pipeline.plan", side_effect=future_plan):
+                report, stage, _, _ = replay_plan(args)
+                self.assertEqual(stage["command"][stage["command"].index("--crosswalk") + 1],
+                                 str(source / CROSSWALK))
+                self.assertIn(CROSSWALK, report["input_inventory"])
+                self.assertEqual(artifact_inventory(source), before)
+                target = source / CROSSWALK
+                contents = target.read_bytes()
+                stat = target.stat()
+
+                def mutate_after_stage(item, *args, **kwargs):
+                    target.write_bytes(contents + b"changed")
+                    return {**item, "status": "passed", "wall_seconds": 0, "log": "fixture.log"}
+
+                with patch("ark_pipeline.cli.benchmark_pipeline.run_stage", side_effect=mutate_after_stage):
+                    failed = run(args)
+                self.assertEqual(failed["status"], "failed")
+                self.assertNotIn("artifacts", failed)
+                self.assertIn("changed or is missing", failed["error"])
+                self.assert_replay_lock_released(root / "replay")
+                args.output_root = root / "preflight"
+                target.write_bytes(contents)
+                os.utime(target, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+                self.assertEqual(artifact_inventory(source), before)
+                target.write_bytes(contents + b"changed")
+                with self.assertRaisesRegex(ValueError, "changed or is missing"):
+                    replay_plan(args)
+                target.unlink()
+                with self.assertRaises(FileNotFoundError):
+                    replay_plan(args)
+                self.assertFalse(args.output_root.exists())
+
+            def malformed_plan(arguments):
+                config, stages, env = plan(arguments)
+                command = next(item["command"] for item in stages if item["name"] == "prepared_inputs")
+                index = command.index("--species")
+                del command[index:index + 2]
+                return config, stages, env
+
+            with patch("ark_pipeline.cli.benchmark_pipeline.plan", side_effect=malformed_plan), \
+                 self.assertRaisesRegex(ValueError, "--species"):
+                replay_plan(args)
+
+    def test_reviewed_evidence_tracks_absence_and_rechecks_during_execution(self):
+        with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):
+            root = Path(temporary).resolve()
+            evidence = root / "absent.json"
+            with patch.dict(os.environ, {"GLOBAL_IUCN_REVIEWED_EVIDENCE_PATH": str(evidence)}):
+                source, _, _ = self.saved_run(root)
+                expected = reviewed_evidence_identity()
+                self.assertEqual(expected, {"path": str(evidence), "present": False, "sha256": None})
+                args = self.replay_args(source, root / "unchanged", "pairs")
+                _, _, config, env = replay_plan(args)
+                self.assertEqual(config["reviewed_evidence"], expected)
+                self.assertEqual(env["GLOBAL_IUCN_REVIEWED_EVIDENCE_PATH"], str(evidence))
+                evidence.write_text('{"entries": []}')
+                with self.assertRaisesRegex(ValueError, "Reviewed ecosystem evidence"):
+                    replay_plan(args)
+                evidence.unlink()
+
+                def mutate_after_stage(stage, *args, **kwargs):
+                    measured = run_stage(stage, *args, **kwargs)
+                    evidence.write_text('{"entries": []}')
+                    return measured
+
+                with patch("ark_pipeline.cli.benchmark_pipeline.run_stage", side_effect=mutate_after_stage):
+                    report = run(args)
+                self.assertEqual(report["status"], "failed")
+                self.assertIn("Reviewed ecosystem evidence changed", report["error"])
+                self.assertNotIn("artifacts", report)
+                self.assert_replay_lock_released(args.output_root)
+                # The full benchmark must also refuse success after an input
+                # appears during a stage, before proceeding to the next stage.
+                evidence.unlink()
+                config = json.loads((source / "config.json").read_text())
+                options = ["--root", str(root), "--sample", config["sample"], "--profile", config["profile"],
+                           "--output-root", str(root / "full"), "--workers", "1", "--ui", "plain"]
+                for key, path in config["boundaries"].items():
+                    options += ["--" + key.replace("_", "-"), path]
+                def measured(stage, *args, **kwargs):
+                    evidence.write_text('{"entries": []}')
+                    return {**stage, "status": "passed", "wall_seconds": 0, "log": "fixture.log"}
+                with patch("ark_pipeline.cli.benchmark_pipeline.shutil.which", return_value="fixture-compiler"), \
+                     patch("ark_pipeline.cli.benchmark_pipeline.run_stage", side_effect=measured) as executed:
+                    report = run(parser().parse_args(options))
+                self.assertEqual(executed.call_count, 1)
+                self.assertEqual(report["status"], "failed")
+                self.assertIn("Reviewed ecosystem evidence changed", report["error"])
+                self.assertNotIn("artifacts", report)
+                self.assert_replay_lock_released(root / "full")
+
+    def test_reviewed_evidence_resume_and_replay_refuse_incompatible_inputs(self):
+        with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):
+            root = Path(temporary).resolve()
+            evidence = root / "outside-config.json"
+            evidence.write_text('{"entries": []}')
+            variable = "GLOBAL_IUCN_REVIEWED_EVIDENCE_PATH"
+            with patch.dict(os.environ, {variable: str(evidence)}):
+                source, _, _ = self.saved_run(root, lists=True)
+                saved = {name: (source / name).read_bytes() for name in
+                         ("config.json", "benchmark-report.json", "dashboard-state.json")}
+                config = json.loads(saved["config.json"])
+                options = ["--root", str(root), "--sample", config["sample"], "--profile", config["profile"],
+                           "--output-root", str(source), "--workers", "1", "--memory-limit", "512MB", "--ui", "plain"]
+                for key, path in config["boundaries"].items():
+                    options += ["--" + key.replace("_", "-"), path]
+                with patch("ark_pipeline.cli.benchmark_pipeline.shutil.which", return_value="fixture-compiler"), \
+                     patch("ark_pipeline.cli.benchmark_pipeline.run_stage", side_effect=KeyboardInterrupt) as stage:
+                    unchanged = run(parser().parse_args(options))
+                self.assertEqual(unchanged["status"], "interrupted")
+                self.assertEqual(stage.call_args.args[0]["name"], "coarse_db")
+                original = evidence.read_bytes()
+                for mutation in ("changed", "missing", "path-switch"):
+                    with self.subTest(mutation=mutation):
+                        evidence.write_bytes(original)
+                        if mutation == "changed":
+                            evidence.write_bytes(original + b"\n")
+                        elif mutation == "missing":
+                            evidence.unlink()
+                        other = root / "other.json"
+                        other.write_bytes(original)
+                        selected = other if mutation == "path-switch" else evidence
+                        before = artifact_inventory(source)
+                        checkpoint = (source / "dashboard-state.json").read_bytes()
+                        with patch.dict(os.environ, {variable: str(selected)}), \
+                             patch("ark_pipeline.cli.benchmark_pipeline.shutil.which", return_value="fixture-compiler"), \
+                             patch("ark_pipeline.cli.benchmark_pipeline.run_stage", side_effect=KeyboardInterrupt) as executed:
+                            with self.subTest(entry="resume"), self.assertRaisesRegex(ValueError, "already exists"):
+                                run(parser().parse_args(options))
+                            output = root / ("replay-" + mutation)
+                            with self.subTest(entry="replay"), self.assertRaisesRegex(ValueError, "Reviewed ecosystem evidence"):
+                                run(self.replay_args(source, output, "metadata"))
+                            self.assertFalse(output.exists())
+                            executed.assert_not_called()
+                        self.assertEqual(artifact_inventory(source), before)
+                        self.assertEqual((source / "dashboard-state.json").read_bytes(), checkpoint)
+
+    def saved_run(self, root, *, lists=False):
+        sample, boundary = fixture(root)
+        profile = root / "profile.toml"
+        shutil.copy2(DEFAULT_PROFILE, profile)
+        source = root / "benchmark"
+        options = ["--root", str(root), "--sample", str(sample), "--profile", str(profile),
+                   "--output-root", str(source), "--workers", "1", "--memory-limit", "512MB", "--ui", "plain"]
+        for key in ("admin0", "admin1", "municipality", "eez", "conservation-framework"):
+            options += ["--" + key, str(boundary)]
+        if lists:
+            def stop_before_database(stage, *args, **kwargs):
+                if stage["name"] == "coarse_db":
+                    raise KeyboardInterrupt
+                return run_stage(stage, *args, **kwargs)
+            # This fixture stops before database/tile compilation; only bypass
+            # the full-run compiler presence gate, keeping preceding stages real.
+            with patch("ark_pipeline.cli.benchmark_pipeline.shutil.which", return_value="fixture-compiler"), \
+                 patch("ark_pipeline.cli.benchmark_pipeline.run_stage", side_effect=stop_before_database):
+                report = run(parser().parse_args(options))
+            self.assertEqual(report["status"], "interrupted")
+            self.assertEqual([s["name"] for s in report["stages"]],
+                             ["source_scan", "crosswalk", "pairs", "lists", "metadata"])
+        else:
+            config, _, _ = plan(parser().parse_args(options))
+            source.mkdir()
+            atomic_json(source / "config.json", config)
+            selection = select_sample(sample, root, load_spatial_profile(profile), None)
+            atomic_json(source / "selection.json", selection)
+            atomic_json(source / "benchmark-report.json", {
+                "stages": [{"name": "source_scan", "status": "passed"}],
+                "acquisition_manifest_sha256": sha256(root / "acquisition/current.json"),
+                "artifacts": artifact_inventory(source),
+            })
+        return source, sample, profile
+
+    def replay_args(self, source, output, stage):
+        return parser().parse_args(["--only-stage", stage, "--from-run", str(source),
+                                   "--output-root", str(output), "--workers", "1",
+                                   "--memory-limit", "512MB", "--ui", "plain"])
+
+    def assert_replay_lock_released(self, output):
+        with (output / ".run.lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def test_consumed_directory_requires_complete_saved_membership(self):
+        with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):
+            root = Path(temporary).resolve()
+            source, _, _ = self.saved_run(root, lists=True)
+            parts = source / "spatial/serving/current/res7_merged_parts"
+            partition = next(parts.glob("*.parquet"))
+            contents, stat = partition.read_bytes(), partition.stat()
+            partition.unlink()
+            output = root / "missing"
+            with self.assertRaisesRegex(ValueError, "changed or is missing"):
+                replay_plan(self.replay_args(source, output, "fine_metrics"))
+            self.assertFalse(output.exists())
+            partition.write_bytes(contents)
+            os.utime(partition, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+            extra = parts / "unexpected.parquet"
+            extra.write_bytes(contents)
+            with self.assertRaisesRegex(ValueError, "membership changed"):
+                replay_plan(self.replay_args(source, root / "extra", "fine_metrics"))
+            self.assertFalse((root / "extra").exists())
+            extra.unlink()
+            partition.write_bytes(contents + b"stale")
+            with self.assertRaisesRegex(ValueError, "changed or is missing"):
+                replay_plan(self.replay_args(source, root / "stale", "fine_metrics"))
+            partition.write_bytes(contents)
+            os.utime(partition, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+            # Changes outside the consumed paths do not invalidate this replay.
+            (source / "unrelated").mkdir()
+            (source / "unrelated/new.txt").write_text("unconsumed")
+            before = artifact_inventory(source)
+            replay = run(self.replay_args(source, root / "valid", "fine_metrics"))
+            self.assertEqual(replay["status"], "passed", replay.get("error"))
+            self.assertEqual(artifact_inventory(source), before)
+            self.assertEqual(len(list((root / "valid/metrics").glob("*.parquet"))), 3)
+            for mutation in ("missing", "extra"):
+                with self.subTest(mutation=mutation):
+                    def mutate_after_stage(stage, *args, **kwargs):
+                        measured = run_stage(stage, *args, **kwargs)
+                        if mutation == "missing":
+                            partition.unlink()
+                        else:
+                            extra.write_bytes(contents)
+                        return measured
+                    with patch("ark_pipeline.cli.benchmark_pipeline.run_stage", side_effect=mutate_after_stage):
+                        report = run(self.replay_args(source, root / ("during-" + mutation), "fine_metrics"))
+                    self.assertEqual(report["status"], "failed")
+                    self.assertNotIn("artifacts", report)
+                    self.assertIn("changed", report["error"])
+                    self.assert_replay_lock_released(root / ("during-" + mutation))
+                    if mutation == "missing":
+                        partition.write_bytes(contents)
+                        os.utime(partition, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+                    else:
+                        extra.unlink()
+                    self.assertEqual(artifact_inventory(source), before)
+
+    def test_pairs_replay_rechecks_profile_sample_and_metadata_after_execution(self):
+        with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):
+            root = Path(temporary).resolve()
+            source, sample, profile = self.saved_run(root)
+            before = artifact_inventory(source)
+            for mutation in ("profile", "sample", "metadata"):
+                with self.subTest(mutation=mutation):
+                    target = {"profile": profile, "sample": sample, "metadata": sample.with_suffix(".json")}[mutation]
+                    contents = target.read_bytes()
+                    def mutate(stage, *args, **kwargs):
+                        if mutation == "profile":
+                            profile.write_text(contents.decode().replace(
+                                "decision_simplification_min_bbox_degrees2 = 100.0",
+                                "decision_simplification_min_bbox_degrees2 = 0.0"))
+                        measured = run_stage(stage, *args, **kwargs)
+                        if mutation != "profile":
+                            target.write_bytes(contents + b"changed")
+                        return measured
+                    output = root / ("changed-" + mutation)
+                    with patch("ark_pipeline.cli.benchmark_pipeline.run_stage", side_effect=mutate):
+                        try:
+                            report = run(self.replay_args(source, output, "pairs"))
+                        finally:
+                            target.write_bytes(contents)
+                    self.assertEqual(report["status"], "failed")
+                    self.assertEqual(report["stages"][0]["status"], "passed")
+                    self.assertIn("changed during stage replay", report["error"])
+                    self.assertNotIn("artifacts", report)
+                    if mutation == "profile":
+                        observations = json.loads((output / "pairs-report.json").read_text())["observations"]
+                        self.assertEqual({row["simplification"]["method"] for row in observations},
+                                         {"topology-preserving"})
+                        self.assertEqual(report["profile_sha256"], load_spatial_profile(profile).digest)
+                    self.assertEqual(json.loads((output / "benchmark-report.json").read_text())["status"], "failed")
+                    self.assert_replay_lock_released(output)
+                    self.assertEqual(artifact_inventory(source), before)
+
+    def test_profile_and_pair_metadata_changes_are_rejected_before_output_creation(self):
+        with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):
+            root = Path(temporary).resolve()
+            source, sample, profile = self.saved_run(root)
+            contents = profile.read_bytes()
+            profile.write_text(contents.decode().replace(
+                "decision_simplification_min_bbox_degrees2 = 100.0",
+                "decision_simplification_min_bbox_degrees2 = 0.0"))
+            with self.assertRaisesRegex(ValueError, "Spatial profile changed since"):
+                run(self.replay_args(source, root / "profile-change", "pairs"))
+            self.assertFalse((root / "profile-change").exists())
+            profile.write_bytes(contents)
+            metadata = sample.with_suffix(".json")
+            metadata.write_bytes(metadata.read_bytes() + b"\n")
+            with self.assertRaisesRegex(ValueError, "Polygon selection changed since"):
+                run(self.replay_args(source, root / "metadata-change", "pairs"))
+            self.assertFalse((root / "metadata-change").exists())
+
+    def test_interrupted_replay_preserves_saved_outputs_and_reports_interruption(self):
+        with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):
+            root = Path(temporary).resolve()
+            source, _, _ = self.saved_run(root)
+            before = artifact_inventory(source)
+            output = root / "interrupted"
+            def interrupt(stage, *args, **kwargs):
+                kwargs["dashboard"].begin_stage(stage["name"])
+                raise KeyboardInterrupt
+            with patch("ark_pipeline.cli.benchmark_pipeline.run_stage", side_effect=interrupt):
+                report = run(self.replay_args(source, output, "pairs"))
+            self.assertEqual(report["status"], "interrupted")
+            self.assertNotIn("artifacts", report)
+            self.assertEqual(artifact_inventory(source), before)
+            self.assertEqual(json.loads((output / "benchmark-report.json").read_text())["status"], "interrupted")
+            self.assert_replay_lock_released(output)
+
+
 class BenchmarkRunnerTests(unittest.TestCase):
+    def test_stage_replay_requires_both_options_and_completed_prerequisites(self):
+        for options in (["--only-stage", "pairs"], ["--from-run", "/unused"]):
+            with self.assertRaisesRegex(ValueError, "together"):
+                run(parser().parse_args(options))
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "source"
+            source.mkdir()
+            sample = source / "sample.parquet"
+            sample.touch()
+            config, _, _ = plan(parser().parse_args(["--root", temporary, "--sample", str(sample), "--output-root", str(source)]))
+            atomic_json(source / "config.json", config)
+            atomic_json(source / "benchmark-report.json", {"stages": []})
+            with self.assertRaisesRegex(ValueError, "prerequisites: pairs"):
+                run(parser().parse_args(["--only-stage", "lists", "--from-run", str(source), "--dry-run"]))
+            atomic_json(source / "benchmark-report.json", {"stages": [
+                {"name": name, "status": "passed"} for name in PREREQUISITES
+            ]})
+            for name in PREREQUISITES:
+                output = (Path(temporary) / f"replay-{name}").resolve()
+                args = parser().parse_args(["--only-stage", name, "--from-run", str(source),
+                                            "--output-root", str(output), "--workers", "2", "--dry-run"])
+                report, stage, _, environment = replay_plan(args)
+                self.assertEqual([s["name"] for s in report["planned_stages"]], [name])
+                self.assertEqual(report["scope"], "stage-replay")
+                self.assertFalse(output.exists())
+                for flag in ("--target", "--output", "--output-dir", "--output-root", "--scratch-dir"):
+                    if flag in stage["command"]:
+                        self.assertTrue(Path(stage["command"][stage["command"].index(flag) + 1]).is_relative_to(output))
+                for key in ("BUILD_DUCKDB_PATH", "EXPORT_DIR", "TILE_DIR", "PMTILES_PATH"):
+                    self.assertTrue(Path(environment[key]).is_relative_to(output))
+            with self.assertRaisesRegex(ValueError, "separate"):
+                replay_plan(parser().parse_args(["--only-stage", "pairs", "--from-run", str(source),
+                                                 "--output-root", str(source / "nested"), "--dry-run"]))
+
     def test_plan_uses_shared_resources_and_isolates_all_output_paths(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -195,11 +692,22 @@ class BenchmarkRunnerTests(unittest.TestCase):
             self.assertEqual(before, snapshot())
             self.assertEqual(report["estimate"]["status"], "planning-estimate")
             self.assertGreater(report["estimate"]["total_seconds"], 0)
+            self.assertEqual(report["estimate"]["serving_contract"], "dynamic-h3-v1")
+            self.assertEqual(report["live_projection"]["serving_contract"], "dynamic-h3-v1")
             self.assertEqual(len(report["stages"]), 11)
             self.assertEqual(report["stages"][:2], interrupted["stages"])
             self.assertTrue(any("Resumed after interruption" in warning for warning in report["warnings"]))
             self.assertTrue(all(s["status"] == "passed" for s in report["stages"]))
             self.assertTrue((output / "tiles/current/priorities.pmtiles").is_file())
+            prepared = json.loads((output / "prepared-inputs.json").read_text())
+            crosswalk = (output / "crosswalk/current/iucn_goat_crosswalk.parquet").resolve(strict=True)
+            self.assertEqual(prepared["files"]["crosswalk"], {
+                "path": str(crosswalk), "bytes": crosswalk.stat().st_size, "sha256": sha256(crosswalk)})
+            for records in prepared["parts"].values():
+                receipt = json.loads(Path(records["receipt"]["path"]).read_text())
+                self.assertEqual(prepared["metric_identity"], receipt["identity"]["metadata"])
+            publication = json.loads((output / "tiles/current/receipt.json").read_text())
+            self.assertEqual(publication["identity"]["prepared"], prepared)
             self.assertTrue((output / "benchmark-report.md").is_file())
             events = [json.loads(line) for line in (output / "progress.jsonl").read_text().splitlines()]
             self.assertEqual(sum(e["kind"] == "geometry_done" for e in events), 4)
@@ -208,7 +716,7 @@ class BenchmarkRunnerTests(unittest.TestCase):
             self.assertTrue(any(e["stage"] == "tiles" and e["kind"] == "detail" for e in events))
             stream_work = [e for e in events if e["stage"] == "tiles" and e["kind"] == "work"]
             self.assertTrue(stream_work)
-            self.assertTrue(all(e["scope"] == "phase" and e["total"] == report["workload"]["res3_cells"] + report["workload"]["res7_cells"]
+            self.assertTrue(all(e["scope"] == "phase" and e["total"] == report["workload"]["res3_cells"]
                                 for e in stream_work))
             self.assertTrue(any(e["stage"] == "tiles" and e["kind"] == "phase" for e in events))
             coarse_metadata = json.loads((output / "coarse-tiles/map-metadata.json").read_text())
@@ -226,7 +734,35 @@ class BenchmarkRunnerTests(unittest.TestCase):
                             for row in pq.read_table(part, columns=["h3_index"]).to_pylist()}
             self.assertEqual(metric_cells, {h3.int_to_str(cell) for cell, _ in expected})
             tile_report = json.loads((output / "tiles/current/build-report.json").read_text())
-            self.assertEqual(tile_report["features"], report["workload"]["res3_cells"] + report["workload"]["res7_cells"])
+            self.assertEqual(tile_report["features"], report["workload"]["res3_cells"])
+            # Exercise actual stages through the replay CLI with immutable inputs.
+            original_inventory = artifact_inventory(output)
+            for stage_name in ("pairs", "lists", "coarse_db", "coarse_cache", "fine_metrics", "prepared_inputs", "tiles"):
+                replay_output = root / f"replay-{stage_name}"
+                replay = run(parser().parse_args([
+                    "--only-stage", stage_name, "--from-run", str(output), "--output-root", str(replay_output),
+                    "--workers", "1", "--memory-limit", "512MB", "--ui", "plain",
+                ]))
+                if replay["status"] != "passed":
+                    self.fail(f"{stage_name}: {replay.get('error')}\n" +
+                              "\n".join(p.read_text()[-3000:] for p in (replay_output / "logs").glob("*.log")))
+                self.assertEqual([s["name"] for s in replay["stages"]], [stage_name])
+                self.assertNotIn("estimate", replay)
+                self.assertEqual(artifact_inventory(output), original_inventory)
+                self.assertEqual(before, snapshot())
+            self.assertEqual(
+                pq.read_table(root / "replay-coarse_cache/exports/cell_boundaries.parquet"),
+                pq.read_table(output / "exports/cell_boundaries.parquet"),
+            )
+            # A changed consumed input is rejected before creating replay output.
+            with (output / "pairs.parquet").open("ab") as handle:
+                handle.write(b"changed")
+            with self.assertRaisesRegex(ValueError, "changed or is missing"):
+                run(parser().parse_args(["--only-stage", "lists", "--from-run", str(output),
+                                         "--output-root", str(root / "stale-replay")]))
+            self.assertFalse((root / "stale-replay").exists())
+            with (output / "pairs.parquet").open("r+b") as handle:
+                handle.truncate(handle.seek(0, 2) - len(b"changed"))
             # The memory-aware default may select one worker. Its inline kernel
             # path must preserve exactly the same pairs as process-pool mode.
             serial = root / "serial-pairs"
@@ -262,6 +798,81 @@ class BenchmarkRunnerTests(unittest.TestCase):
             self.assertEqual(report["status"], "failed")
             self.assertNotIn("estimate", report)
             self.assertEqual(json.loads((output / "benchmark-report.json").read_text())["status"], "failed")
+
+    def test_resume_keeps_original_runtime_and_rejects_changed_measurement_environment(self):
+        with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):
+            root = Path(temporary)
+            sample, boundary = fixture(root)
+            options = ["--root", str(root), "--sample", str(sample), "--workers", "1", "--ui", "plain"]
+            for key in ("admin0", "admin1", "municipality", "eez", "conservation-framework"):
+                options += ["--" + key, str(boundary)]
+            original = {"python": "fixture-python", "dependencies": {"h3ronpy": "A"},
+                        "machine": "fixture-machine", "cpu_count": 4, "git": {"commit": "original"}}
+            calls = []
+
+            def measured(stage, *args, **kwargs):
+                calls.append(stage["name"])
+                if stage["name"] != "source_scan":
+                    raise KeyboardInterrupt
+                return {**stage, "status": "passed", "wall_seconds": 2, "log": "fixture.log"}
+
+            with patch("ark_pipeline.cli.benchmark_pipeline.shutil.which", return_value="fixture-compiler"), \
+                 patch("ark_pipeline.cli.benchmark_pipeline.run_stage", side_effect=measured), \
+                 patch("ark_pipeline.cli.benchmark_pipeline.runtime_identity", return_value=original):
+                first = run(parser().parse_args(options))
+            self.assertEqual(calls, ["source_scan", "crosswalk"])
+            compatible = {**original, "git": {"commit": "new-informational-commit"}}
+            calls.clear()
+            with patch("ark_pipeline.cli.benchmark_pipeline.shutil.which", return_value="fixture-compiler"), \
+                 patch("ark_pipeline.cli.benchmark_pipeline.run_stage", side_effect=measured), \
+                 patch("ark_pipeline.cli.benchmark_pipeline.runtime_identity", return_value=compatible):
+                resumed = run(parser().parse_args(options))
+            self.assertEqual(calls, ["crosswalk"])
+            self.assertEqual(resumed["runtime"], original)
+            self.assertEqual(resumed["attempts"][0]["runtime"], original)
+            self.assertEqual(resumed["attempts"][1]["runtime"], compatible)
+            self.assertEqual(resumed["stages"][0]["attempt_id"], first["attempts"][0]["id"])
+            checkpoint = Path(first["output"]) / "dashboard-state.json"
+            saved = checkpoint.read_bytes()
+            variants = [({**original, "dependencies": {"h3ronpy": "B"}}, "fixture-compiler"),
+                        ({**original, "python": "other-python"}, "fixture-compiler"),
+                        ({**original, "machine": "other-machine"}, "fixture-compiler"),
+                        (original, "other-compiler")]
+            for runtime, compiler in variants:
+                with self.subTest(runtime=runtime, compiler=compiler), \
+                     patch("ark_pipeline.cli.benchmark_pipeline.shutil.which", return_value=compiler), \
+                     patch("ark_pipeline.cli.benchmark_pipeline.run_stage", side_effect=measured), \
+                     patch("ark_pipeline.cli.benchmark_pipeline.runtime_identity", return_value=runtime):
+                    explicit = [*options, "--output-root", first["output"]]
+                    with self.assertRaisesRegex(ValueError, "already exists"):
+                        run(parser().parse_args(explicit))
+                    calls.clear()
+                    changed = run(parser().parse_args(options))
+                    self.assertNotEqual(changed["output"], first["output"])
+                    self.assertEqual(calls, ["source_scan", "crosswalk"])
+                    self.assertEqual(checkpoint.read_bytes(), saved)
+            # Legacy state is preserved, but cannot safely authorize old measurements.
+            legacy = json.loads(saved)
+            legacy["identity"].pop("measurement_environment")
+            atomic_json(checkpoint, legacy)
+            with patch("ark_pipeline.cli.benchmark_pipeline.shutil.which", return_value="fixture-compiler"), \
+                 patch("ark_pipeline.cli.benchmark_pipeline.runtime_identity", return_value=original):
+                with self.assertRaisesRegex(ValueError, "already exists"):
+                    run(parser().parse_args([*options, "--output-root", first["output"]]))
+
+    def test_environment_fingerprints_compiler_bytes_and_hardware(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            compiler = Path(temporary) / "fixture-compiler"
+            compiler.write_text("version A")
+            with patch("ark_pipeline.runtime.checkpoints.shutil.which", return_value=str(compiler)), \
+                 patch("ark_pipeline.runtime.checkpoints.psutil.virtual_memory", return_value=SimpleNamespace(total=1024)):
+                first = benchmark_environment({"python": "A"})
+                compiler.write_text("version B")
+                changed = benchmark_environment({"python": "A"})
+                self.assertNotEqual(first["compiler"], changed["compiler"])
+                with patch("ark_pipeline.runtime.checkpoints.psutil.virtual_memory", return_value=SimpleNamespace(total=2048)):
+                    other_hardware = benchmark_environment({"python": "A"})
+                self.assertNotEqual(changed["hardware"], other_hardware["hardware"])
 
     def test_default_command_rediscovers_interruption_and_fresh_uses_new_directory(self):
         with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):

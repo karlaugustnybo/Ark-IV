@@ -15,7 +15,7 @@ just data-benchmark --fresh               # new calibration instead of resuming 
 The default is the existing 1,000-polygon fixture at
 `data/spatial-test/benchmark-samples/iucn-polygons-stratified-1000.parquet`.
 Its source hashes must match the acquired archives. Current row exclusions are
-applied before processing; the present fixture retains 997 polygons under v3.
+applied before processing; the report records the selected and excluded counts.
 Because it was selected under v2, estimates carry a warning about newly eligible
 polygons that are absent from that sample. `--rebuild-sample` creates a new
 1,000-polygon fixture using the original deterministic size-band sampler and
@@ -36,8 +36,8 @@ The command does not download sources, load PostgreSQL, or select benchmark
 outputs for the live application.
 
 This is an end-to-end serving benchmark for a sampled **polygon pair input**,
-not a full benchmark of every spatial source route. It does not stream the 17
-point archives, normalize the 14 HydroBASINS relationship archives, cover the
+not a full benchmark of every spatial source route. It does not stream the
+point archives, normalize the HydroBASINS relationship archives, cover the
 referenced v1c basins, or execute the basin/species join. Those operations run
 in `just data-build` with resumable receipts and measured dashboard progress,
 but they currently have no full-build ETA prior. Do not add the polygon estimate
@@ -53,7 +53,7 @@ alongside the effective worker counts. Unavailable system measurements are
 labelled rather than reported as zero.
 
 The `Done` column shows a measured-work percentage for the active stage, such as
-`99.9%` alongside `996 / 997 polygons`. It is not a percentage of elapsed or
+a percentage alongside the completed and selected polygon counts. It is not a percentage of elapsed or
 remaining time. Unknown progress shows a dash; a successful stage shows a check.
 Work counts stay on one line, while per-worker operations remain in Live Activity.
 Worker counts are configured limits; `Active range jobs` reports how many
@@ -85,12 +85,9 @@ separately from subsequent compiler zoom/index passes. A Live left value ending
 in `+ ?` estimates the streaming phase while later compilation remains
 unestimated. It does not become a full-run ETA. Streaming progress resets only
 when entering a new explicit phase, not when compiler or worker messages arrive.
-A small polygon sample can still cover most of the world's fine cells: the
-2026-09-02 `22-30-48Z-2ae48975` run produced 90,033,236 resolution-7 cells from
-997 polygons. Its interrupted tile stage had streamed about 1.05 million of
-90.07 million coarse/fine features after 260 seconds; the logs do not separate
-feature generation from compiler backpressure, so they do not establish which
-of those was the bottleneck.
+A small polygon sample can still cover many fine cells, so row count alone does
+not bound the time or disk space for aggregation and static tile compilation.
+Stage logs do not separate feature generation from compiler backpressure.
 
 Progress events report actual downloaded/hashed bytes, archive batches, polygon
 grid batches, individual polygon completions, pair writes, list batches, metric
@@ -113,8 +110,32 @@ completed stages, active time, observations, estimates and event-reader position
 state without counting time spent paused. A lock prevents two processes from
 resuming the same run simultaneously. Changes to sources, profile, code, sample,
 boundary inputs or resource settings prevent incompatible state reuse.
+Benchmark compatibility also includes Python/dependency versions, platform,
+CPU model/count and physical memory, compiler executable path/content, dependency
+lockfiles and source-affecting configuration. This is a conservative environment
+fingerprint, not a guarantee that load, thermal state or OS caches are identical.
+A changed environment starts a new automatically discovered run; an explicit
+existing directory is rejected. Legacy benchmark identities lacking environment
+provenance are preserved but cannot be migrated safely: choose fresh output.
+Schema-1 dashboard checkpoints with an exactly matching identity remain supported.
+The selected reviewed ecosystem evidence file is pinned by canonical path,
+presence and SHA-256, including an outside-config
+`GLOBAL_IUCN_REVIEWED_EVIDENCE_PATH` override. An unchanged input permits resume;
+changing, removing, adding or switching that input prevents reuse. This guard is
+conservative on standalone plans that predate metadata reconciliation. It does
+not add reconciliation to those plans. Runs without this recorded identity must
+use fresh output; saved reports and receipts are never migrated in place.
+A successful subprocess becomes a completed stage only after post-stage checks
+and artifact inventory succeed. A rejection retains its exit code and timing,
+but marks the stage failed in the report and dashboard. After restoring the
+original input, a compatible resume reruns that stage before accepting its outputs.
+On cancellation, the runner sends SIGTERM to its owned stage process group,
+allows a bounded grace period and kills any remaining group members even if the
+leader has exited. The direct process is reaped before interruption is reported.
 
-On resume, completed benchmark stages retain their original measurements and
+On resume, the original run runtime stays attached to its measurements. Each
+invocation adds an attempt ID and runtime record; new stages name that attempt.
+Completed benchmark stages retain their original measurements and
 their output inventory is checked before continuing. Downstream stages retain
 their normal receipt/checksum validation. The interrupted stage retries; an
 unfinished polygon archive or sample pair stage may need recalculation, while
@@ -186,27 +207,15 @@ Tippecanoe threads. Metric threads per worker and the tile query helper default
 to one; explicit stage overrides remain available. `--memory-limit` controls
 DuckDB memory per process, not total memory or native geometry allocations.
 
-## Census optimization measurement
+The default `dynamic-h3-v1` tile projection uses resolution-3 feature counts,
+including the global H3 coarse-cell cap; fine-cell counts do not scale coarse
+compilation time. Legacy static archive estimates use coarse plus fine features.
+Saved estimates record their serving contract. Full-build forecasts omit tile
+priors without a compatible estimate contract, including older dynamic-tagged
+reports that used the static workload model. These remain planning calculations,
+not measured global runtimes.
 
-On 2026-09-03, the previous WKB/Shapely census and the native envelope census
-were compared on three complete acquired 2026-1 archives on the local ARM64 Mac
-(macOS 26.6.2), reading from the T7. Both paths included fresh SHA-256 verification
-and archive inspection. All 12,250 rows, every size-bin count and every exclusion
-count matched under the current v3 profile.
-
-| Archive | Rows | Previous | Native envelopes | Speedup |
-| --- | ---: | ---: | ---: | ---: |
-| Amphibians | 10,614 | 16.48 s | 13.38 s | 1.23× |
-| Sharks, rays and chimaeras | 1,338 | 24.62 s | 3.56 s | 6.92× |
-| Croakers and drums | 298 | 2.02 s | 1.36 s | 1.48× |
-| Combined | 12,250 | 43.12 s | 18.30 s | 2.36× |
-
-These are single sequential runs, with the previous path first and no OS cache
-flush; they are not a full-global speedup claim. Versions were GDAL 3.11.4,
-Pyogrio 0.12.1 and Shapely 2.1.2. A bounds-only control with ordinary topology
-classification still took 23.23 s on sharks/rays, versus 24.10 s for the geometry
-reader (excluding verification), identifying ring organization as the principal
-avoidable work for that archive.
+## Census implementation and verification
 
 The implementation uses [Pyogrio's native bounds reader](https://pyogrio.readthedocs.io/en/latest/api.html#pyogrio.read_bounds)
 with GDAL's documented [ring-organization setting](https://gdal.org/en/stable/user/configoptions.html#config-OGR_ORGANIZE_POLYGONS).
@@ -214,3 +223,91 @@ Skipping classification preserves the envelope of all ring coordinates, but is
 not suitable for computing polygon area or cell coverage. The setting is scoped
 to the dedicated census process and must not be used concurrently with other
 GDAL work in threads. No additional Rust extension or build toolchain is required.
+
+## Pair scheduling and exact transport
+
+Pair work streams across Arrow batches through a bounded queue, with larger WKB
+payloads submitted first within each batch. `--reverse-bands` reverses the saved
+sample's row-group/row order before that local scheduling; for the standard
+size-band-sorted fixture this visits large bands first. It changes order only,
+not sample selection or coverage policy. With a custom unsorted sample it does
+not sort all rows into size bands.
+
+Prepared tile predicates classify empty, complete and boundary-crossing tiles in
+the producer. A ring-section index avoids repeated scans of polygons with many
+holes. Complex overlaps are subdivided along closed windows before native fill,
+then deduplicated. Complete tiles use a bounded build-local cache keyed by grid
+position, tile size and resolution; worker initialization clears local cache
+state and optionally shares compact tile entries through the build's manager.
+The cache stores only H3 IDs and does not persist between builds.
+
+Large resolution-7 results use lossless H3 index compaction for process transport.
+The parent expands and sorts the fine cells before pair writing. Parquet uses
+delta encoding for H3 IDs and dictionary encoding for species IDs; the read
+schema and relationship values stay unchanged. Neither mechanism is polygon
+simplification. Quoted CSV fields may contain newlines without splitting a
+relationship into multiple records.
+
+Synthetic checks compare subdivision/classification against an unsplit native
+fill, verify holes/seams/polar tiles, and round-trip compact transport and delta
+pair encoding. These establish output equivalence for those fixtures, not global
+performance or geometric correctness for every provider range. A performance
+comparison must first compare sorted `(h3_index, iucn_sis_id)` outputs, then record
+hardware, dependency versions, resolution/profile, worker settings, fixture,
+input/output storage, and cold/warm cache conditions. Fresh output directories
+do not flush OS caches. Historical source-derived timings and reports remain local.
+
+## Replay one stage
+
+```bash
+just data-benchmark --only-stage pairs --from-run /path/to/previous/run --workers 4
+just data-benchmark --only-stage lists --from-run /path/to/previous/run --dry-run
+```
+
+Both options are required. A replay requires completed prerequisite stages and
+inherits the prior source, profile, sample selection and boundary paths. Worker
+and memory limits are those of the new invocation. Outputs and scratch go to a
+new, separate directory under `ROOT/benchmarks/stages/`, or an explicit
+`--output-root`; the old run is read in place. Consumed saved artifacts are checked
+against their recorded inventory before and after execution; production readers
+retain their receipt/checksum checks. Consumed directories must retain every
+recorded member and contain no added files; unrelated outputs are ignored.
+The profile and pair sample/metadata identities are rechecked before success is
+reported. A persistent input change during execution leaves a failed replay
+report and isolated outputs, preserving the previous run.
+Replay also requires the selected reviewed evidence identity to match the saved
+run and rechecks it before and after execution. Its selected path is passed to
+subprocesses explicitly. Prepared-input replay rebinds a crosswalk when the
+recorder command consumes one, retaining older plans without that argument.
+External boundary hashes must match the
+original run. Changed or unrecorded inputs are rejected before output creation.
+Tile replay has a 20-minute cutoff, using the same owned-group cleanup as cancellation.
+
+The report is marked `scope: stage-replay`, records the old stage time and
+resource/runtime context alongside the new measurement, and does not extrapolate
+a full build or qualify as an ETA prior. Different worker settings, environments,
+input cache state or kernel changes prevent interpreting the two times as a
+controlled speedup. Replay itself does not establish equivalent output; compare
+the generated artifacts before making a performance claim.
+
+## Replaying coarse exports
+
+To compare export implementations without repeating spatial coverage, use
+`scripts.benchmark_coarse_exports` with a previous benchmark's `config.json`,
+`build.duckdb` and boundary inputs:
+
+```sh
+uv run --frozen python -m scripts.benchmark_coarse_exports \
+  --benchmark-root /path/to/previous/benchmark \
+  --output-root /path/to/new/export-replay
+```
+
+The database opens read-only and the output directory must be new. The replay
+uses one DuckDB thread and the same boundary-index instances across cell-boundary
+Parquet, coarse Arrow, map metadata and GeoJSON feature exports. Input/output
+hashes, wall/CPU times and process peak RSS are recorded. Compare every output
+hash and input identity before timing; use `--profile` only in separate matched
+cProfile trials. Initial input hashing, aggregation, fine exports and Tippecanoe
+compilation are outside the measured phases. Fresh processes do not clear OS
+caches. See [the replay method](../performance/coarse_export_performance.md).
+Generated reports and exports remain private under the data policy.

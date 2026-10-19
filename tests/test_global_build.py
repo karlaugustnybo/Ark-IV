@@ -28,7 +28,6 @@ from ark_pipeline.builders.coarse_cache import (
 )
 from ark_pipeline.builders.fine_metrics import (
     BuildDisplay,
-    _build_parts_parallel,
     aggregate_part,
     build_parts,
     completed_parts,
@@ -253,6 +252,26 @@ class GlobalSpeciesDimensionTests(unittest.TestCase):
                 systems, [("Freshwater",), ("Marine",), ("Terrestrial",)]
             )
             self.assertEqual(legacy_category, "Least Concern")
+            import zipfile
+
+            from ark_pipeline.runtime.provenance import sha256
+            source = root / 'points.zip'
+            with zipfile.ZipFile(source, 'w') as archive:
+                archive.writestr('points.csv', 'id_no,sci_name,family,category,marine,terrestria,freshwater\n999,Recovered species,FAMILY,EN,0,1,0\n')
+            (root / 'acquisition').mkdir()
+            (root / 'acquisition/current.json').write_text(json.dumps({'sources': {
+                'iucn-spatial-tables': {'validation_status': 'passed', 'files': [dict(path=source.name, logical_name=source.name,
+                    bytes=source.stat().st_size, sha256=sha256(source))]}
+            }}))
+            recovered = build_global_species(crosswalk_path=crosswalk, assessments_path=assessments,
+                goat_species_path=goat, h3_paths=[h3_path], output_dir=output,
+                spatial_source_root=root)
+            with duckdb.connect() as con:
+                row = con.execute("SELECT species_name, metadata_status, spatial_redlist_category, redlist_category, has_dna_species_level FROM read_parquet(?) WHERE gbif_accepted_id='999'", [str(output/'species.parquet')]).fetchone()
+                self.assertEqual(row, ('Recovered species', 'spatial_only', 'EN', 'Not Assessed', False))
+                self.assertEqual(con.execute("SELECT system FROM read_parquet(?) WHERE gbif_accepted_id='999'", [str(output/'species_systems.parquet')]).fetchall(), [('Terrestrial',)])
+            self.assertEqual(recovered['spatial_metadata_recovered'], 1)
+
 
     def test_dna_status_rules_are_shared_by_species_and_lineages(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -765,20 +784,13 @@ class Resolution7PreviewTests(unittest.TestCase):
 
             display.partition_progress = record_progress
             display.begin_aggregation(2)
-            _build_parts_parallel(
-                SimpleNamespace(
-                    workers=2,
-                    species=species,
-                    species_systems=systems,
-                    scratch_dir=root / "scratch",
-                    memory_limit="512MB",
-                    threads=1,
-                    output_dir=output_dir,
-                ),
-                sources,
-                pending,
-                display,
-            )
+            with patch("ark_pipeline.builders.fine_metrics.BuildDisplay", return_value=display):
+                build_parts(SimpleNamespace(
+                    workers=2, species=species, species_systems=systems,
+                    scratch_dir=root / "scratch", memory_limit="512MB", threads=1,
+                    output_dir=output_dir, parts_dir=root, base_cell=None, limit=None,
+                    overwrite=False, no_progress=True,
+                ))
 
             self.assertEqual(display.completed, 2)
             self.assertEqual(

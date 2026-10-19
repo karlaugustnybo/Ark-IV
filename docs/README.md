@@ -17,7 +17,10 @@ stage-based CLI names and artifact-based builders.
 5. [Spatial row policy](pipeline/05_spatial_row_policy.md)
 6. [IUCN–GoaT crosswalk](pipeline/06_iucn_goat_global_crosswalk.md)
 7. [Global serving pipeline](pipeline/07_global_serving_pipeline.md)
-8. [End-to-end benchmark](pipeline/08_pipeline_benchmark.md)
+8. [Coverage profiles and serving bundles](pipeline/coverage_profiles.md)
+9. [End-to-end benchmark](pipeline/08_pipeline_benchmark.md)
+
+- [Map and table interaction](frontend.md)
 
 ## Reference
 
@@ -32,6 +35,7 @@ stage-based CLI names and artifact-based builders.
 
 - [Map rendering retrospective](performance/map-performance-retrospective.md)
 - [Species search](performance/species_search_benchmark.md)
+- [Exact H3 cover/tree pilot and research limits](performance/h3_tree.md)
 - [Pair aggregation](performance/pair_aggregation_performance.md)
 - [Serving metrics](performance/serving_metrics_performance.md)
 - [Tile export](performance/tile_export_performance.md)
@@ -40,3 +44,22 @@ stage-based CLI names and artifact-based builders.
 Historical profiling harnesses and raw reports mentioned in these documents are
 kept under local-only `archive/research/`, not in the GitHub code release. Current
 validation lives in `tests/`; use `just data-benchmark` for new end-to-end timings.
+
+Optional research: [dated-tree, EDGE and phylogenetic gaps](pipeline/09_edge_prototype.md).
+
+## Exploratory notebooks
+
+[Serving export investigations](../notebooks/README.md) cover data completeness,
+coarse mapped range and DNA representation, and score-surface sensitivity.
+Use invented fixtures for code verification; real derived outputs remain local.
+
+## Research plans and evaluation
+
+These documents propose investigations; they are not implementation specifications
+or evidence of a validated global dataset. Optional unmerged work is identified in
+the roadmap and serving guide.
+
+- [Mentor-facing roadmap](roadmap-mini.md)
+- [GBIF–IUCN concordance proposal](GBIF%E2%80%93IUCN%20Concordance%20Extension%20Idea.md)
+- [Remaining performance hypotheses](performance/next_large_gains.md)
+- [Optimization evaluation method](performance/pipeline_optimization.md)

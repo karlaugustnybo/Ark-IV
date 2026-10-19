@@ -1,6 +1,6 @@
 # Ark-IV
 
-[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
+[![License: CC0 1.0](https://img.shields.io/badge/License-CC0_1.0-lightgrey.svg)](LICENSE)
 
 Ark-IV is an interactive conservation-priority map that combines extinction
 risk, DNA-sequencing evidence, evolutionary distinctiveness, and global species
@@ -77,9 +77,10 @@ without metadata. `just data-prepare` continues through aggregation,
 metadata, the coarse map, and fine metrics using the selected spatial profile.
 It requires a current crosswalk; add `--crosswalk-mode refresh` to select the
 automatic crosswalk workflow. `just data-prepare --dry-run` shows its plan.
-Use `just data-prepare --tiles` to finish with a static PMTiles archive, or
-`just data-tiles` to resume only the export. The archive and map metadata are
-published together under `GLOBAL_PREVIEW_ROOT/tiles/current/`.
+Use `just data-prepare --tiles` to finish with coarse PMTiles and dynamic fine
+serving, or `just data-tiles` to resume only serving preparation. The archive,
+metadata, fine partitions, boundaries and available SQL exports are published
+as a bundle under `GLOBAL_PREVIEW_ROOT/tiles/current/`.
 Global ADM2 boundaries (49,308 areas across 180 available countries) are installed
 with `just data-boundaries`, also run during global map preparation. Country-sized
 catalogues keep the worldwide geometry out of browser downloads.
@@ -98,8 +99,8 @@ handoff. `just download` and `just update` remain available for acquisition only
   exact, prefix, substring, and typo-tolerant matches.
 - Map colour domains support species-count normalization and selected
   jurisdiction scopes.
-- CI runs Python lint/tests, Svelte checks, frontend tests, the production build,
-  and a release-content guard.
+- CI runs Python lint/tests, type-aware Oxlint, Oxfmt formatting, Svelte checks,
+  frontend tests, the production build, and a release-content guard.
 
 Remaining product and research work is tracked in [the roadmap](docs/roadmap.md).
 
@@ -140,9 +141,13 @@ just install
 just check
 ```
 
-`just check` runs Ruff, Python unit tests, Svelte/type checking, frontend
+`just check` runs Ruff, type-aware Oxlint (including the GoaT JavaScript helper),
+Oxfmt formatting checks, Python unit tests, Svelte/type checking, frontend
 unit tests, a production build, and the prospective-commit release guard. It
 does not require a running PostgreSQL server or the global external-data disk.
+Use `just frontend-format` to format frontend sources and the GoaT helper.
+Generated API types, build output, dependencies, and the Bun lockfile are excluded
+from formatting. The frontend build uses Vite 8 with Oxc minification.
 
 ## Configure authorized local data
 
@@ -187,17 +192,21 @@ crosswalk as described in the [pipeline guide](docs/pipeline/01_data_pipeline.md
 
 ```bash
 just global-prepare
+just data-tiles
 just global-db-configure
 just global-db-load
 ```
 
 The resolution-7 aggregation is resumable and publishes only complete,
-schema-validated partitions. Its native batch reducer was
-[3.23× faster on a 3-million-relationship sample](docs/performance/serving_metrics_performance.md),
-with identical metric output. `RES7_WORKERS=1` and a smaller
+schema-validated partitions. Synthetic regression tests compare all 164 native
+metrics with their canonical SQL expressions; see the
+[reduction and validation details](docs/performance/serving_metrics_performance.md).
+End-to-end performance remains unbenchmarked. `RES7_WORKERS=1` and a smaller
 `DUCKDB_MEMORY_LIMIT` provide a bounded mode for memory-constrained machines.
-The optional `just global-res7-tiles` creates a much larger static snapshot;
-normal serving does not require it.
+Use `just data-tiles --static-fine` for an optional full fine PMTiles snapshot
+under `GLOBAL_PREVIEW_ROOT/tiles/static/current/`; the dynamic `tiles/current/`
+bundle remains selected for startup and SQL loading.
+Normal serving uses on-demand fine tiles.
 
 ## Run locally
 
@@ -207,6 +216,12 @@ partitions are present:
 ```bash
 just start
 ```
+
+`just start` selects the published serving bundle, or a compatible legacy preview.
+`GLOBAL_SERVING_CONFIG` selects an explicit validated bundle; `global-db-load`
+loads its recorded SQL exports. [Coverage profiles](docs/pipeline/coverage_profiles.md)
+describes separate resident/passage registration, the optional species-range
+supplement, unavailable fine evidence and archive revalidation.
 
 The launcher checks the required paths, starts Granian and Vite, and chooses
 free API/frontend ports when the configured ones are occupied. It prints the
@@ -266,12 +281,26 @@ retrospective.
 
 ## Licensing
 
-Ark-IV's application code is licensed under the GNU Affero General Public
-License v3.0 only (`AGPL-3.0-only`); see [LICENSE](LICENSE). Operators that
-modify the application and make it available over a network must offer users
-the corresponding source for that running version under the AGPL.
+Ark-IV's application code is dedicated to the public domain under the CC0 1.0
+Universal Public Domain Dedication (`CC0-1.0`); see [LICENSE](LICENSE). You may
+copy, modify, distribute, and use the code for any purpose, without asking
+permission.
 
 The code licence does **not** apply to source datasets or generated data
 artifacts. Those retain their own terms and required credits; see `NOTICE.md`
-and `DATA_POLICY.md`. In particular, AGPL does not grant permission to publish
+and `DATA_POLICY.md`. In particular, CC0 does not grant permission to publish
 IUCN, EDGE, or other restricted data alongside the application.
+
+## Optional phylogenetic research
+
+The [dated-tree research guide](docs/pipeline/09_edge_prototype.md) documents optional
+EDGE-style scoring, audited tree identities, reference benchmarks and sequencing gaps.
+Install with `uv sync --group edge`; outputs stay local and do not alter map priorities.
+
+## Local exploratory notebooks
+
+The three [serving investigations](notebooks/README.md) describe export coverage,
+range–representation associations and alternative score surfaces. They are
+independent of production scoring and use their own PEP 723 environments.
+`just nb-graph-check` is data-free. Execution and HTML export are explicit opt-in
+recipes; ordinary `just check` does not read global notebook snapshots.

@@ -3,7 +3,12 @@
 from __future__ import annotations
 
 import json
+import platform
+import shutil
+import subprocess
 from pathlib import Path
+
+import psutil
 
 from ark_pipeline.runtime.provenance import code_fingerprint, sha256
 
@@ -12,7 +17,36 @@ def pipeline_code(repository: Path):
     return code_fingerprint([
         *sorted((repository / "ark_pipeline").rglob("*.py")),
         repository / "justfile",
+        *sorted((repository / "config").glob("*.json")),
+        *sorted((repository / "config").glob("*.toml")),
+        repository / "pyproject.toml",
+        repository / "uv.lock",
     ])
+
+
+def benchmark_environment(runtime: dict):
+    """Stable measurement compatibility, separate from informational Git state.
+
+    Legacy benchmark identities without this versioned field are deliberately
+    not migrated: their original environment cannot be established reliably.
+    Schema-1 dashboard state remains readable for an exactly matching identity.
+    """
+    processor = platform.processor()
+    if platform.system() == "Darwin":
+        try:
+            processor = subprocess.run(["sysctl", "-n", "machdep.cpu.brand_string"],
+                check=True, capture_output=True, text=True, timeout=5).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            pass
+    elif Path("/proc/cpuinfo").is_file():
+        processor = next((line.split(":", 1)[1].strip() for line in
+                          Path("/proc/cpuinfo").read_text().splitlines()
+                          if line.startswith("model name")), processor)
+    compiler = shutil.which("tippecanoe")
+    tool = {"path": compiler, "sha256": sha256(Path(compiler)) if compiler and Path(compiler).is_file() else None}
+    return {"schema_version": 1, "runtime": {key: value for key, value in runtime.items() if key != "git"},
+            "hardware": {"processor": processor, "physical_cpus": psutil.cpu_count(logical=False),
+                         "memory_bytes": psutil.virtual_memory().total}, "compiler": tool}
 
 
 def source_identity(root: Path):

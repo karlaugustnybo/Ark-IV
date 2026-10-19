@@ -5,24 +5,28 @@ from __future__ import annotations
 import json
 from functools import lru_cache
 from pathlib import Path
+from threading import Lock
 
 import h3
+import shapely
 from shapely.affinity import translate
 from shapely.geometry import Point, Polygon, box, shape
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import unary_union
 from shapely.strtree import STRtree
 
+COARSE_MEMBERSHIP_CACHE_SIZE = h3.get_num_cells(3)
 
-def cell_geometry(h3_index: str) -> BaseGeometry:
-    """Return an antimeridian-safe polygon for one H3 cell."""
-    coordinates = [
-        [longitude, latitude]
-        for latitude, longitude in h3.cell_to_boundary(h3_index)
-    ]
+
+def h3_ring_polygon(coordinates: list[list[float]]) -> Polygon:
+    """Represent a spherical H3 ring in a continuous longitude copy.
+
+    A ring winding around a pole closes through that pole in the plane. This
+    contract is for H3 boundaries, not arbitrary provider polygon rings.
+    """
     if not coordinates:
         return Polygon()
-    unwrapped = [coordinates[0]]
+    unwrapped = [coordinates[0][:]]
     for longitude, latitude in coordinates[1:]:
         previous = unwrapped[-1][0]
         while longitude - previous > 180:
@@ -30,21 +34,39 @@ def cell_geometry(h3_index: str) -> BaseGeometry:
         while longitude - previous < -180:
             longitude += 360
         unwrapped.append([longitude, latitude])
-    polygon = Polygon(unwrapped)
+    closing_longitude = unwrapped[0][0]
+    while closing_longitude - unwrapped[-1][0] > 180:
+        closing_longitude -= 360
+    while closing_longitude - unwrapped[-1][0] < -180:
+        closing_longitude += 360
+    if abs(closing_longitude - unwrapped[0][0]) > 180:
+        pole = 90 if sum(point[1] for point in unwrapped) > 0 else -90
+        unwrapped.extend([[closing_longitude, unwrapped[0][1]],
+                          [closing_longitude, pole], [unwrapped[0][0], pole]])
+    return Polygon(unwrapped)
+
+
+def canonical_h3_geometry(polygon: Polygon) -> BaseGeometry:
+    """Split a continuous H3 polygon into the conventional longitude world."""
+    if polygon.is_empty:
+        return polygon
     minimum, _, maximum, _ = polygon.bounds
     if maximum > 180:
         west = polygon.intersection(box(-180, -90, 180, 90))
-        east = translate(
-            polygon.intersection(box(180, -90, 540, 90)), xoff=-360
-        )
+        east = translate(polygon.intersection(box(180, -90, 540, 90)), xoff=-360)
         return unary_union([part for part in (west, east) if not part.is_empty])
     if minimum < -180:
         east = polygon.intersection(box(-180, -90, 180, 90))
-        west = translate(
-            polygon.intersection(box(-540, -90, -180, 90)), xoff=360
-        )
+        west = translate(polygon.intersection(box(-540, -90, -180, 90)), xoff=360)
         return unary_union([part for part in (east, west) if not part.is_empty])
     return polygon
+
+
+def cell_geometry(h3_index: str) -> BaseGeometry:
+    """Return a valid, pole-aware, antimeridian-safe H3 cell polygon."""
+    return canonical_h3_geometry(h3_ring_polygon([
+        [longitude, latitude] for latitude, longitude in h3.cell_to_boundary(h3_index)
+    ]))
 
 
 class JurisdictionIndex:
@@ -62,12 +84,21 @@ class JurisdictionIndex:
         }
         self._geometries = [shape(feature["geometry"]) for feature in features]
         self._tree = STRtree(self._geometries)
+        # Each boundary is tested against many cells across several exports.
+        # GEOS can reuse its segment index without changing intersection semantics.
+        shapely.prepare(self._geometries)
+        # GEOS prepared predicates mutate internal segment-intersection state.
+        # The cached catalogue is shared by concurrent dynamic tile requests;
+        # serialize its predicates to prevent native crashes (GEOS issue #825).
+        self._predicate_lock = Lock()
+        self._coarse_codes: dict[str, tuple[str, ...]] = {}
 
     def code_for_point(self, latitude: float, longitude: float) -> str:
         point = Point(longitude, latitude)
-        for index in self._tree.query(point):
-            if self._geometries[index].covers(point):
-                return self.codes[index]
+        with self._predicate_lock:
+            for index in self._tree.query(point):
+                if self._geometries[index].covers(point):
+                    return self.codes[index]
         return ""
 
     def code_for_cell(self, h3_index: str) -> str:
@@ -76,13 +107,27 @@ class JurisdictionIndex:
 
     def codes_for_cell(self, h3_index: str) -> tuple[str, ...]:
         """Return every boundary touched by the H3 cell polygon."""
+        with self._predicate_lock:
+            return self._codes_for_cell(h3_index)
+
+    def _codes_for_cell(self, h3_index: str) -> tuple[str, ...]:
+        coarse = h3.get_resolution(h3_index) == 3
+        if coarse:
+            cached = self._coarse_codes.get(h3_index)
+            if cached is not None:
+                return cached
         cell = cell_geometry(h3_index)
         indexes = sorted(int(index) for index in self._tree.query(cell))
-        return tuple(
+        codes = tuple(
             self.codes[index]
             for index in indexes
             if self._geometries[index].intersects(cell)
         )
+        # Only the small coarse grid is reused across exports. Never retain the
+        # millions of fine-cell lookups, and keep caches local to each catalogue.
+        if coarse and len(self._coarse_codes) < COARSE_MEMBERSHIP_CACHE_SIZE:
+            self._coarse_codes[h3_index] = codes
+        return codes
 
 
 @lru_cache(maxsize=8)

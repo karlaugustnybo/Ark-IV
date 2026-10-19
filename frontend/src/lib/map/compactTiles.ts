@@ -1,5 +1,15 @@
 export const compactMetricNames = [
-  'total', 'cr', 'en', 'vu', 'nt', 'dd', 'lc', 'ms', 'mg', 'mf', 'gdd',
+  'total',
+  'cr',
+  'en',
+  'vu',
+  'nt',
+  'dd',
+  'lc',
+  'ms',
+  'mg',
+  'mf',
+  'gdd',
   ...(['cr', 'en', 'vu', 'nt', 'dd', 'lc'] as const).flatMap((threat) =>
     (['gdd', 'fam', 'gen', 'sp', 'samp'] as const).map((dna) => `${threat}_${dna}`)
   )

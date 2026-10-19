@@ -20,8 +20,8 @@ repository history audit was run against the result.
 The databases were generated serving artifacts, not source code. They contained
 records and derived values backed by IUCN Red List and EDGE of Existence inputs.
 The project had not established permission to redistribute those source-backed
-records in a public database, and Ark-IV's `AGPL-3.0-only` software licence
-cannot grant rights in third-party data.
+records in a public database, and Ark-IV's `CC0-1.0` dedication cannot grant
+rights in third-party data.
 
 In particular, IUCN restricts redistribution of its raw, tabular, and spatial
 data without permission, while EDGE content is copyrighted by the Zoological

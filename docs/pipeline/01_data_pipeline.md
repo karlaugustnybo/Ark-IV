@@ -136,7 +136,7 @@ To resume after pair generation without repeating source acquisition:
 ```bash
 just data-prepare --crosswalk-mode refresh --dry-run  # inspect the paths and commands
 just data-prepare --crosswalk-mode refresh          # automatic matches, lists, metadata and metrics
-just data-prepare --crosswalk-mode refresh --tiles  # continue through the full PMTiles archive
+just data-prepare --crosswalk-mode refresh --tiles  # coarse PMTiles and dynamic fine serving
 ```
 
 The full `data-build` and `data-update` commands already include these steps.
@@ -159,11 +159,19 @@ metric workers multiply that limit.
 
 Successful preparation also writes `GLOBAL_PREVIEW_ROOT/prepared-inputs.json`,
 binding coarse and fine products to the verified source generation. Use
-`just data-tiles` to build or reuse the full static archive from that record.
-`just global-res7-tiles` is an alias. The final archive and metadata are published
-together under `GLOBAL_PREVIEW_ROOT/tiles/current/`. The default uses a single
-streamed compilation; `just data-tiles --checkpoint-shards` adds resumable
-per-base-cell tiles at the cost of a merge pass and extra disk space. See the
+`just data-tiles` to build or reuse the default coarse PMTiles and dynamic fine
+serving bundle from that record. `just global-res7-tiles` is an alias. The coarse
+archive, metadata, pinned fine partitions and `serving.json` are published together
+under `GLOBAL_PREVIEW_ROOT/tiles/current/`.
+
+For an optional full static coarse/fine archive, use `just data-tiles --static-fine`.
+It publishes separately under `GLOBAL_PREVIEW_ROOT/tiles/static/current/`, preserving
+the dynamic bundle. The static export caches separately compiled coarse and fine
+resolution groups, then joins them. `just data-tiles --static-fine --checkpoint-shards`
+adds finer per-base-cell checkpoint reuse at the cost of extra disk space; both
+static modes require the final join. `--checkpoint-shards` alone does not select
+static export. The static bundle does not supply the dynamic `serving.json`
+required for managed startup and SQL loading. See the
 [tile profiling and publication guide](../performance/tile_export_performance.md).
 
 The spatial workflow now exports the format consumed by the existing serving
@@ -249,8 +257,8 @@ release hardware; synthetic integration tests do not establish global throughput
 | `just spatial` | Build/resume pairs, then run direct aggregation. |
 | `just data-prepare` | Aggregate pairs, then prepare metadata, coarse map and fine metrics. |
 | `just global-prepare` | Both coarse and fine serving products. |
-| `just data-prepare --tiles` | Complete post-pair pipeline through the static PMTiles archive. |
-| `just data-tiles` | Build/reuse PMTiles from the recorded preparation. |
+| `just data-prepare --tiles` | Complete post-pair pipeline through coarse PMTiles and dynamic fine serving. |
+| `just data-tiles` | Build/reuse coarse PMTiles and dynamic fine serving; `--static-fine` selects the separate full static archive. |
 | `just data-boundaries` | Acquire/install global ADM2 geometry and country catalogues. |
 | `just global-res7-tiles` | Alias for `data-tiles`. |
 
@@ -336,3 +344,43 @@ Module paths changed during repository cleanup; the `just` command names remain
 stable. Code fingerprints deliberately invalidate old checkpoints and receipts
 when affected code changes. Preserve the old outputs, and let normal validation
 decide what can be reused; do not modify receipts to bypass these checks.
+
+### Exact-ID metadata reconciliation
+
+`serving_metadata` recovers source-scoped spatial labels and affirmative realm
+attributes, then runs the shared exact-ID reconciliation stage before downstream
+serving builds. `serving_prepare` forwards `--iucn-metadata-mode` (`auto` by
+default), `--iucn-details-dir`, and `--reviewed-evidence-path` through their
+`GLOBAL_IUCN_METADATA_MODE`, `GLOBAL_IUCN_DETAILS_DIR`, and
+`GLOBAL_IUCN_REVIEWED_EVIDENCE_PATH` environment equivalents.
+
+`auto` reuses a complete matching-release cache or acquires missing queued IDs
+with the configured IUCN token. `cache-only` requires coverage and makes no API
+requests. `off` explicitly leaves metadata unresolved. Conflicting registered
+spatial releases or stale cache endpoint/release identities fail. Raw retrieval
+and reviewed ecosystem evidence remain private. Reviewed evidence defaults to
+`config/iucn_reviewed_ecosystem_evidence.json` when available; an absent file
+leaves ecosystem gaps unresolved. Selected evidence identity participates in
+preparation checkpoint compatibility and is pinned during reconciliation.
+
+For offline repair, run `uv run python -m
+ark_pipeline.cli.reconcile_species_metadata --input-dir <dimension>
+--details-dir <completed-intake> --output-dir <separate-dimension>`; optional
+`--expected-release` and `--reviewed-evidence-path` constrain the evidence.
+This does not rebuild spatial membership, scores, tiles or databases. Publication
+replaces species, systems and report with backups and rollback on replacement
+failure. Serving refreshes, direct species builds and standalone repairs finish
+both Parquet files and the report in isolation before selecting the dimension.
+Failed intake, reconciliation, report serialization or publication retains the
+previous three files. Collected detail hashes and selected reviewed-evidence
+identity (including absence) are rechecked throughout publication. Managed
+reconciliation and serving also pin acquisition registration, including absence,
+before reading source releases and recheck it before final report serialization
+and before/after every selected replacement. Direct source-backed builds retain
+the same registration guard through their final selection. Three file
+renames do not provide an atomic snapshot for concurrent readers; coordinate
+readers with the metadata writer. Legacy packs without acquisition registration
+retain placeholders when optional spatial recovery is unavailable; present
+registrations require an explicit `validation_status: passed`; matching file
+checksums alone do not establish validation. Species IDs, pinned categories,
+sequencing traits and existing realms are checked before publication.

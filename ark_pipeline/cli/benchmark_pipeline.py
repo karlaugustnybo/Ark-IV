@@ -24,13 +24,12 @@ from ark_pipeline.cli.boundaries_prepare import build as build_adm2
 from ark_pipeline.cli.serving_tiles import BOUNDARIES
 from ark_pipeline.cli.spatial_pairs import (
     DEFAULT_PROFILE,
-    PAIR_SCHEMA,
     REPOSITORY_ROOT,
     GeometryWorkerFailure,
     _flush_pair_chunks,
     _initialize_worker,
-    _polyfill_wkb,
-    _process_bounded,
+    _pair_writer,
+    _process_tagged_bounded,
     _write_large_coverage,
     default_duckdb_memory_limit,
     exclusion_reason_values,
@@ -41,6 +40,7 @@ from ark_pipeline.cli.spatial_pairs import (
 from ark_pipeline.runtime.benchmark_estimates import estimate, markdown_report
 from ark_pipeline.runtime.checkpoints import (
     artifact_inventory,
+    benchmark_environment,
     find_checkpoint,
     pipeline_code,
     read_checkpoint,
@@ -60,6 +60,27 @@ RESOURCE_FLAGS = ("workers", "spatial_workers", "metric_workers", "duckdb_thread
 BOUNDARY_ENV = dict(zip(BOUNDARIES, ("JURISDICTIONS_PATH", "ADMIN1_BOUNDARIES_PATH", "MUNICIPALITY_BOUNDARIES_PATH", "EEZ_BOUNDARIES_PATH", "CONSERVATION_BOUNDARIES_PATH")))
 
 
+def reviewed_evidence_identity(path: Path | None = None) -> dict:
+    """Match metadata's selected override/default, including an absent input.
+
+    Keep this guard usable on standalone plans predating reconciliation. It
+    conservatively pins the input without importing that optional consumer.
+    """
+    configured = os.environ.get("GLOBAL_IUCN_REVIEWED_EVIDENCE_PATH")
+    selected = path if path is not None else (Path(configured) if configured is not None
+        else REPOSITORY_ROOT / "config/iucn_reviewed_ecosystem_evidence.json")
+    selected = selected.expanduser()
+    # Stage subprocesses run from the repository, even when the caller does not.
+    selected = (REPOSITORY_ROOT / selected).resolve()
+    present = selected.is_file()
+    return {"path": str(selected), "present": present, "sha256": sha256(selected) if present else None}
+
+
+def validate_reviewed_evidence(expected: dict) -> None:
+    if reviewed_evidence_identity(Path(expected["path"])) != expected:
+        raise ValueError("Reviewed ecosystem evidence changed during benchmark or stage replay")
+
+
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__)
     result.add_argument("--root", type=Path, default=Path(os.environ.get("GLOBAL_DATA_ROOT", "data/external")))
@@ -67,6 +88,8 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--sample", type=Path, default=DEFAULT_SAMPLE)
     result.add_argument("--rebuild-sample", action="store_true", help="Build a new 1,000-polygon fixture with the current row policy, using the original stratified sampler.")
     result.add_argument("--max-per-bin", type=positive_int, help="Use at most N hash-selected polygons per size band, plus the two extreme fixtures. Default: all 1,000.")
+    result.add_argument("--reverse-bands", action="store_true",
+                        help="Pairs stage: process size bands in descending order (largest polygons first); A/B against the default ascending order.")
     result.add_argument("--output-root", type=Path, help="New, nonexistent directory; defaults to ROOT/benchmarks/pipeline/TIMESTAMP-ID.")
     result.add_argument("--fresh", action="store_true", help="Start a new benchmark instead of resuming compatible interrupted work.")
     result.add_argument("--workers", type=worker_count, help="Shared parallelism, positive integer or auto (also PIPELINE_WORKERS).")
@@ -79,6 +102,9 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--ui", choices=("auto", "rich", "plain"), default="auto")
     result.add_argument("--benchmark-report", type=Path, help="Passed benchmark to use as an ETA prior; defaults to the latest compatible run.")
     result.add_argument("--dry-run", action="store_true", help="Show stages, isolated paths and resources without reading sources or building.")
+    result.add_argument("--only-stage", choices=("source_scan", "crosswalk", "pairs", "lists", "boundaries", "metadata", "coarse_db", "coarse_cache", "fine_metrics", "prepared_inputs", "tiles"),
+                        help="Replay one stage with fresh outputs, reusing inputs from --from-run.")
+    result.add_argument("--from-run", type=Path, help="Previous benchmark with completed prerequisites for --only-stage.")
     result.add_argument("--stage", choices=("source_scan", "pairs", "lists", "boundaries"), help=argparse.SUPPRESS)
     result.add_argument("--config", type=Path, help=argparse.SUPPRESS)
     return result
@@ -194,47 +220,64 @@ def build_pairs(config: dict) -> None:
     workers = config["resources"]["spatial_workers"]
     _initialize_worker(profile)
     context = multiprocessing.get_context("spawn")
-    pool = (ProcessPoolExecutor(max_workers=workers, mp_context=context,
-                                initializer=_initialize_worker, initargs=(profile, context.BoundedSemaphore(workers), workers)) if workers > 1 else contextlib.nullcontext(None))
+    manager_context = context.Manager() if workers > 1 else contextlib.nullcontext(None)
     output_pairs = output / "pairs.parquet"
     (output / "polygon-timings.jsonl").write_text("")
     observations, chunks, species_ids = [], [], []
     write_seconds = 0.0
     buffered = 0
-    with pool as executor, pq.ParquetWriter(output_pairs, PAIR_SCHEMA, compression="zstd") as writer:
-        for batch in pq.ParquetFile(sample).iter_batches(batch_size=profile.geometry_batch_rows):
-            rows = [row for row in batch.to_pylist() if row["sample_id"] in selected]
-            work = [(row["geometry_wkb"], {"id": str(row["sample_id"]), "size_bin": row["size_bin"],
-                                          "forced_extreme": selected[row["sample_id"]]["forced_extreme"]}) for row in rows]
-            results = _process_bounded(executor, work) if executor else ((i, _polyfill_wkb(wkb)) for i, wkb in enumerate(work))
-            for index, result in results:
-                row = rows[index]
-                if isinstance(result, GeometryWorkerFailure):
-                    raise ValueError(f"sample {row['sample_id']}: {result.message}")
-                cells = result.coverage.cells
-                count = int(cells.size)
-                started = time.perf_counter()
-                if count >= profile.pair_write_rows:
+
+    def ingest(rows, writer, executor) -> None:
+        nonlocal write_seconds, buffered
+        work = ((row, (row["geometry_wkb"], {"id": str(row["sample_id"]), "size_bin": row["size_bin"],
+                                          "forced_extreme": selected[row["sample_id"]]["forced_extreme"]})) for row in rows)
+        for row, result in _process_tagged_bounded(executor, work):
+            if isinstance(result, GeometryWorkerFailure):
+                raise ValueError(f"sample {row['sample_id']}: {result.message}")
+            cells = result.coverage.cells
+            count = int(cells.size)
+            started = time.perf_counter()
+            if count >= profile.pair_write_rows:
+                _flush_pair_chunks(writer, chunks, species_ids)
+                buffered = 0
+                _write_large_coverage(writer, cells, row["iucn_sis_id"], profile.pair_write_rows)
+            else:
+                chunks.append(cells)
+                species_ids.append(row["iucn_sis_id"])
+                buffered += count
+                if buffered >= profile.pair_write_rows:
                     _flush_pair_chunks(writer, chunks, species_ids)
                     buffered = 0
-                    _write_large_coverage(writer, cells, row["iucn_sis_id"], profile.pair_write_rows)
-                else:
-                    chunks.append(cells)
-                    species_ids.append(row["iucn_sis_id"])
-                    buffered += count
-                    if buffered >= profile.pair_write_rows:
-                        _flush_pair_chunks(writer, chunks, species_ids)
-                        buffered = 0
-                written_seconds = time.perf_counter() - started
-                write_seconds += written_seconds
-                observation = {"sample_id": row["sample_id"], "iucn_sis_id": row["iucn_sis_id"], "size_bin": row["size_bin"],
-                               "forced_extreme": selected[row["sample_id"]]["forced_extreme"],
-                               "simplification": result.coverage.decision_simplification_audit,
-                               "kernel_seconds": result.wall_seconds, "output_pairs": count}
-                observations.append(observation)
-                with (output / "polygon-timings.jsonl").open("a") as log:
-                    log.write(json.dumps(observation) + "\n")
-                print(f"Polygon {len(observations)}/{len(selected)}: {count} pairs, {result.wall_seconds:.2f}s", flush=True)
+            written_seconds = time.perf_counter() - started
+            write_seconds += written_seconds
+            observation = {"sample_id": row["sample_id"], "iucn_sis_id": row["iucn_sis_id"], "size_bin": row["size_bin"],
+                           "forced_extreme": selected[row["sample_id"]]["forced_extreme"],
+                           "simplification": result.coverage.decision_simplification_audit,
+                           "kernel_seconds": result.wall_seconds, "output_pairs": count}
+            observations.append(observation)
+            with (output / "polygon-timings.jsonl").open("a") as log:
+                log.write(json.dumps(observation) + "\n")
+            print(f"Polygon {len(observations)}/{len(selected)}: {count} pairs, {result.wall_seconds:.2f}s", flush=True)
+
+    def input_rows():
+        if config.get("reverse_bands", False):
+            reader = pq.ParquetFile(sample)
+            for index in reversed(range(reader.num_row_groups)):
+                rows = [row for row in reader.read_row_group(index).to_pylist() if row["sample_id"] in selected]
+                rows.reverse()
+                for start in range(0, len(rows), profile.geometry_batch_rows):
+                    chunk = rows[start:start + profile.geometry_batch_rows]
+                    yield from sorted(chunk, key=lambda row: len(row["geometry_wkb"]), reverse=True)
+        else:
+            for batch in pq.ParquetFile(sample).iter_batches(batch_size=profile.geometry_batch_rows):
+                rows = [row for row in batch.to_pylist() if row["sample_id"] in selected]
+                yield from sorted(rows, key=lambda row: len(row["geometry_wkb"]), reverse=True)
+
+    with manager_context as manager, (ProcessPoolExecutor(
+        max_workers=workers, mp_context=context, initializer=_initialize_worker,
+        initargs=(profile, context.BoundedSemaphore(workers), workers, manager.dict()),
+    ) if workers > 1 else contextlib.nullcontext(None)) as executor, _pair_writer(output_pairs) as writer:
+        ingest(input_rows(), writer, executor)
         started = time.perf_counter()
         _flush_pair_chunks(writer, chunks, species_ids)
         written_seconds = time.perf_counter() - started
@@ -250,15 +293,16 @@ def build_pairs(config: dict) -> None:
 
 def build_lists(config: dict) -> None:
     output = Path(config["output"])
-    pairs = output / "pairs.parquet"
-    report = json.loads((output / "pairs-report.json").read_text())
+    inputs = Path(config.get("input_root", output))
+    pairs = inputs / "pairs.parquet"
+    report = json.loads((inputs / "pairs-report.json").read_text())
     if sha256(pairs) != report["sha256"]:
         raise ValueError("Benchmark pair input changed")
     result = export_serving_lists(output / "spatial", scratch_dir=output / "scratch/lists",
                                   memory_limit=config["memory_limit"], threads=config["resources"]["duckdb_threads"],
                                   archive_inputs=[{"logical_name": "benchmark-sample", "path": pairs,
                                                    "bytes": pairs.stat().st_size, "sha256": report["sha256"], "rows": report["pair_rows"]}],
-                                  archive_identity={"scope": "benchmark-only", "selection_sha256": sha256(output / "selection.json"),
+                                  archive_identity={"scope": "benchmark-only", "selection_sha256": sha256(inputs / "selection.json"),
                                                     "profile_sha256": config["profile_sha256"]})
     atomic_json(output / "lists-report.json", result)
 
@@ -284,7 +328,7 @@ def plan(args) -> tuple[dict, list[dict], dict]:
     boundaries = {key: str((getattr(args, key) or output / "adm2/current/municipality.geojson").expanduser().resolve()) for key in BOUNDARIES}
     config = {"root": str(root), "output": str(output), "sample": str(sample), "profile": str(profile_path),
               "profile_sha256": profile.digest, "resources": resources.report(), "memory_limit": args.memory_limit,
-              "max_per_bin": args.max_per_bin, "boundaries": boundaries}
+              "max_per_bin": args.max_per_bin, "reverse_bands": args.reverse_bands, "boundaries": boundaries}
     h3 = output / "spatial/serving/current"
     crosswalk = output / "crosswalk/current/iucn_goat_crosswalk.parquet"
     species, systems = output / "species/species.parquet", output / "species/species_systems.parquet"
@@ -305,7 +349,7 @@ def plan(args) -> tuple[dict, list[dict], dict]:
     own("lists")
     if args.municipality is None:
         own("boundaries")
-    add("metadata", [*python, "ark_pipeline.cli.serving_metadata", "--root", root, "--h3-root", h3, "--crosswalk", crosswalk, "--output-dir", output / "species"])
+    add("metadata", [*python, "ark_pipeline.cli.serving_metadata", "--root", root, "--h3-root", h3, "--crosswalk", crosswalk, "--output-dir", output / "species", "--profile", profile_path])
     add("coarse_db", [sys.executable, "ark_pipeline/builders/source_database.py", "--target", output / "source.duckdb", "--overwrite", "--resolutions", "3",
                       "--species-parquet", species, "--species-systems-parquet", systems, "--h3-res3", h3 / "h3_res3_species_global_merged.parquet",
                       "--crosswalk", crosswalk, "--defer-lossless-validation"])
@@ -314,7 +358,8 @@ def plan(args) -> tuple[dict, list[dict], dict]:
                          "--species-systems", systems, "--output-dir", output / "metrics", "--scratch-dir", output / "scratch/metrics",
                          "--memory-limit", args.memory_limit, "--no-progress"])
     add("prepared_inputs", [*python, "ark_pipeline.cli.serving_tiles", "record", "--h3-root", h3, "--parts-dir", output / "metrics", "--build-duckdb", output / "build.duckdb",
-                            "--species", species, "--species-systems", systems, "--metadata-template", output / "coarse-tiles/map-metadata.json", "--output", output / "prepared-inputs.json"])
+                            "--species", species, "--species-systems", systems, "--crosswalk", crosswalk,
+                            "--metadata-template", output / "coarse-tiles/map-metadata.json", "--output", output / "prepared-inputs.json"])
     add("tiles", [*python, "ark_pipeline.cli.serving_tiles", "build", "--prepared-inputs", output / "prepared-inputs.json", "--output-dir", output / "tiles",
                   "--scratch-dir", output / "scratch/tiles", *[value for key, path in boundaries.items() for value in ("--" + key.replace("_", "-"), path)]])
     paths = {"DATA_DIR": output, "SOURCE_DUCKDB_PATH": output / "source.duckdb", "BUILD_DUCKDB_PATH": output / "build.duckdb",
@@ -322,9 +367,16 @@ def plan(args) -> tuple[dict, list[dict], dict]:
              "MAP_METADATA_PATH": output / "coarse-tiles/map-metadata.json", "VALIDATION_REPORT_PATH": output / "build-validation.json",
              "SOURCE_VALIDATION_REPORT_PATH": output / "source-validation.json", "DUCKDB_SCRATCH_DIR": output / "scratch/duckdb",
              "H3_RES3_PARQUET": h3 / "h3_res3_species_global_merged.parquet", "H3_ID_CROSSWALK_PATH": crosswalk,
-             "GLOBAL_DATA_ROOT": root, "GLOBAL_H3_ROOT": h3, "GLOBAL_CROSSWALK_PATH": crosswalk, "GLOBAL_PREVIEW_ROOT": output}
+             "GLOBAL_DATA_ROOT": root, "GLOBAL_H3_ROOT": h3, "GLOBAL_CROSSWALK_PATH": crosswalk, "GLOBAL_PREVIEW_ROOT": output, "SPATIAL_PROFILE": profile_path}
     env = {**{key: str(value) for key, value in paths.items()}, **resources.environment(), "DUCKDB_MEMORY_LIMIT": args.memory_limit,
            **{BOUNDARY_ENV[key]: path for key, path in boundaries.items()}}
+    config["serving_contract"] = "dynamic-h3-v1"
+    for stage in stages:
+        if stage["name"] == "tiles":
+            stage["serving_contract"] = "dynamic-h3-v1"
+    if not args.dry_run:
+        config["reviewed_evidence"] = reviewed_evidence_identity()
+        env["GLOBAL_IUCN_REVIEWED_EVIDENCE_PATH"] = config["reviewed_evidence"]["path"]
     return config, stages, env
 
 
@@ -333,13 +385,19 @@ def run_stage(stage: dict, output: Path, environment: dict, dashboard=None) -> d
 
 
 def run(args) -> dict:
+    if args.only_stage or args.from_run:
+        from ark_pipeline.cli.benchmark_stage import run_replay
+        return run_replay(args)
     config, stages, overrides = plan(args)
     output, root = Path(config["output"]), Path(config["root"])
     report = {"schema_version": 1, "status": "planned", "created_at": iso_now(), **config,
               "planned_stages": stages, "environment": overrides, "stages": [], "warnings": []}
     if args.dry_run:
         return report
-    identity = {"mode": "benchmark", "config": json.loads(json.dumps(config).replace(str(output), "<run>")),
+    reviewed_evidence = config["reviewed_evidence"]
+    runtime = runtime_identity(REPOSITORY_ROOT)
+    environment_identity = benchmark_environment(runtime)
+    identity = {"measurement_environment": environment_identity, "mode": "benchmark", "config": json.loads(json.dumps(config).replace(str(output), "<run>")),
                 "sources": source_identity(root), "code": pipeline_code(REPOSITORY_ROOT),
                 "external_files": {str(path): sha256(path) for path in [args.sample, args.sample.with_suffix(".json"),
                     *[getattr(args, key) for key in BOUNDARIES]] if path and path.is_file()
@@ -352,6 +410,8 @@ def run(args) -> dict:
     if resume_output:
         args = argparse.Namespace(**{**vars(args), "output_root": resume_output})
         config, stages, overrides = plan(args)
+        if config["reviewed_evidence"] != reviewed_evidence:
+            raise ValueError("Reviewed ecosystem evidence changed while resuming benchmark")
         output = resume_output
         report = json.loads((output / "benchmark-report.json").read_text())
         validate_inventory(output, report.get("artifacts", {}))
@@ -376,7 +436,11 @@ def run(args) -> dict:
         atomic_json(output / "config.json", config)
     manifest = root / "acquisition/current.json"
     manifest_sha = sha256(manifest)
-    report.update(status="running", acquisition_manifest_sha256=manifest_sha, runtime=runtime_identity(REPOSITORY_ROOT),
+    report.setdefault("runtime", runtime)
+    report.setdefault("measurement_environment", environment_identity)
+    attempt = {"id": uuid.uuid4().hex, "started_at": iso_now(), "runtime": runtime}
+    report.setdefault("attempts", []).append(attempt)
+    report.update(status="running", acquisition_manifest_sha256=manifest_sha,
                   code_sha256=identity["code"])
     if args.municipality is not None:
         report["warnings"].append("An existing municipality boundary was supplied; acquisition and ADM2 preparation are excluded from the estimated total.")
@@ -399,6 +463,7 @@ def run(args) -> dict:
             if sha256(Path(selection["path"])) != selection["sha256"] or sha256(Path(selection["path"]).with_suffix(".json")) != selection["metadata_sha256"]:
                 raise ValueError("Benchmark fixture changed since interruption; start with --fresh")
         for stage in stages:
+            validate_reviewed_evidence(config["reviewed_evidence"])
             if sha256(manifest) != manifest_sha or load_spatial_profile(Path(config["profile"])).digest != config["profile_sha256"]:
                 raise ValueError("Acquisition manifest or spatial profile changed during benchmark")
             if stage["name"] in completed:
@@ -417,39 +482,54 @@ def run(args) -> dict:
             if previous_attempt:
                 measured["previous_attempt_seconds"] = previous_attempt
                 measured["wall_seconds"] += previous_attempt
+            measured["attempt_id"] = attempt["id"]
             report["stages"].append(measured)
             if measured["status"] != "passed":
                 dashboard.global_estimate = None
                 raise RuntimeError(f"{stage['name']} failed; see {measured['log']}")
-            # Reuse the exact offline workload model once pairs/lists exist.
-            if (output / "lists-report.json").is_file():
-                measured_by_name = {s["name"]: s for s in report["stages"]}
-                projected_stages = []
-                for planned in stages:
-                    item = measured_by_name.get(planned["name"])
-                    if item:
-                        projected_stages.append(item)
-                    elif dashboard.forecast.base.get(planned["name"]) is not None:
-                        projected_stages.append({"name": planned["name"], "wall_seconds": dashboard.forecast.base[planned["name"]]})
-                projection = estimate(projected_stages, json.loads((output / "population.json").read_text()),
-                                      json.loads((output / "pairs-report.json").read_text()), json.loads((output / "lists-report.json").read_text()))
-                if len(projected_stages) == len(stages):
-                    dashboard.global_estimate = projection["total_seconds"]
-                report["live_projection"] = projection
-            report["artifacts"] = artifact_inventory(output)
+            try:
+                validate_reviewed_evidence(config["reviewed_evidence"])
+                # Reuse the exact offline workload model once pairs/lists exist.
+                if (output / "lists-report.json").is_file():
+                    measured_by_name = {s["name"]: s for s in report["stages"]}
+                    projected_stages = []
+                    for planned in stages:
+                        item = measured_by_name.get(planned["name"])
+                        if item:
+                            projected_stages.append(item)
+                        elif dashboard.forecast.base.get(planned["name"]) is not None:
+                            projected_stages.append({"name": planned["name"], "wall_seconds": dashboard.forecast.base[planned["name"]]})
+                    projection = estimate(projected_stages, json.loads((output / "population.json").read_text()),
+                                          json.loads((output / "pairs-report.json").read_text()), json.loads((output / "lists-report.json").read_text()),
+                                          serving_contract=config["serving_contract"])
+                    if len(projected_stages) == len(stages):
+                        dashboard.global_estimate = projection["total_seconds"]
+                    report["live_projection"] = projection
+                report["artifacts"] = artifact_inventory(output)
+            except (Exception, KeyboardInterrupt) as error:
+                # A successful subprocess is reusable only after its outputs are accepted.
+                status = "interrupted" if isinstance(error, KeyboardInterrupt) else "failed"
+                measured.update(status=status, error=str(error) or "Interrupted")
+                dashboard.global_estimate = None
+                dashboard.accept({"kind": "stage_end", "stage": stage["name"], "status": status,
+                                  "time": time.time(), "elapsed": measured["wall_seconds"] - previous_attempt,
+                                  "message": measured["error"]})
+                raise
             save()
         if sha256(manifest) != manifest_sha:
             raise ValueError("Acquisition manifest changed during benchmark")
+        validate_reviewed_evidence(config["reviewed_evidence"])
         population = json.loads((output / "population.json").read_text())
         pairs = json.loads((output / "pairs-report.json").read_text())
         lists = json.loads((output / "lists-report.json").read_text())
         report["workload"] = {"raw_pairs": pairs["pair_rows"], "eligible_polygons": population["eligible_polygons"],
                               **{key: lists[key] for key in ("res3_cells", "res3_relationships", "res7_cells", "res7_relationships")}}
-        report["estimate"] = estimate(report["stages"], population, pairs, lists)
+        report["estimate"] = estimate(report["stages"], population, pairs, lists, serving_contract=config["serving_contract"])
         report["status"] = "passed"
     except (Exception, KeyboardInterrupt) as error:
         report.update(status="interrupted" if isinstance(error, KeyboardInterrupt) else "failed", error=str(error) or "Interrupted")
     finally:
+        attempt["status"] = report["status"]
         dashboard.status = report["status"]
         dashboard.__exit__(None, None, None)
         save()

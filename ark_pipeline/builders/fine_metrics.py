@@ -21,11 +21,14 @@ before all 121 base cells have finished.
 from __future__ import annotations
 
 import argparse
+import copy
+import fcntl
 import json
 import multiprocessing
 import os
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
 from collections import deque
@@ -478,16 +481,17 @@ def initialize_aggregate_worker(
     prepare_species(_WORKER_CONNECTION, species_path, systems_path)
 
 
-def aggregate_worker(base_cell: int, source: Path, target: Path) -> tuple[int, dict]:
+def aggregate_worker(base_cell: int, source: Path, target: Path, source_sha256: str) -> tuple[int, dict]:
     if _WORKER_CONNECTION is None:
         raise RuntimeError("Aggregate worker was not initialized")
     progress = None
     if _WORKER_PROGRESS_QUEUE is not None:
         progress = partial(_report_worker_progress, base_cell)
-    return base_cell, aggregate_part(
+    return base_cell, aggregate_pinned_part(
         _WORKER_CONNECTION,
         source,
         target,
+        source_sha256,
         progress=progress,
     )
 
@@ -952,8 +956,8 @@ def aggregate_part(
 
 
 def aggregate_input_identity(args: argparse.Namespace, source: Path) -> dict:
-    if not hasattr(args, "_aggregate_metadata_identity"):
-        args._aggregate_metadata_identity = {
+    """Read current bytes; callers outside a build must never reuse cached hashes."""
+    return {"metadata": {
             "species_sha256": sha256(args.species),
             "systems_sha256": sha256(args.species_systems),
             "code_sha256": code_fingerprint([
@@ -961,29 +965,23 @@ def aggregate_input_identity(args: argparse.Namespace, source: Path) -> dict:
                 Path(__file__).resolve().parents[2] / "ark_pipeline/aggregation/metrics.py",
             ]),
             "dependencies": {**dependency_identity(), "numpy": version("numpy")},
-        }
-        args._aggregate_source_hashes = {}
-    key = str(source.resolve())
-    if key not in args._aggregate_source_hashes:
-        args._aggregate_source_hashes[key] = sha256(source)
-    return {"metadata": args._aggregate_metadata_identity,
-            "source_sha256": args._aggregate_source_hashes[key]}
+        }, "source_sha256": sha256(source)}
 
 
-def aggregate_receipt_matches(args: argparse.Namespace, source: Path, target: Path) -> bool:
+def aggregate_receipt_matches(args: argparse.Namespace, source: Path, target: Path, *, identity: dict | None = None) -> bool:
     try:
         schema = [[field.name, str(field.type)] for field in pq.read_schema(target)]
         return receipt_is_current(
-            target.with_suffix(".receipt.json"), aggregate_input_identity(args, source),
+            target.with_suffix(".receipt.json"), identity if identity is not None else aggregate_input_identity(args, source),
             {"aggregate": target}, {"aggregate": schema},
         )
     except (OSError, ValueError):
         return False
 
 
-def record_aggregate_receipt(args: argparse.Namespace, source: Path, target: Path) -> None:
+def record_aggregate_receipt(args: argparse.Namespace, source: Path, target: Path, *, identity: dict | None = None) -> None:
     atomic_json(target.with_suffix(".receipt.json"), {
-        "status": "passed", "identity": aggregate_input_identity(args, source),
+        "status": "passed", "identity": identity if identity is not None else aggregate_input_identity(args, source),
         "outputs": {"aggregate": {"filename": target.name,
                     "bytes": target.stat().st_size, "sha256": sha256(target)}},
     })
@@ -991,9 +989,17 @@ def record_aggregate_receipt(args: argparse.Namespace, source: Path, target: Pat
 
 @tracked_stage("fine_metrics")
 def build_parts(args: argparse.Namespace) -> None:
-    # Recompute once per invocation, including when a caller reuses its Namespace.
-    if hasattr(args, "_aggregate_metadata_identity"):
-        del args._aggregate_metadata_identity
+    """Serialize writers to this output directory; readers still verify receipts."""
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    with (args.output_dir / ".aggregate.lock").open("a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise RuntimeError("Resolution-7 output directory is already being built") from error
+        _build_parts(args)
+
+
+def _build_parts(args: argparse.Namespace) -> None:
     sources = input_parts(args.parts_dir)
     if not sources:
         raise FileNotFoundError(f"No base_*.parquet files in {args.parts_dir}")
@@ -1016,14 +1022,12 @@ def build_parts(args: argparse.Namespace) -> None:
         },
         enabled=not args.no_progress,
     ) as display:
+        identities = {base: aggregate_input_identity(args, sources[base]) for base in requested}
         existing = {} if args.overwrite else completed_parts(args.output_dir)
         existing = {
             base: target for base, target in existing.items()
-            if base in sources and aggregate_receipt_matches(args, sources[base], target)
+            if base in identities and aggregate_receipt_matches(args, sources[base], target, identity=identities[base])
         }
-        # Pin metadata and source identities before launching workers.
-        for base in requested:
-            aggregate_input_identity(args, sources[base])
         done = validate_completed_parts(
             sources,
             existing,
@@ -1033,12 +1037,87 @@ def build_parts(args: argparse.Namespace) -> None:
         pending = [base_cell for base_cell in requested if base_cell not in done]
         display.begin_aggregation(len(pending))
         if not pending:
+            for base in requested:
+                _require_identity(args, sources[base], identities[base])
             return
 
-        if args.workers > 1:
-            _build_parts_parallel(args, sources, pending, display)
-        else:
-            _build_parts_serial(args, sources, pending, display)
+        # Metadata is small and shared; partitions are copied only by active workers.
+        # Copies (not hard links) isolate readers from replacement and in-place writes.
+        with tempfile.TemporaryDirectory(prefix=".metric-inputs-", dir=args.output_dir) as temporary:
+            pinned = copy.copy(args)
+            pinned._original_args = args
+            pinned._identities = identities
+            pinned.output_dir = Path(temporary)
+            pinned.species = pinned.output_dir / "species.parquet"
+            pinned.species_systems = pinned.output_dir / "systems.parquet"
+            metadata = identities[pending[0]]["metadata"]
+            _copy_verified(args.species, pinned.species, metadata["species_sha256"])
+            _copy_verified(args.species_systems, pinned.species_systems, metadata["systems_sha256"])
+            for base in requested:
+                _require_identity(args, sources[base], identities[base])
+            if args.workers > 1:
+                _build_parts_parallel(pinned, sources, pending, display)
+            else:
+                _build_parts_serial(pinned, sources, pending, display)
+
+
+def _copy_verified(source: Path, target: Path, expected: str) -> None:
+    shutil.copyfile(source, target)
+    if sha256(target) != expected:
+        raise RuntimeError(f"Resolution-7 input changed while snapshotting: {source.name}")
+
+
+def _require_identity(args: argparse.Namespace, source: Path, expected: dict) -> None:
+    if aggregate_input_identity(args, source) != expected:
+        raise RuntimeError(f"Resolution-7 input changed during build: {source.name}")
+
+
+def aggregate_pinned_part(
+    connection: duckdb.DuckDBPyConnection,
+    source: Path,
+    target: Path,
+    source_sha256: str,
+    *,
+    progress: Callable[[str, float], None] | None = None,
+) -> dict[str, float | int]:
+    """Calculate and validate from the same private partition bytes."""
+    with tempfile.TemporaryDirectory(prefix=".partition-", dir=target.parent) as temporary:
+        snapshot = Path(temporary) / source.name
+        _copy_verified(source, snapshot, source_sha256)
+        report = aggregate_part(connection, snapshot, target, progress=progress)
+        if sha256(snapshot) != source_sha256:
+            raise RuntimeError("Resolution-7 partition snapshot changed during calculation")
+        return report
+
+
+def _publish_pinned_part(args: argparse.Namespace, source: Path, staged: Path, base: int) -> None:
+    expected = args._identities[base]
+    # Prepare the receipt before touching the prior output. Replace both with
+    # rollback on handled errors; checksum verification rejects crash-torn pairs.
+    record_aggregate_receipt(args, source, staged, identity=expected)
+    target = args._original_args.output_dir / staged.name
+    receipt = target.with_suffix(".receipt.json")
+    with tempfile.TemporaryDirectory(prefix=".previous-", dir=target.parent) as temporary:
+        backups = []
+        for path in (target, receipt):
+            backup = Path(temporary) / path.name
+            if path.exists():
+                shutil.copyfile(path, backup)
+            backups.append((path, backup))
+        if (sha256(args.species) != expected["metadata"]["species_sha256"]
+                or sha256(args.species_systems) != expected["metadata"]["systems_sha256"]):
+            raise RuntimeError("Resolution-7 metadata snapshot changed during calculation")
+        _require_identity(args._original_args, source, expected)
+        try:
+            staged.replace(target)
+            staged.with_suffix(".receipt.json").replace(receipt)
+        except BaseException:
+            for path, backup in backups:
+                if backup.exists():
+                    backup.replace(path)
+                else:
+                    path.unlink(missing_ok=True)
+            raise
 
 
 def _build_parts_parallel(
@@ -1078,6 +1157,7 @@ def _build_parts_parallel(
                     base_cell,
                     sources[base_cell],
                     args.output_dir / f"base_{base_cell}.parquet",
+                    args._identities[base_cell]["source_sha256"],
                 )
                 futures[future] = base_cell
                 return True
@@ -1108,7 +1188,7 @@ def _build_parts_parallel(
                         for queued in futures:
                             queued.cancel()
                         raise
-                    record_aggregate_receipt(args, sources[base_cell], args.output_dir / f"base_{base_cell}.parquet")
+                    _publish_pinned_part(args, sources[base_cell], args.output_dir / f"base_{base_cell}.parquet", base_cell)
                     display.partition_completed(base_cell, report)
                     submit_next()
             drain_progress()
@@ -1139,16 +1219,17 @@ def _build_parts_serial(
                 progress = None
                 if display.enabled or progress_enabled():
                     progress = partial(display.partition_progress, base_cell)
-                report = aggregate_part(
+                report = aggregate_pinned_part(
                     connection,
                     sources[base_cell],
                     target,
+                    args._identities[base_cell]["source_sha256"],
                     progress=progress,
                 )
             except BaseException as error:
                 display.partition_failed(base_cell, error)
                 raise
-            record_aggregate_receipt(args, sources[base_cell], target)
+            _publish_pinned_part(args, sources[base_cell], target, base_cell)
             display.partition_completed(base_cell, report)
     finally:
         connection.close()

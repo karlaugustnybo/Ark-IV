@@ -1,83 +1,133 @@
 # Global serving pipeline
 
-This document describes the integration boundary between the global IUCN/GoaT
-species work and the H3/map build. The H3 validation and tile plumbing can run
-before the final crosswalk is available.
+This guide separates the workflow on main from the optional, unmerged managed
+serving/profile work. It describes code contracts, not a completed or publicly
+releasable global dataset. Source access and passing validation do not grant data
+redistribution rights; follow [DATA_POLICY](../../DATA_POLICY.md).
 
-The new workflow exports compatible lists directly with `just spatial` (or
-`just data-aggregate` after pair generation). Set `GLOBAL_H3_ROOT` to the
-reported `serving/current` directory and run `just global-prepare`. It uses
-registered metadata snapshots and requires a crosswalk matching those source
-versions. See [the pipeline guide](01_data_pipeline.md) for the complete sequence.
+## Workflow available on main
 
-After generating pairs, `just data-prepare` performs that handoff automatically:
-pair aggregation, species metadata, the coarse map, and fine metrics.
-Add `--tiles` to continue through the complete static PMTiles archive. The
-managed export is also available as `just data-tiles`; it reads the verified
-preparation record and publishes archive/metadata together under
-`GLOBAL_PREVIEW_ROOT/tiles/current/`. See [tile profiling and publication](../performance/tile_export_performance.md).
-Use `--dry-run` to inspect paths first. Subsequent serving commands still need
-`GLOBAL_H3_ROOT` set to the same source generation, as described in the guide.
+The integration boundary is global IUCN/GoaT species metadata plus H3 lists.
+Structural H3 validation can run before the final taxonomy crosswalk exists;
+lossless species joins require that crosswalk and matching registered source
+versions. The [pipeline guide](01_data_pipeline.md) describes the sequence.
 
-## Inputs
+`just spatial` or `just data-aggregate` produces compatible lists. Select the
+reported `serving/current` generation with `GLOBAL_H3_ROOT`, then prepare metadata,
+coarse products and fine aggregates through `just global-prepare`. `just data-prepare`
+coordinates aggregation and this handoff after pair generation. Its `--dry-run`
+prints paths/commands **without validating sources**. A real preparation may run
+boundary acquisition; it is not a data-free verification command.
 
-The completed global H3 aggregates have this schema:
+On main, `--tiles`/`just data-tiles` continues through the managed **static** PMTiles
+builder, which publishes archive/metadata under `GLOBAL_PREVIEW_ROOT/tiles/current`.
+It does not supply the future managed `serving.json` launcher. Main's
+`just global-db-load` reads `data/global/exports`; `just global-start` uses the
+configured PostgreSQL database, `data/global/tiles` coarse products,
+`GLOBAL_H3_ROOT/res7_merged_parts` and `GLOBAL_PREVIEW_ROOT/res7_aggregates`.
+Keep those paths from one compatible preparation and load its matching exports.
+No database load, global build or server startup was run to write this guide.
+
+The existing browser can use the coarse Arrow snapshot and dynamic fine endpoint
+`/api/tiles/res7/{z}/{x}/{y}`. Static archive generation and dynamic browser delivery
+are separate paths. A static fine archive is not required to prove dynamic
+throughput, and its historical timings cannot seed a dynamic ETA.
+
+## Optional managed map-serving contract
+
+The [unmerged serving/profile PR](https://github.com/karlaugustnybo/Ark-IV/pull/11)
+introduces the following managed contract. These commands/fields are **not available
+on main** and are not an instruction to copy prerequisite code into a documentation
+branch. Validate their assembled producers/consumers before integration.
+
+- “Prepare map serving” retains `tiles` as its CLI compatibility name. Default
+  compilation is coarse resolution 3, zooms 0–6, sparse integer metric properties,
+  plus the retained Arrow descriptor. It does not compile/join fine archives.
+  Earlier fine-cell appearance remains a separate interface investigation.
+- Metadata retains score/normalization/boundary domains, weights and
+  `coarse_snapshot`. Dynamic metadata declares `res7_delivery: dynamic-h3-v1`,
+  exact base-cell coverage, and available/complete/detail resolutions. Complete
+  means parity with the selected generation, not worldwide source completeness.
+- Fine aggregates expose `h3_index` and canonical metrics for `all`, `terrestrial`,
+  `freshwater` and `marine` as `<metric>__<system>`. The fine endpoint returns
+  compact arrays in the canonical metric order. Separate numeric-H3/species-list
+  partitions support cell details; rendering aggregates do not replace those lists.
+- Country scope, admin1, municipality, EEZ and conservation inputs are pinned to
+  the same compilation generation. Fine requests load jurisdiction indexes for
+  active filters; adding a second fine index is not implied by this guide.
+- The bundle links immutable files where supported; non-linkable filesystems need
+  safe copies or retained immutable/content-addressed generations. Never edit
+  published inodes in place or remove referenced generations. Boundaries remain
+  verified references requiring retention. Missing/changed files must reject.
+- Publication validates inputs, receipts and outputs before advancing `tiles/current`.
+  A failed build leaves the accepted pointer unchanged. Runtime config resolves
+  one generation for a server lifetime. `GLOBAL_SERVING_CONFIG` selects another
+  validated bundle; `GLOBAL_DATABASE_URL` still selects the database. Load matching
+  exports before serving it. Benchmark bundles are not production startup inputs.
+- `just data-tiles --static-fine` is an explicit static alternative on that branch.
+  It publishes separately under `GLOBAL_PREVIEW_ROOT/tiles/static/current`, preserving
+  the dynamic bundle at `tiles/current`; it does not supply dynamic `serving.json`.
+  `--checkpoint-shards` alone does not select static export. `global-db-load`/`global-start` consume
+  the selected managed configuration rather than assuming old loose directories.
+
+The optional preparation gates also reject **used nonidentity mappings** between
+source IDs and serving IDs, because existing fine consumers use canonical SIS-valued
+aliases. Standalone coarse-source building still supports explicit one-to-one
+nonidentity mappings. Do not infer a general fine remapping capability from the
+coarse adapter. Preserve separate source/fine/coarse membership, scored-metric,
+Arrow content and consumed-metadata identity gates when integrating other branches.
+Those checks do not establish global performance or publication permission.
+
+## Input and identity contracts
+
+The global list schema is:
 
 | Column | Type | Meaning |
 |---|---|---|
 | `h3_cell` | `UBIGINT` | Numeric H3 index |
-| `species_ids` | `BIGINT[]` | IUCN `internalTaxonId` values |
+| `species_ids` | `BIGINT[]` | Source IUCN SIS / `internalTaxonId` identities |
 
-The source-database adapter also continues to accept the prototype schema
-`(h3_index VARCHAR, gbif_accepted_ids VARCHAR[])`.
+The standalone source adapter also accepts prototype
+`(h3_index VARCHAR, gbif_accepted_ids VARCHAR[])` lists. That legacy name does not
+establish that the values are external GBIF concept IDs.
 
-## Crosswalk handoff
+For global numeric lists, supply `H3_ID_CROSSWALK_PATH`:
 
-Set `H3_ID_CROSSWALK_PATH` to a Parquet file containing:
+| Column | Meaning |
+|---|---|
+| `source_species_id` or `iucn_sis_id` | Source identifier, castable to text |
+| `app_species_id` | Explicit serving target where supplied |
+| `gbif_accepted_id` | Legacy target fallback; an application alias |
+| `match_method`, `match_confidence` | Recommended identity evidence |
+| `goat_taxon_id` | Recommended GoaT/NCBI link |
+| `gbif_accepted_concept_key` | Exact GBIF identity only when independently available |
 
-| Column | Required | Meaning |
-|---|---|---|
-| `source_species_id` or `iucn_sis_id` | yes | IUCN `internalTaxonId`, castable to text |
-| `app_species_id` | optional | Stable identifier used by `SpecInfo`; defaults to the IUCN ID |
-| `match_method` | recommended | Exact name, synonym, manual, etc. |
-| `match_confidence` | recommended | Machine-readable confidence |
-| `goat_taxon_id` | recommended | Matched GoaT/NCBI taxon |
-| `gbif_accepted_concept_key` | optional | Exact GBIF taxon identifier when available |
+The crosswalk generated by `cli/crosswalk_match.py` can use `iucn_sis_id` as the
+application target, with `matched_ncbi_species_taxid` as the GoaT link. Source
+and target identities must be non-null and one-to-one; many-to-one targets would
+collapse distinct species within cells. Preserve source versions and unresolved
+identity evidence. A tree-only or name-only match does not grant genomic transfer.
 
-The crosswalk currently produced by `ark_pipeline/cli/crosswalk_match.py` is
-accepted directly: `iucn_sis_id` becomes the stable application ID and
-`matched_ncbi_species_taxid` supplies the GoaT link. For compatibility, the
-adapter also accepts the legacy `gbif_accepted_id` column as the application
-target when `app_species_id` is absent. That legacy field is an internal app
-key, not necessarily a GBIF identifier. There must be one non-null target per source ID.
-Many-to-one targets are rejected because they would silently collapse distinct
-IUCN species inside an H3 cell.
+## Structural validation before metadata
 
-## Pre-crosswalk validation
-
-Structural validation does not need species metadata:
+Example paths below are placeholders, not local execution receipts:
 
 ```bash
 uv run python -m ark_pipeline.cli.spatial_validate \
-  --res3 "/path/to/h3_res3_species_global_merged.parquet" \
-  --res7 "/path/to/h3_res7_species_global_merged.parquet" \
+  --res3 /path/to/h3_res3_species_global_merged.parquet \
+  --res7 /path/to/h3_res7_species_global_merged.parquet \
   --output data/validation/global-h3.json
 ```
 
-The default pass includes:
+Check cell/relationship counts, null H3/list values and encoded resolution.
+`--deep` additionally checks duplicate cell rows and duplicate IDs within lists;
+its fine-scale cost is separate from the structural pass. A structural pass alone
+is not a full duplicate audit, metadata join or source-completeness claim.
 
-- cell and relationship counts;
-- null H3 indexes and null species lists;
-- H3 indexes whose encoded resolution does not match the file.
+## Standalone source and serving builders
 
-Add `--deep` to scan for duplicate H3 rows and duplicate species IDs within a
-cell. This is quick for res 3 but is intentionally separate for the 96-million
-row res-7 file. The final source build always performs the deep checks before
-publishing.
-
-## Source and serving builds
-
-After the crosswalk and global species tables are ready:
+With authorized matching metadata and lists, the standalone builders can be
+configured explicitly:
 
 ```bash
 H3_RES3_PARQUET=/path/to/h3_res3_species_global_merged.parquet \
@@ -86,93 +136,53 @@ H3_ID_CROSSWALK_PATH=/path/to/iucn_goat_crosswalk.parquet \
 uv run python ark_pipeline/builders/source_database.py --overwrite
 
 uv run python ark_pipeline/builders/coarse_cache.py \
-  --rebuild-aggregates \
-  --skip-expanded-cell-species
+  --rebuild-aggregates --skip-expanded-cell-species
 ```
 
-`builders/source_database.py` writes `data/validation/source-validation.json` before replacing
-the existing source database. It refuses to publish a build with unmatched
-relationships, duplicate mappings, missing species metadata, or dropped cells.
+These are build commands, not smoke checks. Source validation writes its report
+before replacing the source database; lossless mode rejects unmatched relationships,
+duplicate mappings, missing species metadata and dropped cells. Coarse validation
+compares normalized source and all-system totals after the species join. Main's
+preview recipes explicitly defer the expensive lossless audit; do not describe a
+preview as having passed the complete standalone audit.
 
-`builders/coarse_cache.py` writes `data/validation/build-validation.json`. It checks that
-the all-system cell and relationship totals equal the normalized source after
-the `SpecInfo` join.
+Compact `cell_species_lists.parquet` avoids expanding a huge relation into the
+PostgreSQL `cell_species` table. Without the skip flag the builder refuses expanded
+exports above its configured safety threshold (currently 100 million relationships).
+The existing API can read selected fine-cell lists from base-cell partitions;
+absence of list data and a genuinely empty cell require separate handling. The
+optional serving branch adds explicit availability contracts and generation checks.
 
-The global command intentionally skips the expanded PostgreSQL
-`cell_species` export. Expanding 30,883,702,920 relationships would be
-impractical. `cell_species_lists.parquet` preserves the compact per-cell lists;
-the selected-cell endpoint still needs a partition-aware serving path before
-the global deployment is complete. Without the skip flag, the build refuses
-to expand more than 100 million relationships.
+## Scaling, reuse and scientific meaning
 
-## Global scaling changes
+There is no need for a global centroid table or a country-border loop to normalize
+every relationship. Species systems supply habitat categories; canonical IUCN IDs
+can remain application keys. Fine aggregation works by base-cell partition and
+bounded batches, evaluating species flags and reducing canonical metric counts.
+Keep every system and threat/DNA predicate, null behavior and whole-cell chunking
+when changing reducers. The [metric method](../performance/serving_metrics_performance.md)
+and [optimization guide](../performance/pipeline_optimization.md) explain comparisons;
+no historical measured speedup or global ETA is asserted here.
 
-- There is no `H3Centroids` table or Denmark border-intersection loop.
-- Habitat layers are derived from each species' IUCN systems.
-- IUCN IDs are retained as the global application key, so normalizing the H3
-  files does not expand and regroup their 30+ billion relationships.
-- Fine aggregation runs one H3 base cell at a time using bounded Arrow batches.
-  Metric predicates are evaluated once per species; numeric species IDs gather
-  those flags and NumPy sums them within each list. All four ecosystem systems
-  and their exact threat/DNA joint counts use the existing metric definitions.
-  H3 IDs become strings once per output cell. This removes the full-partition
-  relationship join, string conversion, and metric hash aggregation.
-- Reuse also requires a checksum receipt matching the source partition, species
-  and system metadata, aggregation code, and dependency versions. Changing DNA
-  evidence or threat status invalidates the scores even if cell counts match.
-  Existing unreceipted partitions rebuild once.
-- Before a completed partition is published, the builder verifies source and
-  output cell counts, lossless relationship totals, H3 resolution and base-cell
-  placement, duplicate cell rows, and internal metric consistency. The
-  temporary file is deleted on failure and never replaces the last valid
-  partition. Current-schema partitions are revalidated when a build resumes.
-  Switching to the native reducer invalidates previous metric receipts once;
-  geometry/pair receipts and list exports are unaffected.
-- Tile rows are fetched from DuckDB in bounded batches.
-- GeoJSON sequences are piped directly into Tippecanoe. The build does not call
-  `fetchall()` or materialize temporary GeoJSON files.
+Reuse needs source-partition, species/system metadata, code and dependency identity,
+not just matching row counts. Changed DNA or threat evidence must invalidate scores.
+Check source/output cell and relationship totals, H3 resolution/base-cell placement,
+duplicate rows and metric consistency before replacement; revalidate resumable
+current-schema partitions. A reducer change may require metric receipts to rebuild
+without changing geometry/pair/list identity. Preserve the optional metric-owner's
+consumed-metadata pinning correction during integration.
 
-H3 polygon boundaries are still produced incrementally with the H3 C-backed
-Python package. Memory use is bounded, but a full 96-million-cell tile build
-will remain CPU- and I/O-intensive and should be benchmarked by base-cell or
-geographic slice before the production run.
+Tile rows stream from DuckDB in batches into Tippecanoe; bounded Python memory does
+not bound all compiler/native memory, scratch, CPU or I/O. Incremental C-backed H3
+boundary construction still costs work. Benchmark authorized geographic/base-cell
+slices and equivalent outputs before planning a full static fine export.
 
-The native metric reducer was 3.23× faster than the previous SQL implementation
-on a 12,000-cell sample containing 3,000,214 relationships, including Parquet
-writing (median 1.10 s versus 3.55 s, three alternating runs, one thread). All
-164 metric columns matched exactly. This is a single-partition sample, not a
-global throughput estimate. See [the benchmark and reproduction command](../performance/serving_metrics_performance.md).
+## Validation record to retain privately
 
-## Verified baseline
-
-On 2026-07-23:
-
-| File | Cells | Cell–species relationships | Structural failures |
-|---|---:|---:|---:|
-| Global merged res 3 | 40,295 | 17,449,008 | 0 (deep) |
-| Global merged res 7 | 95,984,189 | 30,883,702,920 | 0 (structural) |
-
-The res-7 structural pass found no null cell IDs, null lists, or incorrectly
-encoded resolutions. Its full duplicate-list audit remains an explicit
-`--deep` operation because it is substantially more expensive.
-
-The res-3 lists contain 74,352 distinct IUCN IDs. Of those, 74,331 occur in
-the current merged IUCN taxonomy file and 21 do not. The missing IDs are:
-
-```text
-780, 7121, 7879, 7880, 8128, 10332, 20355, 34040, 34169, 40747, 44072,
-61372, 153621, 165228, 165247, 177653, 195373, 195376, 63488699,
-78777637, 232856397
-```
-
-These are an upstream-version mismatch, not a GoaT matching problem. The
-global species-dimension build retains them as explicit placeholders so H3
-coverage is lossless. Their source-specific identifiers and metadata remain
-null instead of being guessed; the build report lists every placeholder.
-
-The Denmark compatibility build also completed without loss:
-
-| Resolution | Cells | Relationships | Dropped |
-|---|---:|---:|---:|
-| 3 | 30 | 11,688 | 0 |
-| 7 | 39,505 | 9,394,667 | 0 |
+Record source versions, exact IDs, placeholder/missing metadata reasons, structural
+versus deep scope, source/list/scored totals, dependency identity and whether the
+served generation was actually rebuilt. An upstream taxonomy-version mismatch
+must not become a guessed GoaT join: retain a placeholder and null source-specific
+metadata until authoritative evidence resolves it. Preserve compatibility-build
+losslessness checks as well as global ones. This guide publishes no historical
+species IDs, census tables, private timings or outcome claims.
