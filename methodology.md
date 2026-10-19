@@ -813,6 +813,13 @@ not split. Output buffers are bounded. Missing metadata maps to zero flags in
 the reducer, but publication reconciliation must reject the resulting missing
 relationships rather than silently publish reduced totals.
 
+The default `just data-tiles` export prepares coarse PMTiles and pinned fine
+aggregate/raw-list partitions for dynamic fine delivery, with metadata and
+`serving.json` under `GLOBAL_PREVIEW_ROOT/tiles/current/`. The optional
+`just data-tiles --static-fine` export builds a full coarse/fine archive separately
+under `GLOBAL_PREVIEW_ROOT/tiles/static/current/`, preserving the dynamic bundle.
+The static archive does not supply managed dynamic startup/SQL-loading configuration.
+
 The coarse map uses a compact Arrow snapshot. PMTiles features carry cell ID,
 resolution, compact metric names, system prefixes, and delimiter-encoded
 boundary memberships. Managed static tiles encode zero metric counts by absent
@@ -824,13 +831,15 @@ materializing a global GeoJSON file. Coarse and fine zoom groups compile separat
 and are joined after validation. It disables feature and
 tile-size limits and preserves input order; it does not promise pixel-perfect
 source geometry at every zoom. Tile geometry is a display representation, not
-the authoritative pair relation. Current build zoom ranges are 0–6 for coarse
-features and 8–12 for fine features; frontend transition behavior is a separate
-rendering concern.
+the authoritative pair relation. Build zoom ranges are 0–6 for coarse
+features and 8–12 for optional static fine features; frontend transition behavior
+is a separate rendering concern.
 
-The default export caches separately compiled resolution groups and joins them
-into the final archive. Optional base-cell shards provide finer checkpoint reuse
-at the cost of extra storage; both modes require the final join. Feature streaming
+Within optional static export, the default caches separately compiled resolution
+groups and joins them into the final archive. Optional base-cell shards provide finer checkpoint reuse
+at the cost of extra storage; both static modes require the final join.
+`just data-tiles --static-fine --checkpoint-shards` selects those shards;
+`--checkpoint-shards` alone does not select static export. Feature streaming
 can be limited by Python boundary/feature work, database reads, or compiler
 backpressure. Aggregate counts alone cannot identify the bottleneck.
 

@@ -64,8 +64,10 @@ branch. Validate their assembled producers/consumers before integration.
   one generation for a server lifetime. `GLOBAL_SERVING_CONFIG` selects another
   validated bundle; `GLOBAL_DATABASE_URL` still selects the database. Load matching
   exports before serving it. Benchmark bundles are not production startup inputs.
-- `just data-tiles --static-fine` is an explicit legacy alternative on that branch,
-  not the managed dynamic launcher's output. `global-db-load`/`global-start` consume
+- `just data-tiles --static-fine` is an explicit static alternative on that branch.
+  It publishes separately under `GLOBAL_PREVIEW_ROOT/tiles/static/current`, preserving
+  the dynamic bundle at `tiles/current`; it does not supply dynamic `serving.json`.
+  `--checkpoint-shards` alone does not select static export. `global-db-load`/`global-start` consume
   the selected managed configuration rather than assuming old loose directories.
 
 The optional preparation gates also reject **used nonidentity mappings** between
