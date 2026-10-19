@@ -382,7 +382,9 @@ or a new default scoring policy a prerequisite for the next full run.
 ### 1. Freeze scope, output contracts and a measurable baseline
 
 Record the current code, registered sources, scientific profile and known
-omissions. Choose mammals for the initial dated-tree scope and bounded DNA
+omissions. Check for newer releases of the already registered inputs early,
+before investing in fixtures tied to superseded snapshots. Choose mammals for
+the initial dated-tree scope and bounded DNA
 presets. Define the separate species/detail and optional map projections from
 Section 6, with no new base PMTiles properties or eager map downloads.
 
@@ -525,7 +527,27 @@ if further optimization has diminishing returns; avoid an endless tuning gate.
 ### 10. Run the authorized full build and inspect its results
 
 The recommended next full build happens here, after Steps 1–9's scoped
-acceptance gates. Generate retained source provenance, memberships, range
+acceptance gates and a final source-freshness preflight:
+
+1. Check official release/version metadata for registered IUCN assessments and
+   spatial inputs, GoaT, NCBI taxonomy, tree/OTT inputs and boundary sources.
+   Record the check time, available release, selected release and any deliberate
+   retention of an older compatible snapshot. This refreshes existing sources;
+   it does not reopen the deferred new-source integrations.
+2. Acquire selected updates through the existing authorized workflow, respecting
+   manual/provider access steps. Verify checksums, schemas, identifiers, release
+   compatibility and source terms. Do not assume newer assessment, spatial and
+   taxonomy files automatically form a compatible set.
+3. Invalidate only affected fixtures, crosswalks, identity/baseline audits,
+   coverage outputs and aggregates through their normal dependency receipts.
+   Repeat the relevant Steps 2–9 checks on changed inputs before expensive
+   execution. Reassess resource sizing if workload size/distribution changed
+   materially; preserve old benchmark results as old-generation measurements.
+4. Pin the validated source manifest and resolved generations for the entire
+   run. Report any unavailable update explicitly. Do not mix releases or advance
+   sources partway through the build; later releases belong to the next update.
+
+Then generate retained source provenance, memberships, range
 denominators/stewardship, available assessment metadata, mammal ED/EDGE and
 default DNA-gap species outputs, existing base map products, and only the
 separate optional aggregates explicitly included in the build scope.
@@ -594,6 +616,10 @@ integration test. Before launching it:
   fields, optional map aggregates and base map properties; the default is no
   new base properties. Keep descriptive output acceptance separate from
   adoption of default priorities. Defer new acquisition-dependent extensions.
+- **Check for updated registered data:** perform Step 10's freshness preflight,
+  acquire/validate selected releases through authorized paths, and rerun affected
+  fixture and identity checks before pinning the full run's manifest. Record
+  checked/selected versions and reasons for retaining older snapshots.
 - **Calibrate spatial approximation:** compare current-v3 simplified coverage
   with a same-policy unsimplified reference, including fragmented islands,
   holes, large ranges and antimeridian cases. Report per-species added/omitted
