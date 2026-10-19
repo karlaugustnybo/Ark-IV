@@ -730,7 +730,7 @@ builds avoid expanding tens of billions of relationships into PostgreSQL.
 Fine metrics evaluate predicates once per species, gather those flags by numeric
 ID, and reduce within Arrow lists with NumPy. This avoids a full expanded SQL
 relationship join while retaining the canonical metric definitions. Input is
-batched at 256 cells with a 250,000-relationship target; an individual cell is
+batched at 16,384 cells with a 250,000-relationship target; an individual cell is
 not split. Output buffers are bounded. Missing metadata maps to zero flags in
 the reducer, but publication reconciliation must reject the resulting missing
 relationships rather than silently publish reduced totals.
