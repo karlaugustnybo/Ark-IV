@@ -1,7 +1,8 @@
 """Polygon-to-H3 kernels used by the replacement spatial pipeline.
 
-The current semantic profiles use any-touch intersection, with bounded decision
-simplification where configured. Historical kernels live in
+The default mode uses closed any-touch intersection; opt-in fast mode uses
+approximate native overlap. Both retain bounded decision simplification where
+configured. Historical kernels live in
 archive/spatial/legacy_kernels.py; optional hierarchy experiments live in
 archive/research/spatial/kernels.py.
 """
@@ -66,6 +67,7 @@ class SpatialProfile:
     pair_write_rows: int
     digest: str
     raw: dict[str, Any]
+    coverage_mode: str = "correct"
 
 
 @dataclass(frozen=True)
@@ -112,6 +114,9 @@ def load_spatial_profile(path: Path) -> SpatialProfile:
     repair = payload["geometry_repair"]
     runtime = payload["runtime"]
     algorithm = payload["algorithm"]
+    coverage_mode = algorithm.get("coverage_mode", "correct")
+    if not isinstance(coverage_mode, str) or coverage_mode not in {"fast", "correct"}:
+        raise ValueError("coverage_mode must be fast or correct")
     candidate_simplification_degrees = float(
         algorithm.get("candidate_simplification_degrees", 0.0)
     )
@@ -202,6 +207,7 @@ def load_spatial_profile(path: Path) -> SpatialProfile:
         pair_write_rows=int(runtime["pair_write_rows"]),
         digest=digest,
         raw=payload,
+        coverage_mode=coverage_mode,
     )
 
 
@@ -769,10 +775,11 @@ def direct_any_touch_intersecting_cells_native(
     profile: SpatialProfile,
     *, tile_budget=None,
 ) -> NativeCoverageResult:
-    """Return the exact resolution-7 H3 overlap set, including point touches.
+    """Return resolution-7 coverage using the profile's contact-checking mode.
 
-    Native overlap supplies candidates, not a complete closed-contact decision.
-    Fully contained cells are accepted directly; a one-ring frontier is checked
+    In correct mode, native overlap supplies candidates for closed-contact checks.
+    Fast mode returns native overlap directly and may omit edge/corner contacts.
+    In correct mode, fully contained cells are accepted directly; a frontier is checked
     against the decision geometry with GEOS, including longitude copies.
     """
     from ark_pipeline.runtime.progress import emit
@@ -818,16 +825,21 @@ def _direct_any_touch_prepared(
     repair: RepairAudit,
     *, tile_budget=None,
 ) -> NativeCoverageResult:
-    """Direct any-touch kernel for an already prepared, unwrapped geometry."""
+    """Use native overlap in fast mode, or refine exact contacts in correct mode."""
     chunks: list[np.ndarray] = []
     candidate_count = 0
     for overlap, guaranteed in _iter_candidate_cell_batches(
         unwrapped,
         profile,
         profile.resolution,
-        include_guaranteed=True,
+        include_guaranteed=profile.coverage_mode == "correct",
         tile_budget=tile_budget,
     ):
+        if profile.coverage_mode == "fast":
+            candidate_count += int(overlap.size)
+            if overlap.size:
+                chunks.append(overlap)
+            continue
         frontier = _one_ring(np.setdiff1d(overlap, guaranteed))
         candidate_count += int(guaranteed.size + frontier.size)
         if guaranteed.size:

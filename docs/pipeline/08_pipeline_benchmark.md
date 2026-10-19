@@ -43,6 +43,29 @@ in `just data-build` with resumable receipts and measured dashboard progress,
 but they currently have no full-build ETA prior. Do not add the polygon estimate
 to a release schedule as if it included those phases.
 
+## Fast and correct coverage
+
+Correct coverage is the default. It includes exact edge and corner checks on
+polygon and HydroBASINS boundaries. To opt into approximate native overlap,
+select the fast profile with the existing profile option:
+
+```bash
+just data-benchmark --profile config/spatial_semantics_iucn_richness_v3_fast.toml
+```
+
+Use `--profile config/spatial_semantics_iucn_richness_v3.toml` for correct mode.
+The spatial pair CLI accepts the same `--profile` option, and full builds can
+select it through `SPATIAL_PROFILE`. Fast mode may omit edge/corner-only
+contacts; it retains row eligibility, geometry fixes and simplification rules.
+Other profiles can opt in with `coverage_mode = "fast"` in `[algorithm]`.
+Omitting the field selects correct mode; unknown values fail profile loading.
+
+Use separate output directories for each mode. Profile hashes participate in
+benchmark compatibility and spatial receipts, so switching modes cannot reuse
+incompatible coverage. Reports record the selected profile and its hash.
+Runtime comparisons must use the same fixture and disclose the coverage mode;
+a faster approximate run is not an equivalent-output optimization.
+
 ## Live dashboard and interruption
 
 The Rich dashboard is automatic in a terminal. `--ui rich` forces it and

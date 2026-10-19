@@ -384,6 +384,17 @@ class SpatialBuildTests(unittest.TestCase):
             self.assertEqual(report["stages"]["export"]["status"], "reused")
             self.assertTrue((output / "serving/current/res7_merged_parts").is_dir())
 
+            # Switching only coverage mode cannot reuse correct-mode pair receipts.
+            fast_path = root / "fast.toml"
+            fast_path.write_text(RICHNESS_PROFILE_PATH.read_text().replace(
+                'coverage_mode = "correct"', 'coverage_mode = "fast"'))
+            with contextlib.redirect_stdout(io.StringIO()) as console:
+                self.assertEqual(main([
+                    "finalize", "--root", str(root), "--output-root", str(output),
+                    "--profile", str(fast_path),
+                ]), 1)
+            self.assertIn("semantic profile is stale", console.getvalue())
+
             # A new source release with the same archive name cannot be finalized
             # using the previous release's archive output.
             manifest_path = root / "acquisition/current.json"

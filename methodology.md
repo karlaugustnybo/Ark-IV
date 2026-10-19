@@ -273,6 +273,23 @@ for a recent assessment of every species.
 
 The default is [iucn-richness-any-touch-v3](config/spatial_semantics_iucn_richness_v3.toml).
 
+Coverage has two explicit modes, selected by `algorithm.coverage_mode` in the
+spatial profile. **Correct** is the default, including for existing profiles
+without this field. It checks exact edge and corner contacts against the accepted
+geometry. **Fast** uses native H3 overlap without that additional check and may
+omit cells that touch only an edge or vertex. It is an approximation to the same
+any-touch rule, not a different biological occupancy definition. The opt-in
+[fast v3 profile](config/spatial_semantics_iucn_richness_v3_fast.toml) keeps the
+same row policy, geometry preparation and simplification budget. Both modes
+retain the polar and antimeridian geometry fixes. Point-containing-cell coverage
+is unchanged; polygon and HydroBASINS coverage use the selected mode.
+
+The profile ID and content hash distinguish saved results and receipts. Changing
+only the mode also changes the hash, so results must be rebuilt in a separate
+output directory rather than mixed across modes. Correct mode does not remove
+source-range uncertainty or v3 simplification error. No speedup or real-data
+coverage-difference percentage has been established for these two modes.
+
 | Attribute | Admitted values |
 | --- | --- |
 | Presence | 1: extant; 4: possibly extinct |

@@ -24,6 +24,7 @@ relationship_key = "hybas_id"
 geometry_key = "HYBAS_ID"
 
 [algorithm]
+coverage_mode = "correct"
 production_kernel = "direct-any-touch-v2"
 coarse_resolution = 3
 hierarchy_start_resolution = 2
