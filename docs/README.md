@@ -60,6 +60,7 @@ or evidence of a validated global dataset. Optional unmerged work is identified 
 the roadmap and serving guide.
 
 - [Mentor-facing roadmap](roadmap-mini.md)
+- [Scoring, evidence and compact map output plan](pipeline/10_phylogenetic_scoring_plan.md)
 - [GBIF–IUCN concordance proposal](GBIF%E2%80%93IUCN%20Concordance%20Extension%20Idea.md)
 - [Remaining performance hypotheses](performance/next_large_gains.md)
 - [Optimization evaluation method](performance/pipeline_optimization.md)
