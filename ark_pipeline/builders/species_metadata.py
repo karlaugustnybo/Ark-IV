@@ -26,6 +26,7 @@ import duckdb
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+from ark_pipeline.dna_evidence import website_sql
 from ark_pipeline.runtime.progress import monitor_query
 from ark_pipeline.runtime.provenance import sha256
 from ark_pipeline.runtime.resources import configure_duckdb
@@ -250,7 +251,7 @@ def _build_global_species(
             )
 
         connection.execute(
-            """
+            f"""
             CREATE TEMP TABLE goat_traits AS
             SELECT
                 taxon_id,
@@ -269,18 +270,7 @@ def _build_global_species(
                 resampling_required,
                 sample_acquired,
                 sequencing_status,
-                (
-                    nullif(sample_acquired, '') IS NOT NULL
-                    OR nullif(in_progress, '') IS NOT NULL
-                    OR nullif(ebp_standard_criteria, '') IS NOT NULL
-                    OR (
-                        lower(coalesce(assembly_level, ''))
-                            IN ('chromosome', 'complete genome')
-                        AND coalesce(
-                            try_cast(busco_completeness AS DOUBLE), 0
-                        ) >= 90
-                    )
-                ) AS has_qualifying_dna_evidence
+                {website_sql()} AS has_qualifying_dna_evidence
             FROM goat
             """
         )
@@ -607,6 +597,26 @@ def _build_global_species(
                 raise ValueError('IUCN spatial source releases differ')
             iucn_enrichment = apply_iucn_metadata(connection, iucn_details_dir,
                 expected_release=next(iter(releases), None), reviewed_evidence_path=reviewed_evidence_path)
+        assessment_columns = {row[0] for row in connection.execute("DESCRIBE assessments").fetchall()}
+        attributes = {
+            "iucn_population_trend": "populationTrend",
+            "iucn_assessment_date": "assessmentDate",
+            "iucn_assessment_scope": "scopes",
+            "iucn_threat_classifications": "threats",
+        }
+        for target, source in attributes.items():
+            connection.execute(f'ALTER TABLE species ADD COLUMN "{target}" VARCHAR')
+            if source in assessment_columns:
+                if connection.execute(f'''SELECT count(*) FROM (
+                    SELECT internalTaxonId, assessmentId FROM assessments
+                    GROUP BY 1,2 HAVING count(DISTINCT nullif("{source}", '')) > 1)''').fetchone()[0]:
+                    raise ValueError(f'Conflicting assessment attribute: {source}')
+                connection.execute(f"""UPDATE species SET "{target}" = nullif(a."{source}", '')
+                    FROM (SELECT internalTaxonId, assessmentId, max(nullif("{source}", '')) AS "{source}"
+                        FROM assessments GROUP BY 1,2) a WHERE species.iucn_assessment_id = a.assessmentId
+                    AND species.iucn_sis_id = a.internalTaxonId""")
+        connection.execute('ALTER TABLE species ADD COLUMN iucn_attributes_source_sha256 VARCHAR')
+        connection.execute('UPDATE species SET iucn_attributes_source_sha256=? WHERE iucn_assessment_id IS NOT NULL', [sha256(assessments_path)])
         species_path = output_dir / "species.parquet"
         systems_path = output_dir / "species_systems.parquet"
         connection.execute(

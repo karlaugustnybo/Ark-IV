@@ -15,6 +15,10 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=ROOT / ".env", extra="ignore")
 
     coverage_profiles_path: Path | None = None
+    phylogenetic_generation_path: Path | None = None
+    dna_generation_path: Path | None = None
+    spatial_analysis_generation_path: Path | None = None
+    membership_generation_path: Path | None = None
     database_url: str = "postgresql://ark:ark@127.0.0.1:5432/ark_iv"
     api_host: str = "127.0.0.1"
     api_port: int = 8000
@@ -80,6 +84,10 @@ class Settings(BaseSettings):
 
     @field_validator(
         "coverage_profiles_path",
+        "phylogenetic_generation_path",
+        "dna_generation_path",
+        "spatial_analysis_generation_path",
+        "membership_generation_path",
         "h3_id_crosswalk_path",
         "res7_parts_dir",
         "res7_aggregate_parts_dir",
@@ -93,6 +101,10 @@ class Settings(BaseSettings):
 
     @field_validator(
         "coverage_profiles_path",
+        "phylogenetic_generation_path",
+        "dna_generation_path",
+        "spatial_analysis_generation_path",
+        "membership_generation_path",
         "h3_id_crosswalk_path",
         "res7_parts_dir",
         "res7_aggregate_parts_dir",

@@ -85,6 +85,7 @@ def valid_generation(directory: Path, identity: dict) -> bool:
 
 
 def install(output: Path, directory: Path, static_data: Path) -> None:
+    static_data.mkdir(parents=True, exist_ok=True)
     asset = static_data / "adm2-catalogs"
     if asset.exists() and not asset.is_symlink():
         raise ValueError(f"Refusing to replace an unmanaged catalogue directory: {asset}")
@@ -99,7 +100,8 @@ def install(output: Path, directory: Path, static_data: Path) -> None:
     os.replace(temporary, asset)
 
 
-def build(root: Path, output: Path = ADM2_ROOT, static_data: Path = ROOT / "app/static/data") -> dict:
+def build(root: Path, output: Path = ADM2_ROOT, static_data: Path = ROOT / "app/static/data", *,
+          admin0: Path | None = None) -> dict:
     output = output.resolve()
     static_data = static_data.resolve()
     output.mkdir(parents=True, exist_ok=True)
@@ -109,7 +111,7 @@ def build(root: Path, output: Path = ADM2_ROOT, static_data: Path = ROOT / "app/
         except BlockingIOError as exc:
             raise ValueError("Another global ADM2 build is active") from exc
         archive_path, record = source_archive(root)
-        admin0 = static_data / "boundary-catalogs/admin0.json"
+        admin0 = admin0 or static_data / "boundary-catalogs/admin0.json"
         identity = {"source": record["sha256"], "code": code_fingerprint([Path(__file__)]),
                     "shapely": shapely.__version__, "admin0": sha256(admin0)}
         directory = output / "generations" / identity_digest(identity)
@@ -220,8 +222,9 @@ def main() -> None:
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--output-root", type=Path, default=ADM2_ROOT)
     parser.add_argument("--static-data", type=Path, default=ROOT / "app/static/data")
+    parser.add_argument('--admin0', type=Path, help='Read the parent catalogue without writing to its static-data directory')
     args = parser.parse_args()
-    report = build(args.root, args.output_root, args.static_data)
+    report = build(args.root, args.output_root, args.static_data, admin0=args.admin0)
     print(json.dumps({key: value for key, value in report.items() if key != "countries"}, indent=2))
 
 

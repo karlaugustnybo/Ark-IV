@@ -13,10 +13,12 @@ from ark_pipeline.cli.sources_download_iucn import DEFAULT_BASE_URL, IucnApi, re
 from ark_pipeline.cli.sources_fetch_iucn_details import fetch_details, positive_id
 from ark_pipeline.runtime.metadata_publication import publish_metadata, source_registration_guard
 from ark_pipeline.runtime.provenance import atomic_json, sha256
+from ark_pipeline.runtime.resources import configure_duckdb
 
 
 def reconciliation_queue(species_dir: Path) -> dict:
     with duckdb.connect() as db:
+        configure_duckdb(db)
         db.execute(
             "CREATE TABLE species AS SELECT * FROM read_parquet(?)",
             [str(species_dir / "species.parquet")],
@@ -75,6 +77,7 @@ def include_synonym_candidates(queue: dict, species_dir: Path, folder: Path, rel
                     )
                 )
     with duckdb.connect() as db:
+        configure_duckdb(db)
         rows = db.execute(
             """SELECT gbif_accepted_id,iucn_assessment_id FROM read_parquet(?)
             WHERE species_name IN (SELECT unnest(?::VARCHAR[]))""",
@@ -195,6 +198,7 @@ def reconcile_stage(
     baseline["iucn_reconciliation_mode"] = mode
     if "h3_species_missing_iucn_ids" in baseline:
         with duckdb.connect() as db:
+            configure_duckdb(db)
             unassessed = {
                 row[0]
                 for row in db.execute(

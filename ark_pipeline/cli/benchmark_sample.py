@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import heapq
+import inspect
 import math
 import tempfile
 import time
@@ -26,7 +27,13 @@ from ark_pipeline.cli.spatial_pairs import (
 )
 from ark_pipeline.runtime.benchmark_estimates import SIZE_BREAKS
 from ark_pipeline.runtime.progress import emit
-from ark_pipeline.runtime.provenance import atomic_json, iso_now, runtime_identity
+from ark_pipeline.runtime.provenance import (
+    atomic_json,
+    dependency_identity,
+    iso_now,
+    runtime_identity,
+    sha256,
+)
 from ark_pipeline.spatial.coverage import (
     load_spatial_profile,
 )
@@ -41,6 +48,24 @@ DEFAULT_OUTPUT = (
     / "benchmark-samples"
     / "iucn-polygons-stratified-1000.parquet"
 )
+
+SAMPLER_VERSION = 'bottom-hash-bbox-v1'
+
+
+def sample_identity(records, profile, limit=1000, candidates_per_bin=75) -> dict:
+    """Selection dependencies exclude coverage kernels, workers and DB limits."""
+    return {
+        'sampler': SAMPLER_VERSION,
+        'selection_code': hashlib.sha256(''.join(inspect.getsource(fn) for fn in (
+            _priority, _size_bin, _candidate, _select_evenly, _push_bounded,
+            build_sample, exclusion_reason_values)).encode()).hexdigest(),
+        'dependencies': {k: v for k, v in dependency_identity().items() if k in ('shapely', 'pyogrio', 'pyarrow')},
+        'sources': sorted([{k: r[k] for k in ('logical_name', 'sha256', 'bytes', 'release')}
+                           for r in records], key=lambda r: r['logical_name']),
+        'row_policy': {k: list(getattr(profile, k)) for k in ('presence', 'origin', 'seasonality')},
+        'size_breaks': list(SIZE_BREAKS), 'limit': limit, 'candidates_per_bin': candidates_per_bin,
+        'forced_extremes': True,
+    }
 
 # Half-decade-ish bands keep the tiny-range end well represented without
 # dedicating most of the fixture to the overwhelmingly common small polygons.
@@ -401,6 +426,8 @@ def build_sample(
         "archive_stats": archive_stats,
         "runtime": runtime_identity(REPOSITORY_ROOT),
         "wall_seconds": time.perf_counter() - started,
+        "selection_identity": sample_identity(records, profile, limit, candidates_per_bin),
+        "sha256": sha256(output),
     }
     atomic_json(output.with_suffix(".json"), report)
     return report

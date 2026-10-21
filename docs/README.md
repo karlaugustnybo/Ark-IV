@@ -46,6 +46,9 @@ kept under local-only `archive/research/`, not in the GitHub code release. Curre
 validation lives in `tests/`; use `just data-benchmark` for new end-to-end timings.
 
 Optional research: [dated-tree, EDGE and phylogenetic gaps](pipeline/09_edge_prototype.md).
+Optional headless enrichment: [scoring/evidence implementation](pipeline/11_scoring_implementation.md)
+and [progress/acceptance gates](pipeline/10_implementation_progress.md).
+Measured cloud sizing: [resource evidence](pipeline/13_resource_evidence.md).
 
 ## Exploratory notebooks
 

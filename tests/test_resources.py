@@ -5,6 +5,7 @@ import io
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import duckdb
@@ -15,10 +16,41 @@ from ark_pipeline.builders.fine_metrics import parser as metric_parser
 from ark_pipeline.cli.serving_prepare import main, parser, preparation_plan
 from ark_pipeline.cli.serving_tiles import parser as tile_parser
 from ark_pipeline.cli.spatial_pairs import build_parser as spatial_parser
-from ark_pipeline.runtime.resources import configure_duckdb, configured_count, resolve_resources
+from ark_pipeline.runtime.resources import (
+    configure_duckdb,
+    configured_count,
+    effective_limits,
+    resolve_resources,
+)
 
 
 class PipelineResourceTests(unittest.TestCase):
+    def test_effective_limits_respect_cgroup_quota_and_memory(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / 'cpu.max').write_text('200000 100000')
+            (root / 'memory.max').write_text(str(8 * 1024**3))
+            (root / 'memory.current').write_text(str(3 * 1024**3))
+            limits = effective_limits(root)
+            self.assertLessEqual(limits['cpus'], 2)
+            self.assertLessEqual(limits['memory_bytes'], 8 * 1024**3)
+            self.assertLessEqual(limits['available_memory_bytes'], 5 * 1024**3)
+
+    def test_clean_inactive_file_cache_does_not_disable_workers_after_staging(self):
+        gib = 1024**3
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / 'memory.max').write_text(str(32 * gib))
+            (root / 'memory.current').write_text(str(31 * gib))
+            (root / 'memory.stat').write_text(
+                f'inactive_file {20*gib}\nfile_dirty {2*gib}\nfile_writeback {gib}\n')
+            with patch('psutil.virtual_memory', return_value=SimpleNamespace(total=64*gib, available=40*gib)):
+                limits = effective_limits(root)
+            self.assertEqual(limits['available_memory_bytes'], 18 * gib)
+            # Malformed or missing counters retain the conservative fallback.
+            (root / 'memory.stat').write_text('inactive_file unavailable\n')
+            self.assertLessEqual(effective_limits(root)['available_memory_bytes'], gib)
+
     def test_auto_uses_one_memory_aware_budget_and_keeps_helper_threads_small(self) -> None:
         with patch("ark_pipeline.runtime.resources.automatic_workers", return_value=2):
             resources = resolve_resources(environ={})
@@ -74,6 +106,19 @@ class PipelineResourceTests(unittest.TestCase):
                 self.assertEqual(connection.execute("SELECT current_setting('threads')").fetchone()[0], 1)
         finally:
             pa.set_cpu_count(previous)
+
+    def test_shared_connection_applies_configured_memory_and_isolates_spill_paths(self):
+        with tempfile.TemporaryDirectory() as temporary, patch.dict('os.environ', {
+            'DUCKDB_MEMORY_LIMIT': '128MB', 'DUCKDB_SCRATCH_DIR': temporary,
+        }), duckdb.connect() as first, duckdb.connect() as second:
+            configure_duckdb(first, threads=1)
+            configure_duckdb(second, threads=1, memory_limit='256MB')
+            self.assertEqual(first.execute("SELECT current_setting('memory_limit')").fetchone()[0], '122.0 MiB')
+            self.assertEqual(second.execute("SELECT current_setting('memory_limit')").fetchone()[0], '244.1 MiB')
+            paths = [Path(c.execute("SELECT current_setting('temp_directory')").fetchone()[0])
+                     for c in (first, second)]
+            self.assertNotEqual(*paths)
+            self.assertTrue(all(path.is_dir() and path.is_relative_to(temporary) for path in paths))
 
     def test_invalid_counts_fail_before_acquisition_or_builds(self) -> None:
         with patch("ark_pipeline.cli.serving_prepare.subprocess.run") as run, \

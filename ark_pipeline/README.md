@@ -67,6 +67,30 @@ dimension without rebuilding spatial membership or serving outputs.
 
 Commands: `just data-prepare`, `just data-boundaries`, `just global-prepare`.
 
+Optional headless enrichment uses `cli/spatial_analytics.py` for versioned range
+counts/areas and requested stewardship/rarity outputs. Repeated
+`--boundary-catalogue framework=GeoJSON` produces jurisdiction memberships from
+mapped cells using the existing tile boundary policy; the main preparation
+command forwards `--spatial-boundary-catalogue`.
+`cli/phylogenetic_prepare.py` publishes receipt-checked mammal evidence, ED/EDGE and
+default DNA gaps. `cli/analytical_prepare.py` publishes separate coarse/fine
+opportunity presets from retained memberships. `serving_prepare` exposes these
+through `--spatial-analytics`, checked `--phylogenetic` inputs and the optional
+`--phylogenetic-aggregates` stage; legacy pinned input directories also work.
+`cli/dna_prepare.py` and `--dna-evidence` add independently checked species and
+lineage evidence without a tree dependency.
+Their absence preserves the existing categorical build. No enrichment stage
+fills polygons or adds base map fields. See [implementation and commands](../docs/pipeline/11_scoring_implementation.md).
+
+`aggregation/analytical_scores.py` reduces separate continuous scenarios from
+distinct fine/coarse species memberships. `dna_evidence.py` shares versioned
+evidence rules and rank-verified lineage representation independently of trees;
+`phylogenetic_scenarios.py` holds compact tree passes and a bounded scenario LRU.
+`robustness.py` compares common-cohort ranks and top-1/5/10% overlaps with
+deterministic ties; `cli/scoring_compare.py` writes checksum-pinned offline
+reports for species ranks or cell hotspots. These analytical quantities remain
+scientifically separate.
+
 ## 05 — Export tiles
 
 `cli/serving_tiles.py` records prepared inputs and publishes validated tile
@@ -120,7 +144,13 @@ and results remain in ignored local data.
 `edge_links.py` and `cli/edge_link.py` index the unchanged global release and
 link every reviewed assessment through NCBI/OTT identity or exact-name/current
 lineage checks. Ambiguities remain unresolved; linkage does not compute scores
-or change the tree. This identity artifact can support later clade scoring.
+or change the tree. The optional `phylogenetic_prepare --scope global` path uses
+these checked identities for complete-tree descriptive scoring;
+`--phylogenetic-scope global` forwards it from the main preparation entry point.
+`compact_phylogeny.py` parses the released tree into arrays and computes
+descriptive ED/EDGE components using the pinned risk model. The original
+mammal path stays available for comparison. See the
+[headless implementation guide](../docs/pipeline/11_scoring_implementation.md).
 `edge_link_extension.py` and `cli/edge_link_expand.py` add independent exact
 IUCN/OTT identities using current IUCN taxonomy and compatible lineage/clade
 membership. Original links and genomic-transfer flags remain unchanged.

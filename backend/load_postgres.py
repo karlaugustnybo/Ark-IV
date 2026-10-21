@@ -31,13 +31,20 @@ def partition_row_count(parts_dir: Path | None) -> int | None:
 async def load() -> None:
     settings = get_settings()
     external_res7_cells = partition_row_count(settings.res7_parts_dir)
+    phylogenetic_path = None
+    if settings.phylogenetic_generation_path is not None:
+        from ark_pipeline.builders.phylogenetic import load_generation
+        pinned = settings.phylogenetic_generation_path.resolve(strict=True)
+        load_generation(pinned)  # Verify the generation before the SQL transaction.
+        phylogenetic_path = pinned / 'species_phylogenetic.parquet'
+
     connection = await asyncpg.connect(settings.database_url)
     try:
         await connection.execute((ROOT / "backend" / "schema.sql").read_text())
         async with connection.transaction():
             await connection.execute(
                 "TRUNCATE species_passage_cells, cell_species, cell_species_lists, species_cells, cell_boundaries, species_systems, "
-                "species, app_stats CASCADE"
+                "species, species_phylogenetic_scores, app_stats CASCADE"
             )
             species_columns = [
                 "gbif_accepted_id",
@@ -64,6 +71,8 @@ async def load() -> None:
                     "metadata_status",
                     "spatial_redlist_category",
                     "iucn_assessment_latest",
+                    "iucn_population_trend", "iucn_assessment_date", "iucn_assessment_scope",
+                    "iucn_threat_classifications", "iucn_attributes_source_sha256",
                 )
                 if column in available
             ]
@@ -72,6 +81,15 @@ async def load() -> None:
                 records=rows(settings.export_dir / "species.parquet", species_columns),
                 columns=species_columns,
             )
+            if phylogenetic_path is not None:
+                columns = ['generation_id', 'iucn_sis_id', 'tree_tip', 'ed_myr', 'edge1',
+                           'edge2_myr_point', 'edge2_myr_median', 'edge2_myr_p025', 'edge2_myr_p975',
+                           'score_status', 'gap_myr', 'represented', 'baseline_incomplete',
+                           'availability_reason', 'nearest_tip', 'nearest_distance_myr',
+                           'evidence_state', 'qualifying_evidence', 'sample_reported', 'project_reported',
+                           'criteria_reported', 'assembly_reported', 'resampling_reported']
+                await connection.copy_records_to_table('species_phylogenetic_scores',
+                    records=rows(phylogenetic_path, columns), columns=columns)
             system_columns = ["gbif_accepted_id", "system"]
             await connection.copy_records_to_table(
                 "species_systems",

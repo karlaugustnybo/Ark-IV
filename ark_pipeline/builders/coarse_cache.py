@@ -441,7 +441,9 @@ def export_parquet(
     available_columns = {row[0] for row in connection.execute("DESCRIBE SpecInfo").fetchall()}
     extra = [column for column in ("metadata_status", "spatial_redlist_category",
              "spatial_metadata_provenance", "spatial_metadata_conflicts",
-             "iucn_metadata_provenance", "iucn_ecosystem_evidence", "iucn_assessment_latest") if column in available_columns]
+             "iucn_metadata_provenance", "iucn_ecosystem_evidence", "iucn_assessment_latest",
+             "iucn_population_trend", "iucn_assessment_date", "iucn_assessment_scope",
+             "iucn_threat_classifications", "iucn_attributes_source_sha256") if column in available_columns]
     if extra:
         exports["species.parquet"] = exports["species.parquet"].replace(
             "FROM SpecInfo", ", " + ", ".join(extra) + " FROM SpecInfo")
@@ -961,7 +963,8 @@ def main() -> None:
     settings.tile_dir.mkdir(parents=True, exist_ok=True)
 
     connection = duckdb.connect(str(settings.build_duckdb_path))
-    configure_duckdb(connection)
+    configure_duckdb(connection, memory_limit=settings.duckdb_memory_limit,
+                     scratch_dir=settings.duckdb_scratch_dir)
     stop_query_monitor = monitor_query(connection)
     try:
         tables = {row[0] for row in connection.execute("SHOW TABLES").fetchall()}

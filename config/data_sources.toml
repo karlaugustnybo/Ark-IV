@@ -36,6 +36,10 @@ required_sources = [
   "gbif-backbone",
 ]
 
+[profiles.phylogenetic]
+description = "Optional pinned dated tree and OTT taxonomy; independent of spatial acquisition."
+required_sources = ["dated-tree", "ott-taxonomy"]
+
 [[sources]]
 id = "geoboundaries-adm2"
 provider = "geoBoundaries"
@@ -173,3 +177,32 @@ official_url = "https://www.gbif.org/dataset/d7dddbf4-2cf0-4f39-9b2a-bb099caae36
 terms_url = "https://creativecommons.org/licenses/by/4.0/"
 download_url = "https://hosted-datasets.gbif.org/datasets/backbone/current/backbone.zip"
 output_file = "backbone.zip"
+
+# These already-supported research inputs are optional registered sources.
+[[sources]]
+id = "dated-tree"
+provider = "Duke et al."
+description = "Pinned dated complete tree, used for the explicit mammal enrichment."
+access = "public-download"
+update_policy = "pinned"
+required = false
+release = "10.5281-zenodo.19049120"
+official_url = "https://zenodo.org/records/19049120"
+terms_url = "https://creativecommons.org/licenses/by/4.0/"
+download_url = "https://zenodo.org/api/records/19049120/files/equal_splits_median_tree.tre/content"
+output_file = "equal_splits_median_tree.tre"
+file_sha256 = { "equal_splits_median_tree.tre" = "e34d426feeb76aa87918321d1096f1b17413add627979976f987c817c95f7a11" }
+
+[[sources]]
+id = "ott-taxonomy"
+provider = "Open Tree of Life"
+description = "Pinned OTT taxonomy; inherited source terms remain applicable."
+access = "public-download"
+update_policy = "pinned"
+required = false
+release = "OTT-3.7.3"
+official_url = "https://files.opentreeoflife.org/ott/ott3.7.3/"
+terms_url = "https://tree.opentreeoflife.org/about/licenses"
+download_url = "https://files.opentreeoflife.org/ott/ott3.7.3/ott3.7.3.tgz"
+output_file = "ott3.7.3.tgz"
+file_sha256 = { "ott3.7.3.tgz" = "7603aeb68ff45749773b4885811b1280d057f8c178b93bd903849fb7f237dfb3" }

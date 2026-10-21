@@ -7,6 +7,9 @@ postgres_app_database := env_var_or_default("POSTGRES_APP_DATABASE", "ark_iv")
 global_data_root := env_var_or_default("GLOBAL_DATA_ROOT", "./data/external")
 global_h3_root := env_var_or_default("GLOBAL_H3_ROOT", global_data_root / "h3_aggregated")
 global_preview_root := env_var_or_default("GLOBAL_PREVIEW_ROOT", global_data_root / "ark_iv_global_preview")
+global_build_root := env_var_or_default("GLOBAL_BUILD_ROOT", "data/global")
+global_adm2_root := env_var_or_default("GLOBAL_ADM2_ROOT", "data/boundaries/adm2")
+global_static_data := env_var_or_default("GLOBAL_STATIC_DATA", "app/static/data")
 global_crosswalk_path := env_var_or_default("GLOBAL_CROSSWALK_PATH", "data/exports/iucn_goat_global/iucn_goat_crosswalk.parquet")
 global_database_url := env_var_or_default("GLOBAL_DATABASE_URL", "postgresql://ark:ark@127.0.0.1:5432/ark_iv_global")
 
@@ -279,32 +282,32 @@ global-prepare: global-build-preview global-res7-aggregate
     uv run python -m ark_pipeline.cli.serving_tiles record \
       --h3-root "{{ global_h3_root }}" \
       --parts-dir "{{ global_preview_root }}/res7_aggregates" \
-      --build-duckdb data/global/build.duckdb \
-      --species data/global/species/species.parquet \
-      --species-systems data/global/species/species_systems.parquet \
+      --build-duckdb "{{ global_build_root }}/build.duckdb" \
+      --species "{{ global_build_root }}/species/species.parquet" \
+      --species-systems "{{ global_build_root }}/species/species_systems.parquet" \
       --crosswalk "{{ global_crosswalk_path }}" \
-      --metadata-template data/global/tiles/map-metadata.json \
+      --metadata-template "{{ global_build_root }}/tiles/map-metadata.json" \
       --output "{{ global_preview_root }}/prepared-inputs.json"
 
 # Build the global resolution-3 preview without running the expensive lossless audit.
 [group('05 - Serving stages')]
-global-build-preview: data-boundaries
+global-build-preview: global-boundaries-prepare
     uv run python -m ark_pipeline.cli.serving_metadata \
       --root "{{ global_data_root }}" --h3-root "{{ global_h3_root }}" \
-      --crosswalk "{{ global_crosswalk_path }}" --output-dir data/global/species
+      --crosswalk "{{ global_crosswalk_path }}" --output-dir "{{ global_build_root }}/species"
     uv run python ark_pipeline/builders/source_database.py \
-      --target data/global/source.duckdb --overwrite --resolutions 3 \
-      --species-parquet data/global/species/species.parquet \
-      --species-systems-parquet data/global/species/species_systems.parquet \
+      --target "{{ global_build_root }}/source.duckdb" --overwrite --resolutions 3 \
+      --species-parquet "{{ global_build_root }}/species/species.parquet" \
+      --species-systems-parquet "{{ global_build_root }}/species/species_systems.parquet" \
       --h3-res3 "{{ global_h3_root }}/h3_res3_species_global_merged.parquet" \
       --crosswalk "{{ global_crosswalk_path }}" \
       --defer-lossless-validation
-    SOURCE_DUCKDB_PATH=./data/global/source.duckdb \
-      BUILD_DUCKDB_PATH=./data/global/build.duckdb \
-      EXPORT_DIR=./data/global/exports TILE_DIR=./data/global/tiles \
-      PMTILES_PATH=./data/global/tiles/priorities.pmtiles \
-      MAP_METADATA_PATH=./data/global/tiles/map-metadata.json \
-      VALIDATION_REPORT_PATH=./data/global/build-validation.json \
+    SOURCE_DUCKDB_PATH="{{ global_build_root }}/source.duckdb" \
+      BUILD_DUCKDB_PATH="{{ global_build_root }}/build.duckdb" \
+      EXPORT_DIR="{{ global_build_root }}/exports" TILE_DIR="{{ global_build_root }}/tiles" \
+      PMTILES_PATH="{{ global_build_root }}/tiles/priorities.pmtiles" \
+      MAP_METADATA_PATH="{{ global_build_root }}/tiles/map-metadata.json" \
+      VALIDATION_REPORT_PATH="{{ global_build_root }}/build-validation.json" \
       uv run python ark_pipeline/builders/coarse_cache.py --rebuild-aggregates --resolutions 3 \
       --skip-expanded-cell-species --defer-lossless-validation
 
@@ -331,11 +334,11 @@ global-db-load:
 global-res7-aggregate *args:
     uv run python -m ark_pipeline.builders.fine_metrics aggregate \
       --parts-dir "{{ global_h3_root }}/res7_merged_parts" \
-      --species data/global/species/species.parquet \
-      --species-systems data/global/species/species_systems.parquet \
+      --species "{{ global_build_root }}/species/species.parquet" \
+      --species-systems "{{ global_build_root }}/species/species_systems.parquet" \
       --output-dir "{{ global_preview_root }}/res7_aggregates" \
       --scratch-dir "{{ global_preview_root }}/scratch" \
-      --memory-limit "${DUCKDB_MEMORY_LIMIT:-750MB}" "$@"
+      --memory-limit "${RES7_MEMORY_LIMIT:-${DUCKDB_MEMORY_LIMIT:-750MB}}" "$@"
 
 # Prepare coarse PMTiles and dynamic fine H3 serving from recorded inputs.
 [positional-arguments]
@@ -354,7 +357,14 @@ global-res7-tiles: data-tiles
 [group('02 - Data workflow')]
 data-boundaries:
     uv run python -m ark_pipeline.cli.sources_acquire update --root "{{ global_data_root }}" --source geoboundaries-adm2
-    uv run python -m ark_pipeline.cli.boundaries_prepare --root "{{ global_data_root }}"
+    just global-boundaries-prepare
+
+# Build only from the registered boundary snapshot; serving must not advance it.
+[group('05 - Serving stages')]
+global-boundaries-prepare:
+    uv run python -m ark_pipeline.cli.boundaries_prepare --root "{{ global_data_root }}" \
+      --output-root "{{ global_adm2_root }}" --static-data "{{ global_static_data }}" \
+      --admin0 app/static/data/boundary-catalogs/admin0.json
 
 # Start the already-built global dataset.
 [group('06 - Compatibility and internals')]

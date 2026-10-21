@@ -1,11 +1,27 @@
+import tempfile
 import unittest
+from pathlib import Path
 
 import pandas as pd
 
+from ark_pipeline.cli.edge_baseline_review import relocated_source
 from ark_pipeline.edge_baseline_review import apply_reviewed_baseline, review_baseline_links
+from ark_pipeline.runtime.provenance import sha256
 
 
 class BaselineReviewTests(unittest.TestCase):
+    def test_relocated_review_input_keeps_original_identity_and_rejects_changed_content(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / 'checked-input'
+            path.write_bytes(b'original checked input')
+            source = {'path': '/old/workstation/input', 'sha256': sha256(path)}
+            selected = relocated_source('crosswalk', source, {'crosswalk': str(path)})
+            self.assertEqual(selected['sha256'], source['sha256'])
+            self.assertEqual(source['path'], '/old/workstation/input')
+            path.write_bytes(b'changed')
+            with self.assertRaisesRegex(ValueError, 'checksum changed'):
+                relocated_source('crosswalk', source, {'crosswalk': str(path)})
+
     def fixture(self):
         baseline = pd.DataFrame(
             [
@@ -151,6 +167,22 @@ class BaselineReviewTests(unittest.TestCase):
             apply_reviewed_baseline(before.assign(legacy_broad_evidence=False), result, summary)
         with self.assertRaisesRegex(ValueError, "without approval"):
             apply_reviewed_baseline(before, result, summary.assign(recovered=False))
+
+    def test_nonqualifying_bridge_is_added_after_historical_review_validation(self):
+        from ark_pipeline.cli.phylogenetic_gap import add_rule_independent_bridges
+        before = self.fixture()[0].assign(legacy_broad_evidence=False)
+        summary = pd.DataFrame({'taxon_id': ['1'], 'recovered': [False]})
+        checked = apply_reviewed_baseline(before, before.copy(), summary)
+        bridge = dict(canonical_ncbi_taxid='1', tree_tip='Genus_alpha_ott10',
+                      tree_join_status='linked', tree_join_route='reviewed_iucn_species_bridge')
+        result = add_rule_independent_bridges(checked, [bridge])
+        self.assertEqual(result.tree_tip.iloc[0], bridge['tree_tip'])
+        self.assertFalse(result.legacy_broad_evidence.iloc[0])
+        self.assertIsNone(before.tree_tip.iloc[0])
+        with self.assertRaisesRegex(ValueError, 'without approval'):
+            apply_reviewed_baseline(result, before, summary)
+        with self.assertRaisesRegex(ValueError, 'conflicts'):
+            add_rule_independent_bridges(result, [{**bridge, 'tree_tip': 'another'}])
 
     def test_iucn_override_is_recorded_without_inventing_missing_leaf(self):
         _, candidates, targets = self.fixture()

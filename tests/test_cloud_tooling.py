@@ -481,6 +481,30 @@ class StorageTests(unittest.TestCase):
 
 
 class PipelineContracts(unittest.TestCase):
+    def test_full_job_propagates_explicit_resources_to_actual_stage_commands(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            with patch.object(job, "ROOT", root / "inputs"), patch.object(job, "OUT", root / "out"):
+                config, stages, environment, _ = job.full_plan(
+                    ROOT / "config/spatial_semantics_iucn_richness_v3_fast.toml",
+                    resource_options={"workers": 16, "metric_workers": 8,
+                                      "duckdb_threads": 12, "metric_threads": 1},
+                    memory_limit="4GB", iucn_details_dir=root / 'retained-cache',
+                    iucn_metadata_mode='cache-only')
+            lists = next(s['command'] for s in stages if s['name'] == 'lists')
+            metrics = next(s['command'] for s in stages if s['name'] == 'fine_metrics')
+            self.assertEqual(lists[lists.index('--threads')+1], '12')
+            self.assertEqual(lists[lists.index('--memory-limit')+1], '4GB')
+            self.assertEqual(metrics[metrics.index('--memory-limit')+1], '4GB')
+            self.assertEqual(environment['SPATIAL_WORKERS'], '16')
+            self.assertEqual(environment['RES7_WORKERS'], '8')
+            self.assertEqual(environment['RES7_THREADS'], '1')
+            self.assertEqual(environment['TIPPECANOE_MAX_THREADS'], '16')
+            self.assertEqual(config['resources']['duckdb_threads'], 12)
+            metadata = next(s['command'] for s in stages if s['name'] == 'metadata')
+            self.assertEqual(metadata[metadata.index('--iucn-metadata-mode')+1], 'cache-only')
+            self.assertEqual(metadata[metadata.index('--iucn-details-dir')+1], str(root / 'retained-cache'))
+
     def test_actual_main_full_plan_and_optional_reconciliation_contract(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp).resolve()
@@ -924,6 +948,8 @@ class CompletionContracts(unittest.TestCase):
             original_plan = profiler.bp.plan
 
             def run(arguments):
+                # This contract exercises orchestration, with no real sample.
+                arguments.dry_run = True
                 _, stages, _ = profiler.bp.plan(arguments)
                 scan = next(stage for stage in stages if stage["name"] == "source_scan")
                 self.assertIn(str(census), scan["command"])

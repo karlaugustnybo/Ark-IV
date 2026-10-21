@@ -440,6 +440,12 @@ class SpatialBuildTests(unittest.TestCase):
                 self.assertAlmostEqual(row["decision_simplification_bound_metres"], 1116.9398)
 
     def test_points_and_hydrobasins_flow_into_the_shared_pair_contract(self) -> None:
+        self._mixed_source_contract(RICHNESS_PROFILE_PATH)
+
+    def test_fast_points_and_hydrobasins_flow_into_the_shared_pair_contract(self) -> None:
+        self._mixed_source_contract(REPOSITORY_ROOT / 'config/spatial_semantics_iucn_richness_v3_fast.toml')
+
+    def _mixed_source_contract(self, profile_path: Path, verify_generation=None) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             self._data_pack(root)
@@ -468,14 +474,13 @@ class SpatialBuildTests(unittest.TestCase):
 
             basin_source = root / "basin-source"
             basin_source.mkdir()
-            basin_shape = basin_source / "hybas_af_lev08_v1c.shp"
-            pyogrio.write_dataframe(
-                gpd.GeoDataFrame(
-                    {"HYBAS_ID": [1080000010], "geometry": [box(12.56, 55.67, 12.57, 55.68)]},
-                    crs="EPSG:4326",
-                ),
-                basin_shape,
-            )
+            for level in range(1, 13):
+                pyogrio.write_dataframe(
+                    gpd.GeoDataFrame(
+                        {"HYBAS_ID": [int(f'1{level:02d}0000010')],
+                         "geometry": [box(12.56, 55.67, 12.57, 55.68)]}, crs="EPSG:4326"),
+                    basin_source / f"hybas_af_lev{level:02d}_v1c.shp",
+                )
             basin_archive = incoming / "hydrobasins/v1c/hybas_af_lev01-12_v1c.zip"
             basin_archive.parent.mkdir(parents=True)
             with zipfile.ZipFile(basin_archive, "w") as archive:
@@ -519,7 +524,7 @@ class SpatialBuildTests(unittest.TestCase):
             manifest_path.write_text(json.dumps(manifest))
 
             output = root / "derived"
-            profile = load_spatial_profile(RICHNESS_PROFILE_PATH)
+            profile = load_spatial_profile(profile_path)
             report = build(
                 root,
                 output,
@@ -584,11 +589,32 @@ class SpatialBuildTests(unittest.TestCase):
                 ].to_pylist()
             )
             self.assertTrue({201, 204}.issubset(species))
+            if verify_generation is not None:
+                verify_generation(root, output, profile)
 
     def test_hydrobasins_resolves_lakes_islands_and_standard_fallback(self) -> None:
+        self._hydrobasin_resolution_contract(RICHNESS_PROFILE_PATH, PARTIAL_PROFILE_PATH, PASSAGE_PROFILE_PATH)
+
+    def test_fast_partial_basins_retains_omissions_reuse_and_strict_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            passage = Path(directory) / 'fast-passage.toml'
+            passage.write_text(PASSAGE_PROFILE_PATH.read_text().replace(
+                '[algorithm]', '[algorithm]\ncoverage_mode = "fast"'))
+            self._hydrobasin_resolution_contract(
+                REPOSITORY_ROOT / 'config/spatial_semantics_iucn_richness_v3_fast.toml',
+                REPOSITORY_ROOT / 'config/spatial_semantics_iucn_richness_v3_fast_partial_basins.toml',
+                passage)
+
+    def _hydrobasin_resolution_contract(self, strict_path, partial_path, passage_path) -> None:
         import pyarrow as pa
 
-        from ark_pipeline.cli.spatial_pairs import BASIN_RELATION_SCHEMA, build_hydrobasin_index
+        from ark_pipeline.cli.spatial_pairs import (
+            BASIN_RELATION_SCHEMA,
+            _initialize_worker,
+            build_hydrobasin_index,
+        )
+
+        _initialize_worker(load_spatial_profile(strict_path))
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -618,7 +644,7 @@ class SpatialBuildTests(unittest.TestCase):
             relations.parent.mkdir(parents=True)
             pq.write_table(pa.Table.from_pydict({"hybas_id": ids, "iucn_sis_id": [1] * 4}, schema=BASIN_RELATION_SCHEMA), relations)
             report = build_hydrobasin_index([relations], records, root / "out",
-                load_spatial_profile(RICHNESS_PROFILE_PATH), "fixture", None,
+                load_spatial_profile(strict_path), "fixture", None,
                 scratch_dir=root / "scratch", memory_limit="256MB", threads=1, force=False)
             self.assertEqual(report["referenced_basins"], 4)
             cells = pq.read_table(report["path"]).to_pydict()
@@ -642,11 +668,11 @@ class SpatialBuildTests(unittest.TestCase):
             with patch("ark_pipeline.cli.spatial_pairs._polyfill_wkb", side_effect=AssertionError("must reconcile IDs first")):
                 with self.assertRaisesRegex(ValueError, "100000099.*Reconcile inputs"):
                     build_hydrobasin_index([relations], records, root / "out",
-                        load_spatial_profile(RICHNESS_PROFILE_PATH), "fixture", None,
+                        load_spatial_profile(strict_path), "fixture", None,
                         scratch_dir=root / "scratch", memory_limit="256MB", threads=1, force=False)
             self.assertEqual(sha256(report["path"]), previous_digest)
 
-            partial_profile = load_spatial_profile(PARTIAL_PROFILE_PATH)
+            partial_profile = load_spatial_profile(partial_path)
             partial_report = build_hydrobasin_index([relations], records, root / "partial-out",
                 partial_profile, "fixture", None, scratch_dir=root / "scratch", memory_limit="256MB", threads=1, force=False)
             self.assertEqual(partial_report["coverage_status"], "partial-missing-basin-geometries")
@@ -672,7 +698,7 @@ class SpatialBuildTests(unittest.TestCase):
                 partial_profile, "fixture", None, scratch_dir=root / "scratch", memory_limit="256MB", threads=1, force=False)
             self.assertEqual(cached["status"], "reused")
             # A different seasonal profile cannot reuse even identical basin membership.
-            passage_profile = load_spatial_profile(PASSAGE_PROFILE_PATH)
+            passage_profile = load_spatial_profile(passage_path)
             passage_report = build_hydrobasin_index([relations], records, root / "partial-out",
                 passage_profile, "fixture", None, scratch_dir=root / "scratch",
                 memory_limit="256MB", threads=1, force=False)
@@ -696,7 +722,7 @@ class SpatialBuildTests(unittest.TestCase):
             # A partial receipt cannot satisfy the strict profile.
             with self.assertRaisesRegex(ValueError, "Reconcile inputs"):
                 build_hydrobasin_index([relations], records, root / "partial-out",
-                    load_spatial_profile(RICHNESS_PROFILE_PATH), "fixture", None,
+                    load_spatial_profile(strict_path), "fixture", None,
                     scratch_dir=root / "scratch", memory_limit="256MB", threads=1, force=False)
 
     def test_worker_failure_reports_geometry_error_without_publishing_outputs(self) -> None:

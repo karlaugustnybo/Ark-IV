@@ -362,6 +362,12 @@ Investigate cell-details latency from map selection; no public baseline or laten
 
 Review the main species table and the cell-details table on the map page for layout, sorting, filtering, pagination, responsive behaviour, and clear presentation of threat, DNA, and priority values. Give both tables consistent styling and add the relevant shared features while retaining controls specific to each context.
 
+### Expand species rows to show all available statistics
+
+**Priority:** P2 · **Status:** Proposed
+
+Let users expand a species row in both the main species table and the map's cell-details table to inspect all available statistics and supporting metadata without leaving the table. Include taxonomy, conservation status, genomic evidence, score components and final scores, distribution statistics, and source provenance where available. Explain derived values and distinguish missing or uncertain evidence from zero values. Support keyboard-accessible expansion and collapse, with a readable layout on small screens.
+
 ## 4. Documentation and communication
 
 ### Add map images to the README
@@ -622,7 +628,14 @@ Preserve compatible source/code receipts and unresolved values. Identity links d
 authorize genomic transfers. Data publication requires the existing release policy.
 
 Implementation and scientific acceptance are separate milestones. This roadmap
-item proposes future pipeline work; the optional pilot remains outside production serving.
+item remains unmerged and outside production serving. The current working
+checkout has optional headless generation/API stages, complete released-tree
+scoring selected with `--phylogenetic-scope global`, retained source support,
+range/stewardship builders and a reproducible robustness rehearsal. See the
+[implementation guide](pipeline/11_scoring_implementation.md) and
+[acceptance record](pipeline/12_pipeline_acceptance.md) for measured scope,
+unavailable identities and the remaining execution/scientific gates. Table UI
+and activation remain separate work.
 
 ### Compute Ark-IV EDGE-style scores from a dated global tree
 
@@ -1023,3 +1036,17 @@ Tranche 4 should wait until the GGBN
 and its licence verification establish how third-party sequence-derived
 data can be displayed at all. See A06 (field preservation), A13, and
 A18.
+
+## 7. Pipeline compute performance
+
+### Investigate accelerator support for the spatial coverage stage
+
+**Priority:** P3 · **Status:** Investigation
+
+The global build's cost is concentrated in the polygon-to-H3 coverage stage and
+the pair/list deduplication that follows it, and the coverage kernel runs at
+approximately one CPU core. Both stages are large and uniform, so an accelerator
+is a plausible but unproven lever. No GPU H3 polyfill exists, so any accelerator
+must first reproduce the current closed any-touch membership exactly on the
+agreed fixtures; the CPU path remains the authority, and results compete with the
+existing multi-process and compact-hierarchy options rather than assumed faster.

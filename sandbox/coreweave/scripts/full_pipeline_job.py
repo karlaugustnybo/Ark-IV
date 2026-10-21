@@ -16,6 +16,7 @@ from launch import owned_process
 
 from ark_pipeline.cli import benchmark_pipeline as bp
 from ark_pipeline.runtime.provenance import atomic_json
+from ark_pipeline.runtime.resources import positive_int, worker_count
 
 ROOT = Path("/scratch/ark-data")
 OUT = Path("/scratch/ark-output")
@@ -25,7 +26,9 @@ PROFILE = (
 )
 
 
-def full_plan(profile: Path = PROFILE, *, boundaries=None):
+def full_plan(profile: Path = PROFILE, *, boundaries=None, resource_options=None,
+              memory_limit: str = "2GB", iucn_details_dir: Path | None = None,
+              iucn_metadata_mode: str = "auto"):
     # Reuse the production benchmark's downstream commands and isolated paths;
     # replace only its fixture-based pair/list stages with production builders.
     boundary_args = []
@@ -33,6 +36,12 @@ def full_plan(profile: Path = PROFILE, *, boundaries=None):
     for name, source in sources.items():
         target = Path(source)
         boundary_args += ["--" + name.replace("_", "-"), str(target)]
+    resource_args = []
+    for name, value in (resource_options or {}).items():
+        if name not in bp.RESOURCE_FLAGS:
+            raise ValueError(f"Unknown pipeline resource setting: {name}")
+        if value is not None:
+            resource_args += ["--" + name.replace("_", "-"), str(value)]
     args = bp.parser().parse_args(
         [
             "--root",
@@ -41,33 +50,32 @@ def full_plan(profile: Path = PROFILE, *, boundaries=None):
             str(OUT),
             "--profile",
             str(profile),
-            "--workers",
-            "8",
-            "--metric-workers",
-            os.environ.get("ARK_PIPELINE_METRIC_WORKERS", "6"),
-            "--metric-threads",
-            "1",
-            "--tile-threads",
-            "8",
-            "--tile-duckdb-threads",
-            "1",
+            "--dry-run",
             "--memory-limit",
-            "2GB",
+            memory_limit,
+            *resource_args,
             *boundary_args,
         ]
     )
     config, stages, env = bp.plan(args)
+    # Planning precedes input staging, so it must not discover/build a fixture.
+    # Pin the reviewed evidence independently of benchmark-only discovery.
+    config["reviewed_evidence"] = bp.reviewed_evidence_identity()
+    env["GLOBAL_IUCN_REVIEWED_EVIDENCE_PATH"] = config["reviewed_evidence"]["path"]
     env["SPATIAL_PROFILE"] = str(profile.resolve())
     stages = [s for s in stages if s["name"] not in {"sample_setup", "source_scan"}]
     for stage in stages:
         if stage["name"] == "metadata":
             command = stage["command"]
-            if "--iucn-metadata-mode" in command:
-                command[command.index("--iucn-metadata-mode") + 1] = "auto"
-                command += ["--iucn-details-dir", str(OUT / "species/iucn-details")]
-                config["iucn_reconciliation"] = "automatic"
-            else:
-                config["iucn_reconciliation"] = "unavailable-in-selected-code"
+            for flag, value in (
+                ("--iucn-metadata-mode", iucn_metadata_mode),
+                ("--iucn-details-dir", str(iucn_details_dir or OUT / "species/iucn-details")),
+            ):
+                if flag in command:
+                    command[command.index(flag) + 1] = value
+                else:
+                    command += [flag, value]
+            config["iucn_reconciliation"] = "automatic" if iucn_metadata_mode == 'auto' else iucn_metadata_mode
         if stage["name"] == "pairs":
             stage["command"] = [
                 sys.executable,
@@ -94,9 +102,9 @@ def full_plan(profile: Path = PROFILE, *, boundaries=None):
                 "--output-root",
                 str(OUT / "spatial"),
                 "--memory-limit",
-                "2GB",
+                config["memory_limit"],
                 "--threads",
-                "8",
+                str(config["resources"]["duckdb_threads"]),
                 "--ui",
                 "plain",
             ]
@@ -201,6 +209,15 @@ def main(argv=None):
     parser.add_argument("--artifact", required=True)
     parser.add_argument("--result-name", required=True)
     parser.add_argument("--compute-seconds", type=int, default=1800)
+    parser.add_argument("--workers", type=worker_count,
+                        help="Shared worker budget (default: memory-aware auto).")
+    for name in bp.RESOURCE_FLAGS[1:]:
+        parser.add_argument("--" + name.replace("_", "-"), type=positive_int)
+    parser.add_argument("--memory-limit", default="2GB",
+                        help="Per-connection DuckDB limit, multiplied by concurrent workers.")
+    parser.add_argument('--iucn-details-dir', type=Path,
+                        help='Existing release-matched private cache, outside the fresh output root.')
+    parser.add_argument('--iucn-metadata-mode', choices=('auto', 'cache-only', 'off'), default='auto')
     parser.add_argument(
         "--persist",
         action="store_true",
@@ -234,7 +251,10 @@ def main(argv=None):
     required = {"admin0", "admin1", "eez", "conservation_framework", "municipality"}
     if set(boundaries) != required or not all(Path(p).is_file() for p in boundaries.values()):
         parser.error("All five explicit benchmark boundary files are required")
-    config, stages, env, _ = full_plan(args.profile, boundaries=boundaries)
+    config, stages, env, _ = full_plan(args.profile, boundaries=boundaries,
+        resource_options={name: getattr(args, name) for name in bp.RESOURCE_FLAGS},
+        memory_limit=args.memory_limit, iucn_details_dir=args.iucn_details_dir,
+        iucn_metadata_mode=args.iucn_metadata_mode)
     if args.mode == "plan":
         print(json.dumps({"config": config, "stages": stages, "environment": env}, indent=2))
         return 0

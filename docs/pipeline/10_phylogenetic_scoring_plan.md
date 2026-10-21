@@ -1,6 +1,30 @@
 # Next pipeline milestones: scoring, evidence and compact map outputs
 
-**Planning date:** 19 October 2026. **Status:** proposed implementation plan.
+**Planning date:** 19 October 2026. **Readiness reviewed:** 20 October 2026.
+The expanded all-acquired-clade candidate has passed its pre-full implementation
+and cloud checks: 124 final checks, representative real FAST calibration,
+separate repair sensitivity, the nine-scenario robustness matrix and immutable
+artifact download/restore/reuse. Earlier mammal-only readiness was too narrow;
+this expanded record supersedes it. Full execution still requires authorization;
+see the [acceptance record](12_pipeline_acceptance.md) and
+[resource measurements](13_resource_evidence.md). Full-data execution, final
+correct-path coverage, scientific adoption and the later table UI are separate
+unperformed gates. No new default score is adopted.
+
+Execution update: larger checks run in the cloud sandbox with a USD 75
+pre-full-run spending cap. Routine spatial runs use the fast path. A correct-path
+run is the final action and requires Karl August's explicit authorization.
+This supersedes the execution order where it would otherwise run correct-path
+calibration earlier; scientific acceptance is still required before adoption.
+
+Scope update, 20 October: Karl August requested all acquired clades for the
+candidate. Select `--phylogenetic-scope global` explicitly. The complete
+released global root retains connecting branches; it is not a sum of separate
+stem-free class scores. The mammal-first sequence below records the original
+validation order. Broader scoring now precedes the full spatial build, with
+per-class available/unavailable counts. Missing tree/genomic identities and
+the retained partial-basin omissions remain explicit; this does not promise
+100% species or distribution completeness.
 
 Implementation observations describe the inspected local working checkout and
 its saved audits. Some research/serving paths remain optional or unmerged on
@@ -10,8 +34,9 @@ The next substantial pipeline work should develop dated-tree scores and
 configurable DNA evidence alongside range-rarity/stewardship calculations and
 spatial evidence provenance. Preserve useful evidence during the next run,
 then expose each analytical capability through the smallest appropriate output.
-Deliver one validated clade through the dated-tree path first, then expand to
-supported clades.
+The original mammal reference is retained; the current candidate includes all
+acquired clades under the complete released root, with explicit unavailable
+identities and scientific limitations.
 
 **Payload constraint:** richer species tables and cell details do not justify
 larger PMTiles. Keep the existing base map payload unchanged by default. New
@@ -400,8 +425,9 @@ tile-schema growth as species fields are added.
 ### 2. Make representative fixtures reusable
 
 Implement or repair verified-sample discovery/reuse and independent census
-reuse from Section 10B. Refresh selection under the current row policy rather
-than treating the historical v2 sample as representative. Add a small mixed
+reuse from Section 10B. Verify selection under the current row policy rather
+than assuming a saved fixture predates it. The implementation check regenerated
+the complete sample and found its bytes already match current v3 selection. Add a small mixed
 polygon/point/basin fixture, difficult geometries and a dense list/metric
 partition. Preserve the original baseline and receipt identities.
 
@@ -625,8 +651,9 @@ integration test. Before launching it:
   holes, large ranges and antimeridian cases. Report per-species added/omitted
   cells and hotspot changes; agree acceptable error. Review geometry-repair
   effects separately from simplification effects.
-- **Refresh representative validation:** the saved timing fixture predates v3
-  sampling, and point/HydroBASINS work is absent from its projected benchmark.
+- **Refresh representative validation:** the implementation regenerated the
+  complete sample and verified byte-identical current-v3 selection. The historical
+  projected benchmark still excludes point/HydroBASINS work.
   Exercise all three source routes through metadata, memberships, metrics and
   serving artifacts using small isolated inputs. Verify changed evidence
   invalidates dependent outputs and completed work resumes correctly.

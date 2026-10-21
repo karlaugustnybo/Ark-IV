@@ -16,7 +16,13 @@ from ark_pipeline.builders.coarse_cache import DEFAULT_WEIGHTS
 from ark_pipeline.cli.edge_prototype import receipt
 from ark_pipeline.cli.serving_metadata import source_file, validate_crosswalk_sources
 from ark_pipeline.cli.sources_acquire import load_manifest
-from ark_pipeline.edge import acquire_inputs, canonical_taxid, load_clade, load_ncbi_merges
+from ark_pipeline.edge import (
+    acquire_inputs,
+    canonical_taxid,
+    load_clade,
+    load_ncbi_merges,
+    verify_source,
+)
 from ark_pipeline.edge_baseline_review import apply_reviewed_baseline
 from ark_pipeline.edge_links import current_ncbi_ranks, direct_identifiers
 from ark_pipeline.edge_matching import normalize_name
@@ -48,6 +54,28 @@ def comparison(frame, old, new, k=100):
         legacy_at_or_above_cutoff=int(common[old].ge(boundary).sum()),
         tie_break="ascending IUCN SIS ID for fixed-budget diagnostics only",
     )
+
+
+def add_rule_independent_bridges(baseline, bridges):
+    """Extend validated historical links with independently checked identities.
+
+    Call only after apply_reviewed_baseline: the saved review describes the
+    historical positive baseline, while these witnesses support other rules.
+    A different reviewed/direct tip remains a conflict, never an overwrite.
+    """
+    baseline = baseline.copy()
+    for bridge in bridges:
+        selected = baseline.canonical_ncbi_taxid.eq(bridge['canonical_ncbi_taxid'])
+        if selected.sum() != 1:
+            raise ValueError('Bridge requires one current GoaT identity')
+        existing = baseline.loc[selected].iloc[0]
+        if existing.tree_join_status == 'linked':
+            if existing.tree_tip != bridge['tree_tip']:
+                raise ValueError('Independent bridge conflicts with reviewed baseline tip')
+            continue
+        for key, value in bridge.items():
+            baseline.loc[selected, key] = value
+    return baseline
 
 
 def run(args):
@@ -90,19 +118,26 @@ def run(args):
         if sources[key]["sha256"] != before["sources"][source]["sha256"]:
             raise ValueError("IUCN snapshot differs from checked tree identities")
     config = tomllib.loads(args.config.read_text())
-    acquired = acquire_inputs(
-        {"sources": [s for s in config["sources"] if s["id"] in {"dated-tree", "ott-taxonomy"}]},
-        args.input_dir,
-        False,
-    )
+    tree_sources = [s for s in config["sources"] if s["id"] in {"dated-tree", "ott-taxonomy"}]
+    if args.input_dir is None:
+        acquired = {}
+        for source in tree_sources:
+            path = source_file(root, registry, source['id'], source['filename'], root / source['filename'])
+            verify_source(path, source)
+            acquired[source['id']] = {**source, **receipt(path)}
+    else:
+        acquired = acquire_inputs({"sources": tree_sources}, args.input_dir, False)
     for key in acquired:
         if acquired[key]["sha256"] != before["sources"][key]["sha256"]:
             raise ValueError("Tree/taxonomy differs from identity links")
-    sources.update(acquired)
-    tips = Path(before["sources"]["tree_tips"]["path"])
+    # Acquisition check timestamps describe this invocation, not different data.
+    # Keep generation identities stable when replaying unchanged pinned inputs.
+    sources.update({name: {key: value for key, value in entry.items() if key != 'verified_at'}
+                    for name, entry in acquired.items()})
+    tips = getattr(args, "tree_tips", None) or Path(before["sources"]["tree_tips"]["path"])
     if sha256(tips) != before["sources"]["tree_tips"]["sha256"]:
         raise ValueError("Global tip index changed")
-    ott = args.input_dir / "ott_index.parquet"
+    ott = getattr(args, "ott_index", None) or args.input_dir / "ott_index.parquet"
     stamp = json.loads(ott.with_suffix(".receipt.json").read_text())
     if (
         sha256(ott) != stamp["output_sha256"]
@@ -113,6 +148,9 @@ def run(args):
     tree = load_clade(Path(acquired["dated-tree"]["path"]), config["clade"])
     leaf_names = {n.name for n in tree.leaves()}
     with duckdb.connect() as c:
+        from ark_pipeline.runtime.resources import configure_duckdb
+
+        configure_duckdb(c)
         goat = c.execute(
             "SELECT * FROM read_csv(?,delim='\t',header=true,all_varchar=true,sample_size=-1) WHERE lower(class)='mammalia' AND lower(taxon_rank)='species'",
             [sources["goat_species"]["path"]],
@@ -134,7 +172,9 @@ def run(args):
     }
     cw = pd.read_parquet(args.crosswalk)
     links = pd.read_parquet(links_path)
-    mammals = links[links.iucn_class.eq("MAMMALIA")].copy()
+    mammals = links[links.iucn_class.str.upper().eq("MAMMALIA")].copy()
+    if mammals.empty:
+        raise ValueError('Checked tree links contain no assessed mammals')
     if not mammals.iucn_sis_id.is_unique or not cw.iucn_sis_id.is_unique:
         raise ValueError("Species IDs not unique")
     fresh = cw.set_index("iucn_sis_id").to_dict("index")
@@ -170,6 +210,7 @@ def run(args):
         ]
     )
     rows = []
+    additional_bridges = []
     for row in mammals.to_dict("records"):
         sis = row["iucn_sis_id"]
         match = fresh.get(sis, {})
@@ -199,9 +240,14 @@ def run(args):
             if direct.get(taxid) == row["tree_tip"]
             else "reviewed_iucn_species_bridge"
         )
+        if usable and not own_dna:
+            additional_bridges.append(dict(canonical_ncbi_taxid=taxid,
+                tree_tip=row['tree_tip'], tree_join_status='linked',
+                tree_join_route=route, bridge_iucn_sis_id=sis))
         if usable and own_dna:
             baseline_tips.add(row["tree_tip"])
-            # Keep a witness for additional current-IUCN bridge baseline tips.
+            # Reproduce the historical positive baseline before validating its
+            # review. Rule-independent bridges are added only after that guard.
             if row["tree_tip"] not in set(
                 baseline.loc[baseline.tree_join_status.eq("linked"), "tree_tip"]
             ):
@@ -231,7 +277,7 @@ def run(args):
         )
     baseline = pd.DataFrame(baselines)
     review_path = args.baseline_review
-    if review_path is None:
+    if review_path is None and not getattr(args, "skip_cached_review", False):
         cached_review = Path("data/edge/baseline-review/report.json")
         if cached_review.is_file():
             review_path = cached_review
@@ -265,8 +311,8 @@ def run(args):
             current_code = Path(__file__).resolve().parents[2] / name
             if sha256(current_code) != review_report["code"][name]["sha256"]:
                 raise ValueError("Baseline review code changed; rerun review")
-        for code in review_report["code"].values():
-            if sha256(Path(code["path"])) != code["sha256"]:
+        for name, code in review_report["code"].items():
+            if sha256(Path(__file__).resolve().parents[2] / name) != code["sha256"]:
                 raise ValueError("Baseline review code changed; rerun review")
         review_directory = review_path.parent
         for name in ["reviewed_baseline_links.parquet", "baseline_identity_review.parquet"]:
@@ -291,6 +337,7 @@ def run(args):
         sources["baseline_identity_review"] = receipt(
             review_directory / "baseline_identity_review.parquet"
         )
+    baseline = add_rule_independent_bridges(baseline, additional_bridges)
     if not baseline.loc[baseline.tree_join_status.eq("linked"), "tree_tip"].is_unique:
         raise ValueError("Different current GoaT species compete for the same baseline tip")
     species = pd.DataFrame(rows)
@@ -352,6 +399,11 @@ def run(args):
     species["gap_score_eligible"] &= ~(
         species.genus_baseline_incomplete & species.website_species_dna.eq(False)
     )
+    if getattr(args, 'prepare_only', False):
+        sources.update(crosswalk=receipt(args.crosswalk), tree_links=receipt(links_path),
+                       tree_links_report=receipt(args.links_dir / 'report.json'),
+                       config=receipt(args.config), ott_index=receipt(ott), global_tree_tips=receipt(tips))
+        return tree, species, baseline, sources
     gaps = marginal_gaps(tree, baseline_tips)
     species = species.merge(gaps, on="tree_tip", how="left", validate="many_to_one")
     if (

@@ -11,6 +11,699 @@
     }
   ],
   "paths": {
+    "/api/analysis/dna": {
+      "get": {
+        "summary": "DnaEvidenceScenario",
+        "operationId": "getDnaScenario",
+        "parameters": [
+          {
+            "name": "rule",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "website",
+                "any-assembly",
+                "taxon-quality-proxy"
+              ],
+              "default": "website"
+            },
+            "required": false,
+            "deprecated": false,
+            "allowEmptyValue": false,
+            "allowReserved": false
+          },
+          {
+            "name": "min_busco",
+            "in": "query",
+            "schema": {
+              "type": "number",
+              "default": 90
+            },
+            "required": false,
+            "deprecated": false,
+            "allowEmptyValue": false,
+            "allowReserved": false
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 1
+            },
+            "required": false,
+            "deprecated": false,
+            "allowEmptyValue": false,
+            "allowReserved": false
+          },
+          {
+            "name": "per_page",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 50
+            },
+            "required": false,
+            "deprecated": false,
+            "allowEmptyValue": false,
+            "allowReserved": false
+          },
+          {
+            "name": "species_id",
+            "in": "query",
+            "schema": {
+              "oneOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "required": false,
+            "deprecated": false,
+            "allowEmptyValue": false,
+            "allowReserved": false
+          },
+          {
+            "name": "expected_scenario",
+            "in": "query",
+            "schema": {
+              "oneOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "required": false,
+            "deprecated": false,
+            "allowEmptyValue": false,
+            "allowReserved": false
+          },
+          {
+            "name": "coverage_profile",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "resident",
+                "with-passage"
+              ],
+              "default": "resident"
+            },
+            "required": false,
+            "deprecated": false,
+            "allowEmptyValue": false,
+            "allowReserved": false
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Request fulfilled, document follows",
+            "headers": {},
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DnaPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request syntax or unsupported method",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "status_code": {
+                      "type": "integer"
+                    },
+                    "detail": {
+                      "type": "string"
+                    },
+                    "extra": {
+                      "additionalProperties": {},
+                      "type": [
+                        "null",
+                        "object",
+                        "array"
+                      ]
+                    }
+                  },
+                  "type": "object",
+                  "required": [
+                    "detail",
+                    "status_code"
+                  ],
+                  "description": "Validation Exception",
+                  "examples": [
+                    {
+                      "status_code": 400,
+                      "detail": "Bad Request",
+                      "extra": {}
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "deprecated": false
+      }
+    },
+    "/api/analysis/phylogenetic": {
+      "get": {
+        "summary": "PhylogeneticScenario",
+        "operationId": "getPhylogeneticScenario",
+        "parameters": [
+          {
+            "name": "rule",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "website",
+                "any-assembly",
+                "taxon-quality-proxy"
+              ],
+              "default": "website"
+            },
+            "required": false,
+            "deprecated": false,
+            "allowEmptyValue": false,
+            "allowReserved": false
+          },
+          {
+            "name": "min_busco",
+            "in": "query",
+            "schema": {
+              "type": "number",
+              "default": 90
+            },
+            "required": false,
+            "deprecated": false,
+            "allowEmptyValue": false,
+            "allowReserved": false
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 1
+            },
+            "required": false,
+            "deprecated": false,
+            "allowEmptyValue": false,
+            "allowReserved": false
+          },
+          {
+            "name": "per_page",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 50
+            },
+            "required": false,
+            "deprecated": false,
+            "allowEmptyValue": false,
+            "allowReserved": false
+          },
+          {
+            "name": "species_id",
+            "in": "query",
+            "schema": {
+              "oneOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "required": false,
+            "deprecated": false,
+            "allowEmptyValue": false,
+            "allowReserved": false
+          },
+          {
+            "name": "nearest",
+            "in": "query",
+            "schema": {
+              "type": "boolean",
+              "default": false
+            },
+            "required": false,
+            "deprecated": false,
+            "allowEmptyValue": false,
+            "allowReserved": false
+          },
+          {
+            "name": "expected_scenario",
+            "in": "query",
+            "schema": {
+              "oneOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "required": false,
+            "deprecated": false,
+            "allowEmptyValue": false,
+            "allowReserved": false
+          },
+          {
+            "name": "cr",
+            "in": "query",
+            "schema": {
+              "type": "number",
+              "default": 4
+            },
+            "required": false,
+            "deprecated": false,
+            "allowEmptyValue": false,
+            "allowReserved": false
+          },
+          {
+            "name": "en",
+            "in": "query",
+            "schema": {
+              "type": "number",
+              "default": 3
+            },
+            "required": false,
+            "deprecated": false,
+            "allowEmptyValue": false,
+            "allowReserved": false
+          },
+          {
+            "name": "vu",
+            "in": "query",
+            "schema": {
+              "type": "number",
+              "default": 2
+            },
+            "required": false,
+            "deprecated": false,
+            "allowEmptyValue": false,
+            "allowReserved": false
+          },
+          {
+            "name": "nt",
+            "in": "query",
+            "schema": {
+              "type": "number",
+              "default": 1
+            },
+            "required": false,
+            "deprecated": false,
+            "allowEmptyValue": false,
+            "allowReserved": false
+          },
+          {
+            "name": "dd",
+            "in": "query",
+            "schema": {
+              "type": "number",
+              "default": 2
+            },
+            "required": false,
+            "deprecated": false,
+            "allowEmptyValue": false,
+            "allowReserved": false
+          },
+          {
+            "name": "lc",
+            "in": "query",
+            "schema": {
+              "type": "number",
+              "default": 0.1
+            },
+            "required": false,
+            "deprecated": false,
+            "allowEmptyValue": false,
+            "allowReserved": false
+          },
+          {
+            "name": "coverage_profile",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "resident",
+                "with-passage"
+              ],
+              "default": "resident"
+            },
+            "required": false,
+            "deprecated": false,
+            "allowEmptyValue": false,
+            "allowReserved": false
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Request fulfilled, document follows",
+            "headers": {},
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PhylogeneticPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request syntax or unsupported method",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "status_code": {
+                      "type": "integer"
+                    },
+                    "detail": {
+                      "type": "string"
+                    },
+                    "extra": {
+                      "additionalProperties": {},
+                      "type": [
+                        "null",
+                        "object",
+                        "array"
+                      ]
+                    }
+                  },
+                  "type": "object",
+                  "required": [
+                    "detail",
+                    "status_code"
+                  ],
+                  "description": "Validation Exception",
+                  "examples": [
+                    {
+                      "status_code": 400,
+                      "detail": "Bad Request",
+                      "extra": {}
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "deprecated": false
+      }
+    },
+    "/api/analysis/cells/{h3_index}/support": {
+      "get": {
+        "summary": "SourceSupportDetails",
+        "operationId": "getSourceSupportDetails",
+        "parameters": [
+          {
+            "name": "h3_index",
+            "in": "path",
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "deprecated": false
+          },
+          {
+            "name": "coverage_profile",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "resident",
+                "with-passage"
+              ],
+              "default": "resident"
+            },
+            "required": false,
+            "deprecated": false,
+            "allowEmptyValue": false,
+            "allowReserved": false
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Request fulfilled, document follows",
+            "headers": {},
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourceSupportDetails"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request syntax or unsupported method",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "status_code": {
+                      "type": "integer"
+                    },
+                    "detail": {
+                      "type": "string"
+                    },
+                    "extra": {
+                      "additionalProperties": {},
+                      "type": [
+                        "null",
+                        "object",
+                        "array"
+                      ]
+                    }
+                  },
+                  "type": "object",
+                  "required": [
+                    "detail",
+                    "status_code"
+                  ],
+                  "description": "Validation Exception",
+                  "examples": [
+                    {
+                      "status_code": 400,
+                      "detail": "Bad Request",
+                      "extra": {}
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "deprecated": false
+      }
+    },
+    "/api/analysis/ranges/{species_id}": {
+      "get": {
+        "summary": "SpeciesRangeDetails",
+        "operationId": "getRangeDetails",
+        "parameters": [
+          {
+            "name": "species_id",
+            "in": "path",
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "deprecated": false
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 1
+            },
+            "required": false,
+            "deprecated": false,
+            "allowEmptyValue": false,
+            "allowReserved": false
+          },
+          {
+            "name": "per_page",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 50
+            },
+            "required": false,
+            "deprecated": false,
+            "allowEmptyValue": false,
+            "allowReserved": false
+          },
+          {
+            "name": "coverage_profile",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "resident",
+                "with-passage"
+              ],
+              "default": "resident"
+            },
+            "required": false,
+            "deprecated": false,
+            "allowEmptyValue": false,
+            "allowReserved": false
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Request fulfilled, document follows",
+            "headers": {},
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RangeDetails"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request syntax or unsupported method",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "status_code": {
+                      "type": "integer"
+                    },
+                    "detail": {
+                      "type": "string"
+                    },
+                    "extra": {
+                      "additionalProperties": {},
+                      "type": [
+                        "null",
+                        "object",
+                        "array"
+                      ]
+                    }
+                  },
+                  "type": "object",
+                  "required": [
+                    "detail",
+                    "status_code"
+                  ],
+                  "description": "Validation Exception",
+                  "examples": [
+                    {
+                      "status_code": 400,
+                      "detail": "Bad Request",
+                      "extra": {}
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "deprecated": false
+      }
+    },
+    "/api/species/{gbif_accepted_id}/assessment": {
+      "get": {
+        "summary": "AssessmentDetails",
+        "operationId": "getAssessmentDetails",
+        "parameters": [
+          {
+            "name": "gbif_accepted_id",
+            "in": "path",
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "deprecated": false
+          },
+          {
+            "name": "coverage_profile",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "resident",
+                "with-passage"
+              ],
+              "default": "resident"
+            },
+            "required": false,
+            "deprecated": false,
+            "allowEmptyValue": false,
+            "allowReserved": false
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Request fulfilled, document follows",
+            "headers": {},
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AssessmentDetails"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request syntax or unsupported method",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "status_code": {
+                      "type": "integer"
+                    },
+                    "detail": {
+                      "type": "string"
+                    },
+                    "extra": {
+                      "additionalProperties": {},
+                      "type": [
+                        "null",
+                        "object",
+                        "array"
+                      ]
+                    }
+                  },
+                  "type": "object",
+                  "required": [
+                    "detail",
+                    "status_code"
+                  ],
+                  "description": "Validation Exception",
+                  "examples": [
+                    {
+                      "status_code": 400,
+                      "detail": "Bad Request",
+                      "extra": {}
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "deprecated": false
+      }
+    },
     "/api/coverage-profiles": {
       "get": {
         "summary": "CoverageProfiles",
@@ -941,6 +1634,91 @@
   },
   "components": {
     "schemas": {
+      "AssessmentDetails": {
+        "properties": {
+          "iucn_sis_id": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "iucn_assessment_id": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "iucn_population_trend": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "iucn_assessment_date": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "iucn_assessment_scope": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "iucn_threat_classifications": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "iucn_attributes_source_sha256": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "iucn_assessment_date",
+          "iucn_assessment_id",
+          "iucn_assessment_scope",
+          "iucn_attributes_source_sha256",
+          "iucn_population_trend",
+          "iucn_sis_id",
+          "iucn_threat_classifications"
+        ],
+        "title": "AssessmentDetails"
+      },
       "CellBoundaryMembership": {
         "properties": {
           "framework": {
@@ -1193,6 +1971,145 @@
         ],
         "title": "CoverageProfilesResponse"
       },
+      "DnaPage": {
+        "properties": {
+          "scenario_id": {
+            "type": "string"
+          },
+          "generation": {
+            "type": "string"
+          },
+          "rule": {
+            "type": "string"
+          },
+          "min_busco": {
+            "type": "number"
+          },
+          "evidence_records": {
+            "type": "integer"
+          },
+          "qualifying_records": {
+            "type": "integer"
+          },
+          "unknown_records": {
+            "type": "integer"
+          },
+          "total": {
+            "type": "integer"
+          },
+          "page": {
+            "type": "integer"
+          },
+          "per_page": {
+            "type": "integer"
+          },
+          "rows": {
+            "items": {
+              "$ref": "#/components/schemas/DnaSpeciesRow"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object",
+        "required": [
+          "evidence_records",
+          "generation",
+          "min_busco",
+          "page",
+          "per_page",
+          "qualifying_records",
+          "rows",
+          "rule",
+          "scenario_id",
+          "total",
+          "unknown_records"
+        ],
+        "title": "DnaPage"
+      },
+      "DnaSpeciesRow": {
+        "properties": {
+          "iucn_sis_id": {
+            "type": "string"
+          },
+          "taxon_id": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "qualifies": {
+            "oneOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "state": {
+            "type": "string"
+          },
+          "sample_reported": {
+            "type": "boolean"
+          },
+          "project_reported": {
+            "type": "boolean"
+          },
+          "criteria_reported": {
+            "type": "boolean"
+          },
+          "assembly_reported": {
+            "type": "boolean"
+          },
+          "resampling_reported": {
+            "type": "boolean"
+          },
+          "family_represented": {
+            "oneOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "genus_represented": {
+            "oneOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "identity_status": {
+            "type": "string"
+          }
+        },
+        "type": "object",
+        "required": [
+          "assembly_reported",
+          "criteria_reported",
+          "family_represented",
+          "genus_represented",
+          "identity_status",
+          "iucn_sis_id",
+          "project_reported",
+          "qualifies",
+          "resampling_reported",
+          "sample_reported",
+          "state",
+          "taxon_id"
+        ],
+        "title": "DnaSpeciesRow"
+      },
       "HealthResponse": {
         "properties": {
           "status": {
@@ -1212,6 +2129,471 @@
           "tiles"
         ],
         "title": "HealthResponse"
+      },
+      "PhylogeneticPage": {
+        "properties": {
+          "scenario_id": {
+            "type": "string"
+          },
+          "weighted_scenario_id": {
+            "type": "string"
+          },
+          "metadata": {
+            "$ref": "#/components/schemas/ScenarioMetadata"
+          },
+          "total": {
+            "type": "integer"
+          },
+          "page": {
+            "type": "integer"
+          },
+          "per_page": {
+            "type": "integer"
+          },
+          "represented_tips": {
+            "type": "integer"
+          },
+          "tree_tips": {
+            "type": "integer"
+          },
+          "unresolved_positive_records": {
+            "type": "integer"
+          },
+          "unknown_evidence_records": {
+            "type": "integer"
+          },
+          "unresolved_without_genus": {
+            "type": "boolean"
+          },
+          "rows": {
+            "items": {
+              "$ref": "#/components/schemas/PhylogeneticSpeciesRow"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object",
+        "required": [
+          "metadata",
+          "page",
+          "per_page",
+          "represented_tips",
+          "scenario_id",
+          "total",
+          "tree_tips",
+          "unknown_evidence_records",
+          "unresolved_positive_records",
+          "unresolved_without_genus",
+          "weighted_scenario_id"
+        ],
+        "title": "PhylogeneticPage"
+      },
+      "PhylogeneticSpeciesRow": {
+        "properties": {
+          "iucn_sis_id": {
+            "type": "string"
+          },
+          "tree_tip": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "gap_myr": {
+            "oneOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "priority": {
+            "oneOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "represented": {
+            "oneOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "baseline_incomplete": {
+            "type": "boolean"
+          },
+          "availability_reason": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "evidence_state": {
+            "type": "string",
+            "default": "unknown"
+          },
+          "qualifying_evidence": {
+            "oneOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "sample_reported": {
+            "oneOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "project_reported": {
+            "oneOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "criteria_reported": {
+            "oneOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "assembly_reported": {
+            "oneOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "resampling_reported": {
+            "oneOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "nearest_tip": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "nearest_distance_myr": {
+            "oneOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "ed_myr": {
+            "oneOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "edge1": {
+            "oneOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "edge2_myr_point": {
+            "oneOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "edge2_myr_median": {
+            "oneOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "edge2_myr_p025": {
+            "oneOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "edge2_myr_p975": {
+            "oneOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "score_status": {
+            "type": "string",
+            "default": "unavailable"
+          }
+        },
+        "type": "object",
+        "required": [
+          "availability_reason",
+          "baseline_incomplete",
+          "gap_myr",
+          "iucn_sis_id",
+          "priority",
+          "represented",
+          "tree_tip"
+        ],
+        "title": "PhylogeneticSpeciesRow"
+      },
+      "RangeDetails": {
+        "properties": {
+          "iucn_sis_id": {
+            "type": "string"
+          },
+          "global_cell_count": {
+            "type": "integer"
+          },
+          "global_mapped_area_km2": {
+            "type": "number"
+          },
+          "coverage_status": {
+            "type": "string"
+          },
+          "spatial_profile": {
+            "type": "string"
+          },
+          "membership_generation": {
+            "type": "string"
+          },
+          "denominator": {
+            "type": "string"
+          },
+          "stewardship_available": {
+            "type": "boolean"
+          },
+          "page": {
+            "type": "integer"
+          },
+          "per_page": {
+            "type": "integer"
+          },
+          "stewardship": {
+            "items": {
+              "$ref": "#/components/schemas/StewardshipRow"
+            },
+            "type": "array"
+          },
+          "missing_basin_relationships": {
+            "oneOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "affected_by_missing_basins": {
+            "oneOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "coverage_status",
+          "denominator",
+          "global_cell_count",
+          "global_mapped_area_km2",
+          "iucn_sis_id",
+          "membership_generation",
+          "page",
+          "per_page",
+          "spatial_profile",
+          "stewardship_available"
+        ],
+        "title": "RangeDetails"
+      },
+      "ScenarioMetadata": {
+        "properties": {
+          "tree_generation": {
+            "type": "string"
+          },
+          "evidence_generation": {
+            "type": "string"
+          },
+          "identity_generation": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "string"
+          },
+          "root": {
+            "type": "string"
+          },
+          "stem": {
+            "type": "string"
+          },
+          "units": {
+            "type": "string"
+          },
+          "rule": {
+            "type": "string"
+          },
+          "rule_version": {
+            "type": "integer"
+          },
+          "min_busco": {
+            "type": "number"
+          },
+          "review_policy": {
+            "type": "string"
+          }
+        },
+        "type": "object",
+        "required": [
+          "evidence_generation",
+          "identity_generation",
+          "min_busco",
+          "review_policy",
+          "root",
+          "rule",
+          "rule_version",
+          "scope",
+          "stem",
+          "tree_generation",
+          "units"
+        ],
+        "title": "ScenarioMetadata"
+      },
+      "SourceSupportDetails": {
+        "properties": {
+          "h3_index": {
+            "type": "string"
+          },
+          "resolution": {
+            "type": "integer"
+          },
+          "generation": {
+            "type": "string"
+          },
+          "species": {
+            "type": "integer"
+          },
+          "polygon": {
+            "type": "integer"
+          },
+          "point": {
+            "type": "integer"
+          },
+          "hydrobasin": {
+            "type": "integer"
+          },
+          "multiple": {
+            "type": "integer"
+          },
+          "unknown": {
+            "type": "integer"
+          },
+          "fractions": {
+            "additionalProperties": {
+              "oneOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "type": "object"
+          },
+          "interpretation": {
+            "type": "string"
+          }
+        },
+        "type": "object",
+        "required": [
+          "fractions",
+          "generation",
+          "h3_index",
+          "hydrobasin",
+          "interpretation",
+          "multiple",
+          "point",
+          "polygon",
+          "resolution",
+          "species",
+          "unknown"
+        ],
+        "title": "SourceSupportDetails"
       },
       "SpeciesCellsResponse": {
         "properties": {
@@ -1448,6 +2830,34 @@
           "total"
         ],
         "title": "StatsResponse"
+      },
+      "StewardshipRow": {
+        "properties": {
+          "framework": {
+            "type": "string"
+          },
+          "code": {
+            "type": "string"
+          },
+          "jurisdiction_cells": {
+            "type": "integer"
+          },
+          "mapped_cell_fraction": {
+            "type": "number"
+          },
+          "mapped_area_fraction": {
+            "type": "number"
+          }
+        },
+        "type": "object",
+        "required": [
+          "code",
+          "framework",
+          "jurisdiction_cells",
+          "mapped_area_fraction",
+          "mapped_cell_fraction"
+        ],
+        "title": "StewardshipRow"
       }
     }
   }
