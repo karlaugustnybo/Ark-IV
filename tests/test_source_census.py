@@ -149,6 +149,48 @@ class SourceCensusTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "checksum changed"):
             source_scan(config)
 
+    def test_independent_census_cache_reuses_only_checked_compatible_sources(self):
+        path = self.root / 'ranges.gpkg'
+        self.write_layer(path, [box(0, 0, 1, 1)])
+        config = {**self.register(path), 'census_cache': str(self.root / 'census')}
+        source_scan(config)
+        with patch('ark_pipeline.cli.benchmark_pipeline.iter_census_batches', side_effect=AssertionError('rescanned')):
+            source_scan(config)
+        report = json.loads((self.root / 'out/population.json').read_text())
+        self.assertTrue(report['archives'][0]['reused'])
+        with patch('ark_pipeline.cli.benchmark_pipeline.dependency_identity', return_value={'reader': 'changed'}):
+            source_scan(config)
+        report = json.loads((self.root / 'out/population.json').read_text())
+        self.assertFalse(report['archives'][0]['reused'])
+        with path.open('ab') as handle:
+            handle.write(b'changed')
+        with self.assertRaisesRegex(ValueError, 'checksum changed'):
+            source_scan(config)
+
+    def test_bounded_parallel_scan_matches_serial_and_never_publishes_partial_census(self):
+        paths = [self.root / f'ranges{i}.gpkg' for i in range(2)]
+        records = []
+        for index, path in enumerate(paths):
+            self.write_layer(path, [box(0, 0, 1 + index, 1), None])
+            config = self.register(path)
+            records.append(json.loads((self.root / 'acquisition/current.json').read_text())['sources']['iucn-spatial']['files'][0])
+        atomic_json(self.root / 'acquisition/current.json', {'schema_version': 1, 'sources': {'iucn-spatial': {
+            'validation_status': 'passed', 'files': records}}})
+        source_scan(config)
+        serial = json.loads((self.root / 'out/population.json').read_text())
+        parallel_config = {**config, 'output': str(self.root / 'parallel'), 'scan_workers': 4, 'resources': {'workers': 2}}
+        source_scan(parallel_config)
+        parallel = json.loads((self.root / 'parallel/population.json').read_text())
+        self.assertEqual(parallel['scan_workers'], 2)
+        self.assertEqual(parallel['size_bin_counts'], serial['size_bin_counts'])
+        fields = ('logical_name', 'sha256', 'size_bin_counts', 'scanned', 'excluded')
+        self.assertEqual([{k: a[k] for k in fields} for a in serial['archives']],
+                         [{k: a[k] for k in fields} for a in parallel['archives']])
+        paths[1].write_bytes(b'corrupted source')
+        with self.assertRaisesRegex(ValueError, 'failed verification|changed|checksum'):
+            source_scan({**parallel_config, 'output': str(self.root / 'failed')})
+        self.assertFalse((self.root / 'failed/population.json').exists())
+
 
 if __name__ == "__main__":
     unittest.main()

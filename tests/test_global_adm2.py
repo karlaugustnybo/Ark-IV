@@ -85,6 +85,26 @@ class ADM2AcquisitionTests(unittest.TestCase):
 
 
 class ADM2BuildTests(unittest.TestCase):
+    def test_isolated_catalogues_read_parent_data_without_modifying_shared_assets(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _, shared, manifest = self.fixture(root)
+            parent = shared / 'boundary-catalogs/admin0.json'
+            before = parent.read_bytes()
+            isolated = root / 'isolated/static'
+            output = root / 'isolated/adm2'
+            with patch('ark_pipeline.cli.boundaries_prepare.load_manifest', return_value=manifest):
+                self.assertEqual(build(root, output, isolated, admin0=parent)['area_count'], 2)
+                self.assertTrue(build(root, output, isolated, admin0=parent)['reused'])
+            self.assertEqual(parent.read_bytes(), before)
+            self.assertFalse((shared / 'adm2-catalogs').exists())
+            self.assertTrue((isolated / 'adm2-catalogs').is_symlink())
+            from ark_pipeline.spatial.paths import municipality_geometry_path
+            with patch.dict('os.environ', {'GLOBAL_ADM2_ROOT': str(output)}):
+                self.assertEqual(municipality_geometry_path(), output / 'current/municipality.geojson')
+            with patch.dict('os.environ', {'GLOBAL_ADM2_ROOT': str(root / 'unavailable')}):
+                self.assertEqual(municipality_geometry_path(), root / 'unavailable/current/municipality.geojson')
+
     def fixture(self, root, iso="DNK", parent_code="DNK"):
         archive = root / "source.zip"
         source = root / "source.json"

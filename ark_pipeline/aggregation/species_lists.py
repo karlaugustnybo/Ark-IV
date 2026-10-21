@@ -26,6 +26,9 @@ from ark_pipeline.runtime.provenance import (
 )
 
 PAIR_SCHEMA = pa.schema([("h3_index", pa.uint64()), ("iucn_sis_id", pa.int64())])
+SUPPORT_SCHEMA = pa.schema([("h3_index", pa.uint64()), ("iucn_sis_id", pa.int64()), ("source_support", pa.uint8())])
+# Unknown routes have their own bit; never infer a route from a filename.
+SOURCE_BITS = {"polygon": 1, "point": 2, "hydrobasin": 4, "unknown": 8}
 RES3_FILENAME = "h3_res3_species_global_merged.parquet"
 
 
@@ -120,10 +123,13 @@ def export_serving_lists(
         res7_source = sql_path(inputs["res7"])
         expected_partition_rows = receipt["totals"]["res7_relationships"]
     identity = {
-        "schema_version": 2,
+        "schema_version": 3,
+        "source_support_version": 1 if direct else None,
+        "source_support_bits": SOURCE_BITS if direct else None,
         "source_mode": "archive-pairs" if direct else "finalized-relations",
         "relations": receipt["identity"],
         "inputs": receipt["outputs"],
+        "source_routes": {r["logical_name"]: r.get("source_format", "unknown") for r in archive_inputs} if direct else None,
         **export_code_identity(),
         "schema": signature(LIST_SCHEMA),
     }
@@ -137,7 +143,7 @@ def export_serving_lists(
             name: generation / item["filename"] for name, item in complete["outputs"].items()
         }
         if receipt_is_current(
-            complete_path, identity, outputs, {name: signature(LIST_SCHEMA) for name in outputs}
+            complete_path, identity, outputs, {name: signature(SUPPORT_SCHEMA if name.startswith("support_") else LIST_SCHEMA) for name in outputs}
         ):
             _publish_current(serving, generation)
             emit("workload", counts=complete["totals"])
@@ -158,6 +164,13 @@ def export_serving_lists(
         connection.execute("SET threads = ?", [threads])
         connection.execute("SET temp_directory = ?", [str(scratch_dir.resolve())])
         connection.execute("SET preserve_insertion_order = false")
+        if direct:
+            res7_source_query = " UNION ALL ".join(
+                f"SELECT h3_index, iucn_sis_id, {SOURCE_BITS.get(item.get('source_format'), 8)}::UTINYINT AS source_support FROM read_parquet({sql_path(item['path'])})"
+                for item in archive_inputs)
+        else:
+            res7_source_query = f"SELECT h3_index, iucn_sis_id FROM read_parquet({res7_source})"
+        partition_schema = SUPPORT_SCHEMA if direct else PAIR_SCHEMA
         # A single scan partitions the huge res7 relation, avoiding 122 full scans.
         partitions = generation / "pair-partitions"
         partition_receipt = generation / "partition-receipt.json"
@@ -178,7 +191,7 @@ def export_serving_lists(
                 partition_receipt,
                 partition_identity,
                 partition_files,
-                {name: signature(PAIR_SCHEMA) for name in partition_files},
+                {name: signature(partition_schema) for name in partition_files},
             )
         ):
             temporary = generation / "pair-partitions.tmp"
@@ -186,9 +199,9 @@ def export_serving_lists(
                 shutil.rmtree(temporary)
             emit("message", message=f"Partition {expected_partition_rows:,} raw pairs by H3 base cell")
             connection.execute(f"""
-                COPY (SELECT h3_index, iucn_sis_id,
+                COPY (SELECT *,
                       ((h3_index >> 45) & 127)::INTEGER AS base_cell
-                      FROM read_parquet({res7_source}))
+                      FROM ({res7_source_query}))
                 TO {sql_path(temporary)}
                 (FORMAT PARQUET, COMPRESSION ZSTD, PARTITION_BY (base_cell))
             """)
@@ -229,10 +242,16 @@ def export_serving_lists(
         raw_rows = duplicates_removed = 0
         for position, (name, resolution, base, source, target) in enumerate(jobs):
             emit(phase=f"Partition {position + 1}/{len(jobs)} · {name}", force=True)
+            part_outputs = {"lists": target}
+            if direct:
+                support = generation / "source_support" / f"{name}.parquet"
+                part_outputs["support"] = support
+                outputs[f"support_{name}"] = support
+            part_schemas = {key: signature(SUPPORT_SCHEMA if key == "support" else LIST_SCHEMA) for key in part_outputs}
             part_identity = {"export": identity, "partition": name}
             part_receipt = generation / "receipts" / f"{name}.json"
             if not force and receipt_is_current(
-                part_receipt, part_identity, {"lists": target}, {"lists": signature(LIST_SCHEMA)}
+                part_receipt, part_identity, part_outputs, part_schemas
             ):
                 counts = json.loads(part_receipt.read_text())["totals"]
                 reused += 1
@@ -248,7 +267,21 @@ def export_serving_lists(
                     temporary.unlink(missing_ok=True)
                     raise ValueError(f"{name}: list schema validation failed")
                 temporary.replace(target)
-                write_receipt(part_receipt, part_identity, {"lists": target}, counts)
+                if direct:
+                    from ark_pipeline.aggregation.pairs import RES3_PARENT_SQL
+                    support.parent.mkdir(parents=True, exist_ok=True)
+                    temporary_support = support.with_suffix(".tmp")
+                    cell = RES3_PARENT_SQL if resolution == 3 else "h3_index"
+                    connection.execute(f"""
+                        COPY (SELECT {cell} AS h3_index, iucn_sis_id,
+                              bit_or(source_support)::UTINYINT AS source_support
+                              FROM read_parquet({source}) GROUP BY 1, 2 ORDER BY 1, 2)
+                        TO {sql_path(temporary_support)} (FORMAT PARQUET, COMPRESSION ZSTD)
+                    """)
+                    if pq.read_metadata(temporary_support).num_rows != counts["relationships"]:
+                        raise ValueError("Source support relationship reconciliation failed")
+                    temporary_support.replace(support)
+                write_receipt(part_receipt, part_identity, part_outputs, counts)
             totals[f"res{resolution}_cells"] += counts["cells"]
             totals[f"res{resolution}_relationships"] += counts["relationships"]
             if resolution == 7:
@@ -279,6 +312,7 @@ def export_serving_lists(
             for resolution in (3, 7):
                 if totals[f"res{resolution}_relationships"] != receipt["totals"][f"res{resolution}_relationships"]:
                     raise ValueError(f"res{resolution} serving relationship reconciliation failed")
+        totals["source_support_bytes"] = sum(p.stat().st_size for k, p in outputs.items() if k.startswith("support_"))
         write_receipt(complete_path, identity, outputs, totals)
         emit("workload", counts=totals)
         _publish_current(serving, generation)

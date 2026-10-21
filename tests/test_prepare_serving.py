@@ -3,6 +3,8 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -16,6 +18,95 @@ from tests.test_pipeline_dashboard import prior
 
 
 class PrepareServingTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which('just'), 'Recipe rendering requires just')
+    def test_actual_recipes_keep_outputs_isolated_and_do_not_refresh_frozen_sources(self):
+        with tempfile.TemporaryDirectory(prefix='ark isolated ') as temporary:
+            root = Path(temporary)
+            _, environment = preparation_plan(parser().parse_args([
+                '--root', str(root / 'inputs'), '--h3-root', str(root / 'memberships'),
+                '--preview-root', str(root / 'output'), '--workers', '4']))
+            self.assertEqual(environment['GLOBAL_BUILD_ROOT'], str(root / 'output/build'))
+            result = subprocess.run(['just', '--dry-run', 'global-prepare'],
+                cwd=Path(__file__).resolve().parents[1], env={**os.environ, **environment, 'DUCKDB_MEMORY_LIMIT': '8GB', 'RES7_MEMORY_LIMIT': '2GB'},
+                capture_output=True, text=True, check=True)
+            commands = result.stdout + result.stderr
+            self.assertNotIn('data/global', commands)
+            self.assertNotIn('sources_acquire update', commands)
+            self.assertIn(f'--species "{root}/output/build/species/species.parquet"', commands)
+            self.assertIn(f'--output-root "{root}/output/adm2"', commands)
+            self.assertIn(f'--static-data "{root}/output/static/data"', commands)
+            self.assertIn(f'--metadata-template "{root}/output/build/tiles/map-metadata.json"', commands)
+            # Execute the recipe against a harmless CLI stand-in to exercise
+            # shell parameter expansion without running aggregation.
+            binary = root / 'bin'
+            binary.mkdir()
+            executable = binary / 'uv'
+            executable.write_text('#!/bin/sh\nprintf \'%s\\n\' "$@"\n')
+            executable.chmod(0o755)
+            result = subprocess.run(['just', 'global-res7-aggregate'],
+                cwd=Path(__file__).resolve().parents[1],
+                env={**os.environ, **environment, 'PATH': f"{binary}:{os.environ['PATH']}",
+                     'DUCKDB_MEMORY_LIMIT': '8GB', 'RES7_MEMORY_LIMIT': '2GB'},
+                capture_output=True, text=True, check=True)
+            arguments = result.stdout.splitlines()
+            self.assertEqual(arguments[arguments.index('--memory-limit') + 1], '2GB')
+
+    def test_registered_tree_and_stewardship_inputs_reach_optional_stages(self):
+        args = parser().parse_args(['--root', '/tmp/source', '--h3-root', '/tmp/lists',
+            '--spatial-analytics', '--spatial-jurisdictions', '/tmp/boundaries.parquet',
+            '--spatial-weights', '/tmp/weights.parquet', '--phylogenetic',
+            '--phylogenetic-links-dir', '/tmp/links', '--phylogenetic-ott-index', '/tmp/index.parquet',
+            '--phylogenetic-tree-tips', '/tmp/tips.parquet', '--phylogenetic-aggregates',
+            '--phylogenetic-scope', 'global'])
+        with patch.dict('os.environ', {'DUCKDB_MEMORY_LIMIT': '256MB'}):
+            commands, _ = preparation_plan(args)
+        spatial, tree, aggregates = commands[1:]
+        self.assertEqual(spatial[spatial.index('--jurisdictions') + 1], '/tmp/boundaries.parquet')
+        self.assertEqual(spatial[spatial.index('--weights') + 1], '/tmp/weights.parquet')
+        self.assertEqual(spatial[spatial.index('--memory-limit') + 1], '256MB')
+        self.assertNotIn('--input-dir', tree)
+        self.assertEqual(tree[tree.index('--ott-index') + 1], '/tmp/index.parquet')
+        self.assertEqual(tree[tree.index('--tree-tips') + 1], '/tmp/tips.parquet')
+        self.assertEqual(tree[tree.index('--scope') + 1], 'global')
+        self.assertEqual(aggregates[2], 'ark_pipeline.cli.analytical_prepare')
+        for flags in (['--phylogenetic'], ['--phylogenetic-aggregates'], ['--phylogenetic-scope', 'global'],
+                      ['--spatial-weights', '/tmp/weights.parquet']):
+            with self.subTest(flags=flags), self.assertRaises(ValueError):
+                preparation_plan(parser().parse_args(flags))
+
+    def test_boundary_catalogues_are_forwarded_and_ambiguous_options_fail_early(self):
+        flags = ['--spatial-analytics', '--spatial-boundary-catalogue', 'admin0=/tmp/country.geojson']
+        commands, _ = preparation_plan(parser().parse_args(flags))
+        spatial = commands[-1]
+        self.assertEqual(spatial[spatial.index('--boundary-catalogue') + 1], 'admin0=/tmp/country.geojson')
+        for extra in (['--spatial-jurisdictions', '/tmp/prepared.parquet'],
+                      ['--spatial-boundary-catalogue', 'admin0=/tmp/other.geojson']):
+            with self.assertRaises(ValueError):
+                preparation_plan(parser().parse_args(flags + extra))
+
+    def test_optional_analyses_keep_pinned_crosswalk_and_membership_generations(self):
+        with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()):
+            root = Path(tmp)
+            for name in ('first', 'second'):
+                (root / name).mkdir()
+                (root / name / 'crosswalk.parquet').touch()
+            current = root / 'current'
+            current.symlink_to('first')
+            received = []
+            def run(command, **kwargs):
+                received.append(command)
+                if command == ['just', 'global-prepare']:
+                    current.unlink()
+                    current.symlink_to('second')
+            with patch('ark_pipeline.cli.serving_prepare.load_manifest', return_value={}), \
+                 patch('ark_pipeline.cli.serving_prepare.subprocess.run', side_effect=run):
+                self.assertEqual(main(['--root', str(root), '--h3-root', str(current),
+                    '--crosswalk', str(current / 'crosswalk.parquet'), '--preview-root', str(root / 'out'),
+                    '--dna-evidence', '--spatial-analytics', '--ui', 'plain']), 0)
+            spatial, dna = received[1:]
+            self.assertEqual(spatial[spatial.index('--h3-root')+1], str(root / 'first'))
+            self.assertEqual(dna[dna.index('--crosswalk')+1], str(root / 'first/crosswalk.parquet'))
+
     def test_rich_build_tracks_nested_stages_and_drops_stale_prior_after_acquisition(self):
         with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):
             root = Path(temporary)

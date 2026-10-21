@@ -21,8 +21,15 @@ from ark_pipeline.spatial.tile_parallel import TileBudget
 
 class TileParallelTests(unittest.TestCase):
     def test_parallel_matches_serial_for_holes_components_dateline_and_tile_edges(self):
+        self.check_parallel_coverage('correct')
+
+    def test_fast_parallel_matches_serial_for_holes_components_dateline_and_tile_edges(self):
+        self.check_parallel_coverage('fast')
+
+    def check_parallel_coverage(self, coverage_mode):
         profile = replace(load_spatial_profile(Path(__file__).resolve().parents[1] / "config/spatial_semantics_iucn_richness_v3.toml"),
-                          resolution=5, candidate_tile_degrees=0.25, decision_simplification_degrees=0)
+                          coverage_mode=coverage_mode, resolution=5,
+                          candidate_tile_degrees=0.25, decision_simplification_degrees=0)
         geometries = [
             Polygon([(0, 0), (2, 0), (2, 2), (0, 2)], holes=[[(0.5, 0.5), (0.5, 1.5), (1.5, 1.5), (1.5, 0.5)]]),
             MultiPolygon([box(0, 0, 1, 1), box(5, 5, 6, 6)]),

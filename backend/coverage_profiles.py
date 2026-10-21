@@ -59,6 +59,9 @@ def load_profiles(default: Settings) -> dict[str, Settings]:
         if not database:
             raise ValueError(f"Missing database environment variable for {key}")
         values = default.model_dump()
+        # Spatial analytics and source support must be configured for each
+        # profile; inheriting the resident paths would mix seasonal populations.
+        values.update(spatial_analysis_generation_path=None, membership_generation_path=None)
         values.update({name.lower(): value for name, value in config["environment"].items()})
         values["database_url"] = database
         result[key] = Settings(_env_file=None, **values)

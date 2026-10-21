@@ -611,7 +611,6 @@ def spatial_code_fingerprint() -> str:
             REPOSITORY_ROOT / "ark_pipeline/spatial/boundaries.py",
             REPOSITORY_ROOT / "ark_pipeline/spatial/simplification.py",
             REPOSITORY_ROOT / "ark_pipeline/spatial/tile_parallel.py",
-            REPOSITORY_ROOT / "config/data_sources.toml",
             _configured_inventory_path("iucn-spatial-tables"),
             _configured_inventory_path("hydrobasins"),
             _configured_inventory_path("hydrobasins-iucn-islands"),
@@ -811,9 +810,11 @@ def default_geometry_workers() -> int:
 
 def default_duckdb_memory_limit() -> str:
     """Reserve headroom for the OS, filesystem cache, and other applications."""
-    memory = psutil.virtual_memory()
-    physical_gib = max(1, int(memory.total // GIB))
-    available_gib = max(1, int(memory.available // GIB))
+    from ark_pipeline.runtime.resources import effective_limits
+
+    limits = effective_limits()
+    physical_gib = max(1, int(limits['memory_bytes'] // GIB))
+    available_gib = max(1, int(limits['available_memory_bytes'] // GIB))
     limit_gib = max(1, min(8, physical_gib // 4, available_gib // 2))
     return f"{limit_gib}GB"
 
@@ -2118,6 +2119,7 @@ def _validated_archive_pairs(
         inputs.append(
             {
                 "logical_name": receipt["identity"]["input"]["logical_name"],
+                "source_format": receipt["identity"]["input"].get("format", "polygon"),
                 "path": pair_path,
                 "bytes": record["bytes"],
                 "sha256": record["sha256"],

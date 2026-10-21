@@ -27,19 +27,30 @@ from ark_pipeline.edge_matching import (
 )
 from ark_pipeline.edge_synonyms import ncbi_names_for_iucn
 from ark_pipeline.runtime.provenance import atomic_json, iso_now, sha256
+from ark_pipeline.runtime.resources import configure_duckdb
+
+
+def relocated_source(key: str, source: dict, paths: dict[str, str]) -> dict:
+    """Relocate an immutable input while checking its original content identity."""
+    selected = {**source, 'path': paths.get(key, source['path'])}
+    if sha256(Path(selected['path'])) != source['sha256']:
+        raise ValueError('Review source checksum changed: ' + key)
+    return selected
 
 
 def run(args):
+    relocation_file = getattr(args, 'source_paths', None)
+    paths = json.loads(relocation_file.read_text()) if relocation_file else {}
+    if not isinstance(paths, dict) or any(not isinstance(v, str) for v in paths.values()):
+        raise ValueError('Source paths must map input names to explicit local paths')
     report_path = args.pilot_dir / "report.json"
     pilot = json.loads(report_path.read_text())
     audit_path = args.pilot_dir / "goat_mammal_tree_audit.parquet"
     if "baseline_review" in pilot["sources"]:
-        previous_path = Path(pilot["sources"]["baseline_review"]["path"])
-        if sha256(previous_path) != pilot["sources"]["baseline_review"]["sha256"]:
-            raise ValueError("Previous baseline review changed")
+        previous_path = Path(relocated_source('baseline_review', pilot['sources']['baseline_review'], paths)['path'])
         previous = json.loads(previous_path.read_text())
-        report_record = previous["sources"]["input_pilot_report"]
-        audit_record = previous["sources"]["input_pilot_audit"]
+        report_record = relocated_source('input_pilot_report', previous['sources']['input_pilot_report'], paths)
+        audit_record = relocated_source('input_pilot_audit', previous['sources']['input_pilot_audit'], paths)
         report_path, audit_path = Path(report_record["path"]), Path(audit_record["path"])
         if (
             sha256(report_path) != report_record["sha256"]
@@ -59,7 +70,9 @@ def run(args):
         "crosswalk",
         "iucn_assessments",
     ]
-    sources = {key: pilot["sources"][key] for key in source_keys}
+    if set(paths) - set(source_keys) - {'baseline_review', 'input_pilot_report', 'input_pilot_audit'}:
+        raise ValueError('Unknown relocated review source')
+    sources = {key: relocated_source(key, pilot['sources'][key], paths) for key in source_keys}
     for key, source in sources.items():
         if sha256(Path(source["path"])) != source["sha256"]:
             raise ValueError("Review source checksum changed: " + key)
@@ -129,6 +142,7 @@ def run(args):
         flush=True,
     )
     with duckdb.connect() as c:
+        configure_duckdb(c)
         c.execute("SET memory_limit='1GB'")
         c.register("wanted", wanted)
         targets = c.execute(
@@ -291,6 +305,8 @@ def main():
     parser.add_argument("--pilot-dir", type=Path, default=Path("data/edge/phylogenetic-gap"))
     parser.add_argument("--input-dir", type=Path, default=Path("data/edge/inputs"))
     parser.add_argument("--output-dir", type=Path, default=Path("data/edge/baseline-review"))
+    parser.add_argument('--source-paths', type=Path,
+                        help='JSON mapping of relocated immutable inputs; all original hashes remain required')
     run(parser.parse_args())
 
 

@@ -113,13 +113,16 @@ class PhylogeneticGapTests(unittest.TestCase):
             dict(assembly_level="Scaffold", busco_completeness="99"),
             dict(resampling_required="DTOL"),
             dict(sample_acquired=" "),
+            dict(assembly_level="Chromosome", busco_completeness="NaN"),
         ]
         rows = pd.DataFrame([{**base, **row, "taxon_id": str(i)} for i, row in enumerate(inputs)])
         result = genome_evidence(rows)
         self.assertEqual(
             result.legacy_broad_evidence.tolist(),
-            [False, True, True, True, True, False, False, False, True],
+            [False, True, True, True, True, False, False, False, True, False],
         )
+        from ark_pipeline.dna_evidence import DnaRule, evaluate_evidence
+        self.assertTrue(evaluate_evidence(inputs[-1], DnaRule()).qualifies)
         self.assertFalse(result.loc[1, "qualifying_genome_proxy"])
         self.assertTrue(result.loc[7, "resampling_reported"])
         with self.assertRaisesRegex(ValueError, "Duplicate"):

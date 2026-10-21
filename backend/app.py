@@ -24,9 +24,11 @@ from litestar.params import Parameter
 from litestar.response import File, Stream
 
 from ark_pipeline.spatial.boundaries import load_jurisdiction_index
+from backend.analysis import assessment_details, phylogenetic_scenario
 from backend.config import get_settings
 from backend.coverage_profiles import CoverageProfileMiddleware, RequestSettings, current_profile
 from backend.db import database_lifespan, get_pool
+from backend.dna_analysis import dna_evidence_scenario
 from backend.models import (
     CellBoundaryMembership,
     CellDetailsResponse,
@@ -43,6 +45,7 @@ from backend.models import (
     StatsResponse,
 )
 from backend.res7_tiles import SYSTEM_NAMES, aggregate_coverage, render_tile
+from backend.spatial_analysis import source_support_details, species_range_details
 
 settings = RequestSettings()
 CELL_BOUNDARY_FRAMEWORKS = (
@@ -1000,6 +1003,11 @@ def _archive_response(path: Path, headers, version: str | None) -> Response | St
 
 app = Litestar(
     route_handlers=[
+        dna_evidence_scenario,
+        phylogenetic_scenario,
+        source_support_details,
+        species_range_details,
+        assessment_details,
         coverage_profiles,
         health,
         stats,

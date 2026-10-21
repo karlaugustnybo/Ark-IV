@@ -14,6 +14,7 @@ from rich.console import Console
 
 from ark_pipeline.cli.serving_metadata import validate_crosswalk_sources
 from ark_pipeline.cli.sources_acquire import load_manifest
+from ark_pipeline.cli.spatial_analytics import boundary_catalogue
 from ark_pipeline.cli.spatial_pairs import (
     DEFAULT_PROFILE,
     REPOSITORY_ROOT,
@@ -51,6 +52,22 @@ def parser() -> argparse.ArgumentParser:
                         default=os.environ.get("GLOBAL_IUCN_METADATA_MODE", "auto"))
     result.add_argument("--reviewed-evidence-path", type=Path,
                         default=os.environ.get("GLOBAL_IUCN_REVIEWED_EVIDENCE_PATH"))
+    result.add_argument("--spatial-analytics", action="store_true", help="Build separate global range denominators from the retained memberships.")
+    result.add_argument("--spatial-coverage-status", choices=('complete', 'partial', 'unknown'), default='unknown')
+    result.add_argument("--spatial-omissions", type=Path, help="Existing missing-basin relationship audit for per-species flags.")
+    result.add_argument("--spatial-jurisdictions", type=Path, help="Checked resolution-7 jurisdiction memberships for stewardship.")
+    result.add_argument("--spatial-boundary-catalogue", action="append", type=boundary_catalogue, help="Repeat framework=GeoJSON for stewardship from mapped cells.")
+    result.add_argument("--spatial-weights", type=Path, help="Explicit species weights for separate range-rarity outputs.")
+    result.add_argument("--dna-evidence", action='store_true', help='Build tree-independent checked DNA evidence scenarios.')
+    result.add_argument("--phylogenetic", action='store_true', help="Enrich from registered tree/OTT sources and checked identity inputs.")
+    result.add_argument("--phylogenetic-input-dir", type=Path, help="Optional legacy pinned tree/OTT directory; requires --phylogenetic-links-dir.")
+    result.add_argument("--phylogenetic-links-dir", type=Path)
+    result.add_argument("--phylogenetic-ott-index", type=Path)
+    result.add_argument("--phylogenetic-tree-tips", type=Path)
+    result.add_argument("--phylogenetic-baseline-review", type=Path)
+    result.add_argument("--phylogenetic-config", type=Path, default=Path('config/edge_prototype.toml'))
+    result.add_argument("--phylogenetic-scope", choices=('mammals', 'global'), default='mammals')
+    result.add_argument("--phylogenetic-aggregates", action='store_true', help="Build separate default coarse/fine opportunity aggregates; no base-map changes.")
     result.add_argument("--tiles", action="store_true", help="Continue through validated coarse PMTiles and dynamic H3 serving.")
     result.add_argument("--ui", choices=("auto", "rich", "plain"), default="auto", help="Live Rich dashboard in a terminal; plain output when redirected.")
     result.add_argument("--fresh", action="store_true", help="Start fresh dashboard history; production outputs still undergo normal reuse validation.")
@@ -64,6 +81,20 @@ def parser() -> argparse.ArgumentParser:
 
 def preparation_plan(args: argparse.Namespace) -> tuple[list[list[str]], dict[str, str]]:
     root = args.root.expanduser().resolve()
+    phylogenetic = bool(args.phylogenetic or args.phylogenetic_input_dir or args.phylogenetic_links_dir)
+    if phylogenetic and (args.phylogenetic_links_dir is None or
+                        (args.phylogenetic_input_dir is None and args.phylogenetic_ott_index is None)):
+        raise ValueError('Phylogenetic enrichment requires checked links and either pinned inputs or an OTT index for registered sources')
+    if not phylogenetic and any((args.phylogenetic_ott_index, args.phylogenetic_tree_tips,
+                                args.phylogenetic_baseline_review, args.phylogenetic_aggregates,
+                                args.phylogenetic_scope != 'mammals')):
+        raise ValueError('Phylogenetic options require --phylogenetic and checked identity inputs')
+    if not args.spatial_analytics and any((args.spatial_omissions, args.spatial_jurisdictions, args.spatial_weights, args.spatial_boundary_catalogue)):
+        raise ValueError('Spatial analytical inputs require --spatial-analytics')
+    if args.spatial_jurisdictions and args.spatial_boundary_catalogue:
+        raise ValueError('Choose prepared jurisdictions or boundary catalogues')
+    if len(dict(args.spatial_boundary_catalogue or [])) != len(args.spatial_boundary_catalogue or []):
+        raise ValueError('Duplicate boundary framework')
     resources = resolve_resources(**{name: getattr(args, name) for name in (
         "workers", "spatial_workers", "metric_workers", "duckdb_threads", "metric_threads", "tile_threads", "tile_duckdb_threads",
     )})
@@ -100,6 +131,40 @@ def preparation_plan(args: argparse.Namespace) -> tuple[list[list[str]], dict[st
             "--output-root", str(spatial_root),
         ])
     commands.append(["just", "global-prepare"])
+    analysis_root = (args.preview_root or Path(os.environ.get("GLOBAL_PREVIEW_ROOT", str(root / "ark_iv_global_preview")))).expanduser().resolve()
+    if args.spatial_analytics:
+        commands.append([sys.executable, "-m", "ark_pipeline.cli.spatial_analytics",
+            "--h3-root", str(h3_root), "--output-root", str(analysis_root / 'analysis/spatial'),
+            "--profile", load_spatial_profile(args.profile).profile_id,
+            "--coverage-status", args.spatial_coverage_status,
+            *(['--omissions', str(args.spatial_omissions.expanduser().resolve())] if args.spatial_omissions else []),
+            *(['--jurisdictions', str(args.spatial_jurisdictions.expanduser().resolve())] if args.spatial_jurisdictions else []),
+            *[v for name, path in (args.spatial_boundary_catalogue or []) for v in ('--boundary-catalogue', f'{name}={path.expanduser().resolve()}')],
+            *(['--weights', str(args.spatial_weights.expanduser().resolve())] if args.spatial_weights else []),
+            "--memory-limit", os.environ.get('DUCKDB_MEMORY_LIMIT') or default_duckdb_memory_limit(),
+            "--scratch-dir", str(analysis_root / 'scratch/analysis'), "--threads", str(resources.duckdb_threads)])
+    if args.dna_evidence:
+        commands.append([sys.executable, '-m', 'ark_pipeline.cli.dna_prepare', '--root', str(root),
+            '--crosswalk', str(crosswalk), '--output-root', str(analysis_root / 'analysis/dna')])
+    if phylogenetic:
+        commands.append([sys.executable, "-m", "ark_pipeline.cli.phylogenetic_prepare",
+            "--root", str(root), "--crosswalk", str(crosswalk),
+            *(['--input-dir', str(args.phylogenetic_input_dir.expanduser().resolve())] if args.phylogenetic_input_dir else []),
+            *(['--ott-index', str(args.phylogenetic_ott_index.expanduser().resolve())] if args.phylogenetic_ott_index else []),
+            *(['--tree-tips', str(args.phylogenetic_tree_tips.expanduser().resolve())] if args.phylogenetic_tree_tips else []),
+            "--links-dir", str(args.phylogenetic_links_dir.expanduser().resolve()),
+            "--config", str(args.phylogenetic_config.expanduser().resolve()),
+            "--scope", args.phylogenetic_scope,
+            "--output-root", str(analysis_root / 'analysis/phylogenetic'),
+            *(['--baseline-review', str(args.phylogenetic_baseline_review.expanduser().resolve())] if args.phylogenetic_baseline_review else [])])
+    if args.phylogenetic_aggregates:
+        commands.append([sys.executable, '-m', 'ark_pipeline.cli.analytical_prepare',
+            '--phylogenetic-generation', str(analysis_root / 'analysis/phylogenetic/current'),
+            '--h3-root', str(h3_root), '--profile', load_spatial_profile(args.profile).profile_id,
+            '--output-root', str(analysis_root / 'analysis/opportunities'),
+            '--scratch-dir', str(analysis_root / 'scratch/opportunities'),
+            '--memory-limit', os.environ.get('DUCKDB_MEMORY_LIMIT') or default_duckdb_memory_limit(),
+            '--threads', str(resources.duckdb_threads)])
     if args.tiles:
         commands.append(["just", "data-tiles"])
     preview_root = args.preview_root or Path(os.environ.get(
@@ -112,6 +177,9 @@ def preparation_plan(args: argparse.Namespace) -> tuple[list[list[str]], dict[st
         "GLOBAL_H3_ROOT": str(h3_root),
         "GLOBAL_CROSSWALK_PATH": str(crosswalk),
         "GLOBAL_PREVIEW_ROOT": str(preview_root.expanduser().resolve()),
+        "GLOBAL_BUILD_ROOT": str(analysis_root / 'build'),
+        "GLOBAL_ADM2_ROOT": str(analysis_root / 'adm2'),
+        "GLOBAL_STATIC_DATA": str(analysis_root / 'static/data'),
         **resources.environment(),
         "DUCKDB_MEMORY_LIMIT": os.environ.get("DUCKDB_MEMORY_LIMIT") or default_duckdb_memory_limit(),
         "DUCKDB_SCRATCH_DIR": str(Path(os.environ.get("DUCKDB_SCRATCH_DIR") or root / "scratch/spatial").expanduser().resolve()),
@@ -141,7 +209,11 @@ def main(argv: list[str] | None = None) -> int:
         console = Console()
         if args.ui == "rich" or (args.ui == "auto" and console.is_terminal):
             mapping = {"ark_pipeline.cli.sources_sync": ["acquisition"], "ark_pipeline.cli.crosswalk_refresh": ["crosswalk"],
-                       "ark_pipeline.cli.spatial_pairs": ["pairs"], "ark_pipeline.cli.spatial_aggregate": ["lists"]}
+                       "ark_pipeline.cli.spatial_pairs": ["pairs"], "ark_pipeline.cli.spatial_aggregate": ["lists"],
+                       "ark_pipeline.cli.spatial_analytics": ["spatial_analytics"],
+                       "ark_pipeline.cli.phylogenetic_prepare": ["phylogenetic"],
+                       "ark_pipeline.cli.dna_prepare": ["dna_evidence"]}
+            mapping['ark_pipeline.cli.analytical_prepare'] = ['opportunities']
             names = []
             for command in commands:
                 names.extend(["boundaries", "metadata", "coarse_db", "coarse_cache", "fine_metrics", "prepared_inputs"]
@@ -181,6 +253,16 @@ def main(argv: list[str] | None = None) -> int:
                 generation = Path(overrides["GLOBAL_H3_ROOT"]).resolve(strict=True)
                 environment["GLOBAL_H3_ROOT"] = str(generation)
                 report["h3_generation"] = str(generation)
+            if command[1:3] in (["-m", "ark_pipeline.cli.dna_prepare"],
+                                  ["-m", "ark_pipeline.cli.phylogenetic_prepare"],
+                                  ["-m", "ark_pipeline.cli.analytical_prepare"],
+                                  ["-m", "ark_pipeline.cli.spatial_analytics"]):
+                # Explicit analytical CLI arguments must share the generations
+                # pinned for metadata, even if another process advances current.
+                command = list(command)
+                for flag, setting in (('--crosswalk', 'GLOBAL_CROSSWALK_PATH'), ('--h3-root', 'GLOBAL_H3_ROOT')):
+                    if flag in command:
+                        command[command.index(flag) + 1] = environment[setting]
             if dashboard:
                 name = "serving" if command == ["just", "global-prepare"] else "tiles" if command == ["just", "data-tiles"] else mapping[command[2]][0]
                 measured = run_command({"name": name, "command": command}, dashboard.output, environment, dashboard, cwd=REPOSITORY_ROOT)

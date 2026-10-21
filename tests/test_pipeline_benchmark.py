@@ -44,7 +44,7 @@ from tests.test_refresh_crosswalk import register
 from tests.test_tile_export import boundary_fixture
 
 
-def fixture(root: Path) -> tuple[Path, Path]:
+def fixture(root: Path, profile: Path = DEFAULT_PROFILE) -> tuple[Path, Path]:
     crosswalk_fixture(root)
     path = root / "sources/assessments.csv"
     with path.open() as handle:
@@ -74,7 +74,7 @@ def fixture(root: Path) -> tuple[Path, Path]:
         "logical_name": "ranges.zip", "path": str(archive), "sha256": sha256(archive), "bytes": archive.stat().st_size}]}
     atomic_json(root / "acquisition/current.json", manifest)
     sample = root / "sample.parquet"
-    build_sample(root, sample, DEFAULT_PROFILE, 4, 75, set())
+    build_sample(root, sample, profile, 4, 75, set())
     boundary = root / "boundary.geojson"
     boundary_fixture(boundary)
     return sample, boundary
@@ -655,11 +655,19 @@ class BenchmarkRunnerTests(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which("tippecanoe"), "Tippecanoe required for end-to-end benchmark")
     def test_actual_sample_runs_through_every_stage_without_live_output_changes(self):
+        self.assert_complete_isolated_run(DEFAULT_PROFILE)
+
+    @unittest.skipUnless(shutil.which("tippecanoe"), "Tippecanoe required for end-to-end benchmark")
+    def test_fast_sample_runs_through_every_stage_without_live_output_changes(self):
+        self.assert_complete_isolated_run(DEFAULT_PROFILE.with_name('spatial_semantics_iucn_richness_v3_fast.toml'))
+
+    def assert_complete_isolated_run(self, profile):
         with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):
             root = Path(temporary)
-            sample, boundary = fixture(root)
+            sample, boundary = fixture(root, profile)
             output = root / "benchmark"
             options = ["--root", str(root), "--sample", str(sample), "--output-root", str(output), "--workers", "2", "--memory-limit", "512MB", "--ui", "rich"]
+            options += ['--profile', str(profile)]
             for key in ("admin0", "admin1", "eez", "conservation-framework"):
                 options += ["--" + key, str(boundary)]
             # Any accidental write through default .env paths would alter these

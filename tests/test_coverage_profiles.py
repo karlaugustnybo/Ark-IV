@@ -29,6 +29,8 @@ class CoverageProfileTests(unittest.IsolatedAsyncioTestCase):
                 map_metadata_path=Path("/" + key + "/map-metadata.json"),
                 res7_parts_dir=Path("/" + key + "/cells"),
                 res7_aggregate_parts_dir=Path("/" + key + "/metrics"),
+                spatial_analysis_generation_path=Path('/' + key + '/analysis'),
+                membership_generation_path=Path('/' + key + '/memberships'),
             )
             for key in ("resident", "with-passage")
         }
@@ -47,6 +49,8 @@ class CoverageProfileTests(unittest.IsolatedAsyncioTestCase):
                 "metadata": str(settings.map_metadata_path),
                 "cells": str(settings.res7_parts_dir),
                 "metrics": str(settings.res7_aggregate_parts_dir),
+                "analysis": await asyncio.to_thread(lambda: str(RequestSettings().spatial_analysis_generation_path)),
+                "memberships": str(settings.membership_generation_path),
             }
             await send({"type": "http.response.start", "status": 200, "headers": []})
             await send({"type": "http.response.body", "body": json.dumps(result).encode()})
@@ -78,7 +82,7 @@ class CoverageProfileTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(resident[1]["database"], "resident-db")
         self.assertEqual(passage[1]["database"], "passage-db")
-        for name in ("tiles", "metadata", "cells", "metrics"):
+        for name in ("tiles", "metadata", "cells", "metrics", "analysis", "memberships"):
             self.assertTrue(resident[1][name].startswith("/resident"))
             self.assertTrue(passage[1][name].startswith("/with-passage"))
         self.assertEqual(current_profile.get(), "resident")
@@ -132,7 +136,9 @@ class CoverageProfileTests(unittest.IsolatedAsyncioTestCase):
                     }
                 )
             )
-            settings = Settings(_env_file=None, coverage_profiles_path=manifest)
+            settings = Settings(_env_file=None, coverage_profiles_path=manifest,
+                spatial_analysis_generation_path=root / 'default-analysis',
+                membership_generation_path=root / 'default-memberships')
             config = {"environment": {"MAP_METADATA_PATH": str(metadata), "EXPORT_DIR": str(root)}}
             with (
                 patch("ark_pipeline.cli.map_serving.validate_config", return_value=config),
@@ -152,6 +158,8 @@ class CoverageProfileTests(unittest.IsolatedAsyncioTestCase):
                 return {
                     "environment": {
                         "EXPORT_DIR": str(root),
+                        **({'SPATIAL_ANALYSIS_GENERATION_PATH': str(root / 'resident-analysis')}
+                           if path.stem == 'resident' else {}),
                         "MAP_METADATA_PATH": str(
                             metadata if path.stem == "with-passage" else resident
                         )
@@ -166,7 +174,11 @@ class CoverageProfileTests(unittest.IsolatedAsyncioTestCase):
                     {"RESIDENT_DB": "postgresql://a", "WITH_PASSAGE_DB": "postgresql://b"},
                 ),
             ):
-                self.assertEqual(set(load_profiles(settings)), {"resident", "with-passage"})
+                profiles = load_profiles(settings)
+                self.assertEqual(set(profiles), {"resident", "with-passage"})
+                self.assertEqual(profiles['resident'].spatial_analysis_generation_path, root / 'resident-analysis')
+                self.assertIsNone(profiles['with-passage'].spatial_analysis_generation_path)
+                self.assertTrue(all(p.membership_generation_path is None for p in profiles.values()))
                 with patch.dict("os.environ", {"WITH_PASSAGE_DB": "postgresql://a"}):
                     with self.assertRaisesRegex(ValueError, "separate serving databases"):
                         load_profiles(settings)

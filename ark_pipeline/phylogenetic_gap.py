@@ -11,11 +11,14 @@ from ark_pipeline.edge_matching import normalize_name
 
 
 def genome_evidence(goat: pd.DataFrame) -> pd.DataFrame:
-    """Preserve the website rule and expose assembly evidence separately.
+    """Preserve historical pilot flags used to validate reviewed identities.
 
     Taxon aggregates may describe different assemblies; this pilot cannot check
     co-occurrence, QV, contamination, or inherited field provenance. Samples and
-    project progress count under the website rule but not the assembly proxy.
+    project progress count under the broad rule but not the assembly proxy.
+    Unlike DuckDB's website rule, pandas excludes NaN BUSCO values. Keep that
+    historical flag stable for review validation; new scenarios evaluate the
+    retained raw fields independently with dna_evidence.evaluate_evidence.
     """
     if not goat.taxon_id.is_unique:
         raise ValueError("Duplicate GoaT taxon IDs")

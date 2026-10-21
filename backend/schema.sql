@@ -138,3 +138,37 @@ CREATE TABLE IF NOT EXISTS species_passage_cells (
     h3_indexes BIGINT[] NOT NULL,
     PRIMARY KEY (gbif_accepted_id, resolution)
 );
+
+-- Descriptive assessment evidence is served on demand, outside map metrics.
+ALTER TABLE species ADD COLUMN IF NOT EXISTS iucn_population_trend TEXT;
+ALTER TABLE species ADD COLUMN IF NOT EXISTS iucn_assessment_date TEXT;
+ALTER TABLE species ADD COLUMN IF NOT EXISTS iucn_assessment_scope TEXT;
+ALTER TABLE species ADD COLUMN IF NOT EXISTS iucn_threat_classifications TEXT;
+ALTER TABLE species ADD COLUMN IF NOT EXISTS iucn_attributes_source_sha256 TEXT;
+
+CREATE TABLE IF NOT EXISTS species_phylogenetic_scores (
+    iucn_sis_id TEXT PRIMARY KEY,
+    generation_id TEXT NOT NULL,
+    tree_tip TEXT,
+    ed_myr DOUBLE PRECISION,
+    edge1 DOUBLE PRECISION,
+    edge2_myr_point DOUBLE PRECISION,
+    edge2_myr_median DOUBLE PRECISION,
+    edge2_myr_p025 DOUBLE PRECISION,
+    edge2_myr_p975 DOUBLE PRECISION,
+    score_status TEXT NOT NULL,
+    gap_myr DOUBLE PRECISION,
+    represented BOOLEAN,
+    baseline_incomplete BOOLEAN NOT NULL,
+    availability_reason TEXT,
+    nearest_tip TEXT,
+    nearest_distance_myr DOUBLE PRECISION
+);
+
+ALTER TABLE species_phylogenetic_scores ADD COLUMN IF NOT EXISTS evidence_state TEXT;
+ALTER TABLE species_phylogenetic_scores ADD COLUMN IF NOT EXISTS qualifying_evidence BOOLEAN;
+ALTER TABLE species_phylogenetic_scores ADD COLUMN IF NOT EXISTS sample_reported BOOLEAN;
+ALTER TABLE species_phylogenetic_scores ADD COLUMN IF NOT EXISTS project_reported BOOLEAN;
+ALTER TABLE species_phylogenetic_scores ADD COLUMN IF NOT EXISTS criteria_reported BOOLEAN;
+ALTER TABLE species_phylogenetic_scores ADD COLUMN IF NOT EXISTS assembly_reported BOOLEAN;
+ALTER TABLE species_phylogenetic_scores ADD COLUMN IF NOT EXISTS resampling_reported BOOLEAN;

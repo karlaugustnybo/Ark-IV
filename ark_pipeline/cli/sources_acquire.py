@@ -195,6 +195,9 @@ def validate_input_files(source: Source, files: dict[str, Path]) -> list[str]:
             continue
         if path.stat().st_size == 0:
             errors.append(f"{logical_name}: file is empty")
+        pinned_hash = source.get("file_sha256", {}).get(logical_name)
+        if pinned_hash and sha256(path) != pinned_hash:
+            errors.append(f"{logical_name}: pinned checksum changed")
         expected_bytes = inventory_files.get(logical_name, {}).get("expected_bytes")
         if expected_bytes is not None and path.stat().st_size != int(expected_bytes):
             errors.append(
@@ -411,13 +414,20 @@ def is_due(source: Source, record: dict[str, Any] | None, force: bool) -> bool:
             )
             for item in inventory["files"]
         )
+    if source.get("update_policy") == "pinned":
+        registered = {item["logical_name"]: item for item in record.get("files", [])}
+        return record.get("release") != source.get("release") or any(
+            registered.get(name, {}).get("sha256") != digest
+            for name, digest in source.get("file_sha256", {}).items())
     if source.get("update_policy") == "pinned-discontinued":
         return False
     return age_days(record) >= int(source.get("interval_days", 0))
 
 
 def request_headers(previous: dict[str, Any] | None) -> dict[str, str]:
-    headers = {"User-Agent": USER_AGENT, "Accept": "application/octet-stream"}
+    # Providers serve pinned text, archives and other file MIME types. An
+    # octet-stream-only Accept header makes Zenodo reject tree downloads (406).
+    headers = {"User-Agent": USER_AGENT, "Accept": "*/*"}
     remote = (previous or {}).get("remote", {})
     if remote.get("etag"):
         headers["If-None-Match"] = remote["etag"]
@@ -659,6 +669,7 @@ def update_public(args: argparse.Namespace, catalogue: Catalogue) -> int:
         digest = sha256(output)
         release = (
             inventory_release(inventory)
+            or source.get("release")
             or (remote or {}).get("last_modified")
             or utc_now().date().isoformat()
         )

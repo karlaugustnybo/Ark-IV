@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
+import inspect
 import json
 import math
 import multiprocessing
@@ -19,7 +21,7 @@ from pathlib import Path
 import pyarrow.parquet as pq
 
 from ark_pipeline.aggregation.species_lists import export_serving_lists
-from ark_pipeline.cli.benchmark_sample import SIZE_BREAKS, _size_bin
+from ark_pipeline.cli.benchmark_sample import SIZE_BREAKS, _size_bin, sample_identity
 from ark_pipeline.cli.boundaries_prepare import build as build_adm2
 from ark_pipeline.cli.serving_tiles import BOUNDARIES
 from ark_pipeline.cli.spatial_pairs import (
@@ -50,8 +52,16 @@ from ark_pipeline.runtime.checkpoints import (
 from ark_pipeline.runtime.dashboard import Dashboard, run_command
 from ark_pipeline.runtime.forecasts import load_prior
 from ark_pipeline.runtime.progress import emit
-from ark_pipeline.runtime.provenance import atomic_json, iso_now, runtime_identity, sha256
+from ark_pipeline.runtime.provenance import (
+    atomic_json,
+    dependency_identity,
+    identity_digest,
+    iso_now,
+    runtime_identity,
+    sha256,
+)
 from ark_pipeline.runtime.resources import positive_int, resolve_resources, worker_count
+from ark_pipeline.spatial import census as census_module
 from ark_pipeline.spatial.census import census_bounds, iter_census_batches
 from ark_pipeline.spatial.coverage import load_spatial_profile
 
@@ -86,6 +96,8 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--root", type=Path, default=Path(os.environ.get("GLOBAL_DATA_ROOT", "data/external")))
     result.add_argument("--profile", type=Path, default=Path(os.environ.get("SPATIAL_PROFILE", str(DEFAULT_PROFILE))))
     result.add_argument("--sample", type=Path, default=DEFAULT_SAMPLE)
+    result.add_argument("--scan-workers", type=positive_int, default=1)
+    result.add_argument("--census-cache", type=Path, help="Reuse verified archive census; omit for a cold source-scan measurement.")
     result.add_argument("--rebuild-sample", action="store_true", help="Build a new 1,000-polygon fixture with the current row policy, using the original stratified sampler.")
     result.add_argument("--max-per-bin", type=positive_int, help="Use at most N hash-selected polygons per size band, plus the two extreme fixtures. Default: all 1,000.")
     result.add_argument("--reverse-bands", action="store_true",
@@ -114,55 +126,85 @@ def row_policy(profile) -> dict:
     return {"presence": list(profile.presence), "origin": list(profile.origin), "seasonality": list(profile.seasonality)}
 
 
+def scan_archive(record: dict, profile_path: str, cache_root: str | None = None) -> dict:
+    """One independent archive; hashing is always performed, even on cache hits."""
+    profile = load_spatial_profile(Path(profile_path))
+    started = time.perf_counter()
+    hashed = None
+    identity = {"version": "native-ring-envelopes-v1", "row_policy": row_policy(profile),
+                "size_breaks": list(SIZE_BREAKS),
+                "reader_dependencies": dependency_identity(),
+                "census_code": hashlib.sha256(Path(census_module.__file__).read_bytes()
+                    + inspect.getsource(exclusion_reason_values).encode()
+                    + inspect.getsource(inspect_archive).encode()).hexdigest(),
+                "source": {k: record[k] for k in ("logical_name", "bytes", "sha256", "release")}}
+    cache = Path(cache_root) / (identity_digest(identity) + ".json") if cache_root else None
+    saved = None
+    if cache and cache.is_file():
+        try:
+            candidate = json.loads(cache.read_text())
+            if candidate["identity"] == identity and candidate["result_sha256"] == identity_digest(candidate["result"]):
+                saved = candidate["result"]
+        except (OSError, ValueError, KeyError):
+            pass
+    if saved is not None:
+        if sha256(Path(record['resolved_path'])) != record['sha256']:
+            raise ValueError(f"Source checksum changed: {record['logical_name']}")
+        hashed = time.perf_counter() - started
+        return {**saved, "reused": True, "hash_seconds": hashed,
+                "wall_seconds": time.perf_counter() - started}
+    checked = inspect_archive(record, deep=True)
+    if checked["status"] != "ready":
+        raise ValueError(f"Source failed verification: {checked}")
+    verified = time.perf_counter() - started
+    counts = [0] * (len(SIZE_BREAKS) + 1)
+    excluded = Counter()
+    scanned = 0
+    for layer in checked["layers"]:
+        layer_scanned = 0
+        for batch in iter_census_batches(record["resolved_path"], layer["name"], profile.geometry_batch_rows):
+            for row, wkb, envelope in batch:
+                scanned += 1
+                layer_scanned += 1
+                reason = exclusion_reason_values(row["id_no"], wkb, row["presence"], row["origin"], profile, seasonal=row["seasonal"])
+                if reason:
+                    excluded[reason] += 1
+                    continue
+                bounds = census_bounds(wkb, envelope)
+                if len(bounds) != 4 or not all(math.isfinite(v) for v in bounds):
+                    raise ValueError(f"Cannot census empty or non-finite geometry in {record['logical_name']}")
+                counts[_size_bin(max(0, bounds[2] - bounds[0]) * max(0, bounds[3] - bounds[1]))] += 1
+            emit(phase=f"Read {record['logical_name']}", completed=scanned, total=checked["features"], unit="archive polygons")
+        if layer_scanned != layer["features"]:
+            raise ValueError(f"Census row count changed in {record['logical_name']} · {layer['name']}")
+    result = {**identity["source"], "size_bin_counts": counts, "scanned": scanned,
+              "excluded": dict(excluded), "verification_seconds": verified,
+              "hash_seconds": hashed, "reused": False, "wall_seconds": time.perf_counter() - started}
+    if cache:
+        atomic_json(cache, {"identity": identity, "result": result, "result_sha256": identity_digest(result)})
+    return result
+
+
 def source_scan(config: dict) -> None:
-    """Full source I/O calibration and current size census, without polyfilling."""
+    """Bounded archive workers; publish a census only after all archives succeed.
+
+    The optional independent cache avoids repeated decompression/census, while
+    cold scans remain the default for throughput measurements.
+    """
     root, output = Path(config["root"]), Path(config["output"])
     profile = load_spatial_profile(Path(config["profile"]))
-    counts = [0] * (len(SIZE_BREAKS) + 1)
-    archives = []
-    records = spatial_files(root, load_acquisition_manifest(root))
-    all_bytes = sum(record["bytes"] for record in records)
-    done_bytes = 0
-    for record in records:
-        started = time.perf_counter()
-        before_counts = counts.copy()
-        emit(phase=f"Verify {record['logical_name']}", force=True)
-        checked = inspect_archive(record, deep=True)
-        if checked["status"] != "ready":
-            raise ValueError(f"Source failed verification: {checked}")
-        verified = time.perf_counter() - started
-        excluded = Counter()
-        scanned = 0
-        for layer in checked["layers"]:
-            emit(phase=f"Read bounds {record['logical_name']} · {layer['name']}", force=True)
-            layer_scanned = 0
-            for batch in iter_census_batches(record["resolved_path"], layer["name"], profile.geometry_batch_rows):
-                for row, wkb, envelope in batch:
-                    scanned += 1
-                    layer_scanned += 1
-                    reason = exclusion_reason_values(row["id_no"], wkb, row["presence"], row["origin"], profile, seasonal=row["seasonal"])
-                    if reason:
-                        excluded[reason] += 1
-                        continue
-                    bounds = census_bounds(wkb, envelope)
-                    if len(bounds) != 4 or not all(math.isfinite(v) for v in bounds):
-                        raise ValueError(f"Cannot census empty or non-finite geometry in {record['logical_name']}")
-                    counts[_size_bin(max(0, bounds[2] - bounds[0]) * max(0, bounds[3] - bounds[1]))] += 1
-                emit(phase=f"Read {record['logical_name']}", completed=scanned, total=checked["features"],
-                     fraction=scanned / max(1, checked["features"]), unit="archive polygons")
-                emit("work", task="scan-total", phase=f"Read {record['logical_name']}", overall=True,
-                     completed=done_bytes + record["bytes"] * scanned / max(1, checked["features"]),
-                     total=all_bytes, unit="weighted source bytes")
-            if layer_scanned != layer["features"]:
-                raise ValueError(f"Census row count changed in {record['logical_name']} · {layer['name']}")
-        done_bytes += record["bytes"]
-        archives.append({**{key: record[key] for key in ("logical_name", "bytes", "sha256", "release")},
-                         "size_bin_counts": [a - b for a, b in zip(counts, before_counts)],
-                         "scanned": scanned, "excluded": dict(excluded), "verification_seconds": verified,
-                         "wall_seconds": time.perf_counter() - started})
-        print(f"Scanned {record['logical_name']}: {scanned} polygons in {archives[-1]['wall_seconds']:.1f}s", flush=True)
+    records = sorted(spatial_files(root, load_acquisition_manifest(root)), key=lambda r: r["logical_name"])
+    workers = min(config.get("scan_workers", 1), config.get("resources", {}).get("workers", 1))
+    cache = config.get("census_cache")
+    if workers > 1:
+        with ProcessPoolExecutor(max_workers=workers, mp_context=multiprocessing.get_context("spawn")) as pool:
+            futures = [pool.submit(scan_archive, r, config["profile"], cache) for r in records]
+            archives = [future.result() for future in futures]
+    else:
+        archives = [scan_archive(r, config["profile"], cache) for r in records]
+    counts = [sum(a["size_bin_counts"][i] for a in archives) for i in range(len(SIZE_BREAKS) + 1)]
     atomic_json(output / "population.json", {"row_policy": row_policy(profile), "size_breaks": list(SIZE_BREAKS),
-                                             "census_method": "native-ring-envelopes-v1",
+                                             "census_method": "native-ring-envelopes-v1", "scan_workers": workers,
                                              "size_bin_counts": counts, "eligible_polygons": sum(counts), "archives": archives})
 
 
@@ -171,6 +213,12 @@ def select_sample(sample: Path, root: Path, profile, max_per_bin: int | None) ->
     metadata = json.loads(sample.with_suffix(".json").read_text())
     if metadata.get("selection", {}).get("size_breaks") != list(SIZE_BREAKS):
         raise ValueError("Sample size bands differ from the original stratified benchmark")
+    if metadata.get("sha256") and metadata["sha256"] != sha256(sample):
+        raise ValueError("Benchmark sample checksum changed")
+    records = spatial_files(root, load_acquisition_manifest(root))
+    stored_identity = metadata.get("selection_identity")
+    if stored_identity and stored_identity != sample_identity(records, profile, metadata["rows"], metadata["selection"]["candidates_per_bin"]):
+        raise ValueError("Benchmark sample is stale: selection dependencies changed; rerun with --rebuild-sample")
     columns = [name for name in pq.read_schema(sample).names if name != "geometry_wkb"]
     rows = pq.read_table(sample, columns=columns).to_pylist()
     identities = {record["logical_name"]: record["sha256"] for record in spatial_files(root, load_acquisition_manifest(root))}
@@ -300,7 +348,7 @@ def build_lists(config: dict) -> None:
         raise ValueError("Benchmark pair input changed")
     result = export_serving_lists(output / "spatial", scratch_dir=output / "scratch/lists",
                                   memory_limit=config["memory_limit"], threads=config["resources"]["duckdb_threads"],
-                                  archive_inputs=[{"logical_name": "benchmark-sample", "path": pairs,
+                                  archive_inputs=[{"logical_name": "benchmark-sample", "source_format": "polygon", "path": pairs,
                                                    "bytes": pairs.stat().st_size, "sha256": report["sha256"], "rows": report["pair_rows"]}],
                                   archive_identity={"scope": "benchmark-only", "selection_sha256": sha256(inputs / "selection.json"),
                                                     "profile_sha256": config["profile_sha256"]})
@@ -323,11 +371,26 @@ def plan(args) -> tuple[dict, list[dict], dict]:
     resources = resolve_resources(**{name: getattr(args, name) for name in RESOURCE_FLAGS})
     sample = args.sample.expanduser().resolve()
     make_sample = args.rebuild_sample or not sample.is_file()
+    if not make_sample and not args.dry_run:
+        metadata = json.loads(sample.with_suffix('.json').read_text())
+        records = spatial_files(root, load_acquisition_manifest(root))
+        expected = sample_identity(records, profile, metadata.get('rows', 1000),
+                                   metadata.get('selection', {}).get('candidates_per_bin', 75))
+        if metadata.get('selection_identity') != expected or metadata.get('row_policy') != row_policy(profile):
+            if sample != DEFAULT_SAMPLE.resolve():
+                raise ValueError('Explicit benchmark sample is stale; use --rebuild-sample for current-policy selection')
+            make_sample = True
     if make_sample:
-        sample = output / "input/iucn-polygons-stratified-1000.parquet"
+        if args.rebuild_sample or args.dry_run:
+            sample = output / "input/iucn-polygons-stratified-1000.parquet"
+        else:
+            records = spatial_files(root, load_acquisition_manifest(root))
+            sample = root / "benchmarks/samples" / identity_digest(sample_identity(records, profile)) / "sample.parquet"
+            make_sample = not (sample.is_file() and sample.with_suffix(".json").is_file())
     boundaries = {key: str((getattr(args, key) or output / "adm2/current/municipality.geojson").expanduser().resolve()) for key in BOUNDARIES}
     config = {"root": str(root), "output": str(output), "sample": str(sample), "profile": str(profile_path),
               "profile_sha256": profile.digest, "resources": resources.report(), "memory_limit": args.memory_limit,
+              "scan_workers": args.scan_workers, "census_cache": str(args.census_cache.resolve()) if args.census_cache else None,
               "max_per_bin": args.max_per_bin, "reverse_bands": args.reverse_bands, "boundaries": boundaries}
     h3 = output / "spatial/serving/current"
     crosswalk = output / "crosswalk/current/iucn_goat_crosswalk.parquet"

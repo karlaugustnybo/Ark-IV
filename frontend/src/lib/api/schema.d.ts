@@ -4,6 +4,91 @@
  */
 
 export interface paths {
+    "/api/analysis/dna": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** DnaEvidenceScenario */
+        get: operations["getDnaScenario"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/analysis/phylogenetic": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** PhylogeneticScenario */
+        get: operations["getPhylogeneticScenario"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/analysis/cells/{h3_index}/support": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** SourceSupportDetails */
+        get: operations["getSourceSupportDetails"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/analysis/ranges/{species_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** SpeciesRangeDetails */
+        get: operations["getRangeDetails"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/species/{gbif_accepted_id}/assessment": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** AssessmentDetails */
+        get: operations["getAssessmentDetails"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/coverage-profiles": {
         parameters: {
             query?: never;
@@ -127,6 +212,16 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** AssessmentDetails */
+        AssessmentDetails: {
+            iucn_sis_id: string | null;
+            iucn_assessment_id: string | null;
+            iucn_population_trend: string | null;
+            iucn_assessment_date: string | null;
+            iucn_assessment_scope: string | null;
+            iucn_threat_classifications: string | null;
+            iucn_attributes_source_sha256: string | null;
+        };
         /** CellBoundaryMembership */
         CellBoundaryMembership: {
             framework: string;
@@ -196,11 +291,129 @@ export interface components {
             selected: string;
             profiles: components["schemas"]["CoverageProfile"][];
         };
+        /** DnaPage */
+        DnaPage: {
+            scenario_id: string;
+            generation: string;
+            rule: string;
+            min_busco: number;
+            evidence_records: number;
+            qualifying_records: number;
+            unknown_records: number;
+            total: number;
+            page: number;
+            per_page: number;
+            rows: components["schemas"]["DnaSpeciesRow"][];
+        };
+        /** DnaSpeciesRow */
+        DnaSpeciesRow: {
+            iucn_sis_id: string;
+            taxon_id: string | null;
+            qualifies: boolean | null;
+            state: string;
+            sample_reported: boolean;
+            project_reported: boolean;
+            criteria_reported: boolean;
+            assembly_reported: boolean;
+            resampling_reported: boolean;
+            family_represented: boolean | null;
+            genus_represented: boolean | null;
+            identity_status: string;
+        };
         /** HealthResponse */
         HealthResponse: {
             status: string;
             database: string;
             tiles: string;
+        };
+        /** PhylogeneticPage */
+        PhylogeneticPage: {
+            scenario_id: string;
+            weighted_scenario_id: string;
+            metadata: components["schemas"]["ScenarioMetadata"];
+            total: number;
+            page: number;
+            per_page: number;
+            represented_tips: number;
+            tree_tips: number;
+            unresolved_positive_records: number;
+            unknown_evidence_records: number;
+            unresolved_without_genus: boolean;
+            rows?: components["schemas"]["PhylogeneticSpeciesRow"][];
+        };
+        /** PhylogeneticSpeciesRow */
+        PhylogeneticSpeciesRow: {
+            iucn_sis_id: string;
+            tree_tip: string | null;
+            gap_myr: number | null;
+            priority: number | null;
+            represented: boolean | null;
+            baseline_incomplete: boolean;
+            availability_reason: string | null;
+            /** @default unknown */
+            evidence_state: string;
+            qualifying_evidence?: boolean | null;
+            sample_reported?: boolean | null;
+            project_reported?: boolean | null;
+            criteria_reported?: boolean | null;
+            assembly_reported?: boolean | null;
+            resampling_reported?: boolean | null;
+            nearest_tip?: string | null;
+            nearest_distance_myr?: number | null;
+            ed_myr?: number | null;
+            edge1?: number | null;
+            edge2_myr_point?: number | null;
+            edge2_myr_median?: number | null;
+            edge2_myr_p025?: number | null;
+            edge2_myr_p975?: number | null;
+            /** @default unavailable */
+            score_status: string;
+        };
+        /** RangeDetails */
+        RangeDetails: {
+            iucn_sis_id: string;
+            global_cell_count: number;
+            global_mapped_area_km2: number;
+            coverage_status: string;
+            spatial_profile: string;
+            membership_generation: string;
+            denominator: string;
+            stewardship_available: boolean;
+            page: number;
+            per_page: number;
+            stewardship?: components["schemas"]["StewardshipRow"][];
+            missing_basin_relationships?: number | null;
+            affected_by_missing_basins?: boolean | null;
+        };
+        /** ScenarioMetadata */
+        ScenarioMetadata: {
+            tree_generation: string;
+            evidence_generation: string;
+            identity_generation: string;
+            scope: string;
+            root: string;
+            stem: string;
+            units: string;
+            rule: string;
+            rule_version: number;
+            min_busco: number;
+            review_policy: string;
+        };
+        /** SourceSupportDetails */
+        SourceSupportDetails: {
+            h3_index: string;
+            resolution: number;
+            generation: string;
+            species: number;
+            polygon: number;
+            point: number;
+            hydrobasin: number;
+            multiple: number;
+            unknown: number;
+            fractions: {
+                [key: string]: number | null;
+            };
+            interpretation: string;
         };
         /** SpeciesCellsResponse */
         SpeciesCellsResponse: {
@@ -264,6 +477,14 @@ export interface components {
             res3_cells: number;
             res7_cells: number;
         };
+        /** StewardshipRow */
+        StewardshipRow: {
+            framework: string;
+            code: string;
+            jurisdiction_cells: number;
+            mapped_cell_fraction: number;
+            mapped_area_fraction: number;
+        };
     };
     responses: never;
     parameters: never;
@@ -273,6 +494,218 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    getDnaScenario: {
+        parameters: {
+            query?: {
+                rule?: "website" | "any-assembly" | "taxon-quality-proxy";
+                min_busco?: number;
+                page?: number;
+                per_page?: number;
+                species_id?: string | null;
+                expected_scenario?: string | null;
+                coverage_profile?: "resident" | "with-passage";
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Request fulfilled, document follows */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DnaPage"];
+                };
+            };
+            /** @description Bad request syntax or unsupported method */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        status_code: number;
+                        detail: string;
+                        extra?: null | {
+                            [key: string]: unknown;
+                        } | unknown[];
+                    };
+                };
+            };
+        };
+    };
+    getPhylogeneticScenario: {
+        parameters: {
+            query?: {
+                rule?: "website" | "any-assembly" | "taxon-quality-proxy";
+                min_busco?: number;
+                page?: number;
+                per_page?: number;
+                species_id?: string | null;
+                nearest?: boolean;
+                expected_scenario?: string | null;
+                cr?: number;
+                en?: number;
+                vu?: number;
+                nt?: number;
+                dd?: number;
+                lc?: number;
+                coverage_profile?: "resident" | "with-passage";
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Request fulfilled, document follows */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PhylogeneticPage"];
+                };
+            };
+            /** @description Bad request syntax or unsupported method */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        status_code: number;
+                        detail: string;
+                        extra?: null | {
+                            [key: string]: unknown;
+                        } | unknown[];
+                    };
+                };
+            };
+        };
+    };
+    getSourceSupportDetails: {
+        parameters: {
+            query?: {
+                coverage_profile?: "resident" | "with-passage";
+            };
+            header?: never;
+            path: {
+                h3_index: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Request fulfilled, document follows */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SourceSupportDetails"];
+                };
+            };
+            /** @description Bad request syntax or unsupported method */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        status_code: number;
+                        detail: string;
+                        extra?: null | {
+                            [key: string]: unknown;
+                        } | unknown[];
+                    };
+                };
+            };
+        };
+    };
+    getRangeDetails: {
+        parameters: {
+            query?: {
+                page?: number;
+                per_page?: number;
+                coverage_profile?: "resident" | "with-passage";
+            };
+            header?: never;
+            path: {
+                species_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Request fulfilled, document follows */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RangeDetails"];
+                };
+            };
+            /** @description Bad request syntax or unsupported method */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        status_code: number;
+                        detail: string;
+                        extra?: null | {
+                            [key: string]: unknown;
+                        } | unknown[];
+                    };
+                };
+            };
+        };
+    };
+    getAssessmentDetails: {
+        parameters: {
+            query?: {
+                coverage_profile?: "resident" | "with-passage";
+            };
+            header?: never;
+            path: {
+                gbif_accepted_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Request fulfilled, document follows */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AssessmentDetails"];
+                };
+            };
+            /** @description Bad request syntax or unsupported method */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        status_code: number;
+                        detail: string;
+                        extra?: null | {
+                            [key: string]: unknown;
+                        } | unknown[];
+                    };
+                };
+            };
+        };
+    };
     getCoverageProfiles: {
         parameters: {
             query?: {

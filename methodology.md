@@ -1235,3 +1235,79 @@ keep zero-score cells in a consistent selected universe; constant correlations
 are undefined. Parent aggregation repeats child budgets rather than rebuilding
 deduplicated parent-species membership. Fixtures validate these code contracts,
 not global coverage, biological accuracy, causal inference or data-release rights.
+
+
+### Optional headless analytical generations
+
+The optional implementation in `builders/phylogenetic.py` and
+`phylogenetic_scenarios.py` retains a complete mammalian gap crown or the entire
+released global tree in compact parent/length/tip arrays. A postorder coverage pass and a parent-first uncovered
+length pass calculate rooted marginal PD without a distance matrix. Nearest-tip
+distances are optional independent diagnostics. Original EDGE/EDGE2 components
+remain distinct from threat-weighted DNA gaps; EDGE risk summaries do not
+represent full tree/date uncertainty or adopt a new default ARK priority.
+
+`dna_evidence.py` versions the exact website predicate separately from any
+recorded assembly and a taxon-level assembly/BUSCO proxy. Unknown observations,
+unsafe identities, nonqualifying records and valid zero gaps have distinct
+states. Resampling does not erase existing assembly evidence. Scenario-specific
+withholding is recomputed from unresolved positive relative records. Filtering
+candidates never filters the represented relative baseline.
+
+Direct archive reduction now retains polygon, point and HydroBASINS support in
+separate OR-mask sidecars. A duplicate route adds support, not another species.
+Coarse sidecars union each coarse/species pair first. Source fractions can
+overlap and are not confidence estimates. Global range counts and mapped H3-cell
+areas are separate analytical outputs with explicit completeness; stewardship
+uses touched-cell jurisdiction memberships and may overlap. These are mapped
+distributions, not measured occupancy or exact administrative intersections.
+The optional rarity budget sums fine contributions to coarse cells, whereas
+optional marginal-opportunity aggregates count distinct coarse species once.
+
+Assessment trend/date/scope/threat fields are descriptive exact-ID attributes
+when present in the registered assessment input. Their source hash is retained;
+unavailable fields stay null. Optional species/detail endpoints and SQL exports
+carry these fields without expanding base PMTiles, Arrow or fine metric arrays.
+See the [implementation guide](docs/pipeline/11_scoring_implementation.md).
+
+Cloud fast-path verification and same-input mammal arithmetic agreement do not
+settle spatial simplification error, tree acceptance or global scientific
+completeness. The final correct-path run requires explicit authorization.
+
+The optional stewardship producer streams distinct mapped res7 cells and reuses
+`BoundaryBatchIndex` and the canonical antimeridian/polar H3 geometry used by
+tiles. Country-scope includes its configured offshore contacts; EEZ is a separate
+framework. A cell can belong to several jurisdictions. It does not divide a
+cell's area among overlapping boundaries or rasterize a new scientific range.
+Canonical serving-list parts are validated for disjoint base cells, strictly
+ordered cells and unique ordered species before analytics skip redundant SQL
+`DISTINCT`. Arbitrary or overlapping list inputs retain deduplication. Reordered
+floating-point area sums can differ at machine precision.
+
+Historical mammal baseline review retains its original flag calculation and
+review guard. Additional nonqualifying identity bridges are applied only after
+that historical review passes; they cannot overwrite a reviewed/direct tip.
+They permit later DNA rules to evaluate the relative's retained evidence without
+changing the original website-positive baseline or granting genomic permission
+from a tree-only match.
+
+The expanded candidate explicitly selects the complete released global root
+`cellular_organisms_ott93302`, stem excluded, Myr. Connecting branches remain;
+these values differ from independently rooted mammal/class crowns. All
+2,294,776 released leaf occurrences are retained, including six occurrences
+of three ambiguous labels. Stable internal occurrence suffixes preserve them
+without granting automatic identity to repeated source labels. Unresolved
+assessments remain null and counted.
+
+The compact global ED/EDGE path uses the pinned risk distributions, stable
+tip-name draw order and verified-IUCN extinction policy of the reference engine.
+Depth-group array passes avoid millions of Python node objects and keep risk
+draws only for assessed output tips. ED reconciles with retained-tree PD.
+Small-tree component checks establish arithmetic, not global tree-date
+reliability, biological completeness or scientific acceptance.
+
+Repair sensitivity is independent of simplification. A valid `buffer(0)`
+alternative is a sensitivity comparison, not an authoritative unrepaired
+reference or a new repair policy. Production zero-area and excessive area-change
+rejections stay in force. FAST simplified/unsimplified comparisons do not
+establish exact-contact error; correct coverage remains separately gated.
