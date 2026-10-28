@@ -1,6 +1,7 @@
 """Load build-pipeline Parquet artifacts into PostgreSQL."""
 
 import asyncio
+import json
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -8,6 +9,25 @@ import asyncpg
 import pyarrow.parquet as pq
 
 from backend.config import ROOT, get_settings
+
+
+def checked_phylogenetic_scores(path: Path) -> Path:
+    """Verify a generation for SQL import without materializing its scenario engine."""
+    from ark_pipeline.builders.phylogenetic import calculation_code_identity
+    from ark_pipeline.runtime.provenance import receipt_is_current
+
+    generation = path.resolve(strict=True)
+    receipt = generation / 'receipt.json'
+    saved = json.loads(receipt.read_text())
+    if saved.get('identity', {}).get('code') != calculation_code_identity():
+        raise ValueError('Stale phylogenetic calculation code; rebuild enrichment')
+    outputs = {name: (generation / item['filename']).resolve(strict=True)
+               for name, item in saved['outputs'].items()}
+    if any(not output.is_relative_to(generation) for output in outputs.values()):
+        raise ValueError('Invalid phylogenetic generation output path')
+    if not receipt_is_current(receipt, saved['identity'], outputs, saved['totals']['schemas']):
+        raise ValueError('Stale/corrupt phylogenetic generation')
+    return outputs['species_phylogenetic']
 
 
 def rows(path: Path, columns: list[str]) -> Iterator[tuple]:
@@ -33,10 +53,7 @@ async def load() -> None:
     external_res7_cells = partition_row_count(settings.res7_parts_dir)
     phylogenetic_path = None
     if settings.phylogenetic_generation_path is not None:
-        from ark_pipeline.builders.phylogenetic import load_generation
-        pinned = settings.phylogenetic_generation_path.resolve(strict=True)
-        load_generation(pinned)  # Verify the generation before the SQL transaction.
-        phylogenetic_path = pinned / 'species_phylogenetic.parquet'
+        phylogenetic_path = checked_phylogenetic_scores(settings.phylogenetic_generation_path)
 
     connection = await asyncpg.connect(settings.database_url)
     try:
@@ -87,7 +104,8 @@ async def load() -> None:
                            'score_status', 'gap_myr', 'represented', 'baseline_incomplete',
                            'availability_reason', 'nearest_tip', 'nearest_distance_myr',
                            'evidence_state', 'qualifying_evidence', 'sample_reported', 'project_reported',
-                           'criteria_reported', 'assembly_reported', 'resampling_reported']
+                           'criteria_reported', 'assembly_reported', 'resampling_reported',
+                           'gap_upper_myr']
                 await connection.copy_records_to_table('species_phylogenetic_scores',
                     records=rows(phylogenetic_path, columns), columns=columns)
             system_columns = ["gbif_accepted_id", "system"]

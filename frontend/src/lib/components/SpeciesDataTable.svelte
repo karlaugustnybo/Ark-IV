@@ -9,14 +9,42 @@
   export let loading = false;
   export let emptyMessage = 'No species match these filters.';
   export let onSort: (key: SpeciesSortKey) => void;
+  /** Show unsequenced-history and EDGE2 columns in place of Family; rows must carry
+   *  the phylogenetic fields. */
+  export let phylogeny = false;
 
-  const columns: Array<{ key: SpeciesSortKey; label: string; numeric?: boolean }> = [
-    { key: 'species_name', label: 'Species' },
-    { key: 'family', label: 'Family' },
+  type Column = { key: SpeciesSortKey; label: string; numeric?: boolean };
+  const speciesColumn: Column = { key: 'species_name', label: 'Species' };
+  const familyColumn: Column = { key: 'family', label: 'Family' };
+  const statusColumns: Column[] = [
     { key: 'redlist_category', label: 'IUCN status' },
-    { key: 'dna_level', label: 'DNA gap' },
-    { key: 'priority', label: 'Priority', numeric: true }
+    { key: 'dna_level', label: 'DNA gap' }
   ];
+  const phylogenyColumns: Column[] = [
+    { key: 'unsequenced_myr', label: 'Unsequenced history', numeric: true },
+    { key: 'edge2', label: 'EDGE2', numeric: true }
+  ];
+  const priorityColumn: Column = { key: 'priority', label: 'Priority', numeric: true };
+  $: columns = phylogeny
+    ? [speciesColumn, ...statusColumns, ...phylogenyColumns, priorityColumn]
+    : [speciesColumn, familyColumn, ...statusColumns, priorityColumn];
+
+  // Why a species' stored gap is withheld or missing. Withheld species (unsafe
+  // identity, incomplete baseline) still have an upper bound; unplaced ones do not.
+  const unavailable: Record<string, string> = {
+    unavailable_tree_identity:
+      'Not placed on the dated tree, so no unsequenced history can be computed, not even an upper bound',
+    unsafe_genomic_identity:
+      'Withheld: genome records could not be safely matched to this species, so it may already be sequenced',
+    baseline_incomplete:
+      'Withheld: a sequenced relative could not be placed on the tree, so the true gap may be smaller',
+    not_loaded: 'No phylogenetic data loaded'
+  };
+  const boundNote = ' Shown as an upper bound that assumes this species has no DNA.';
+
+  function myr(value: number): string {
+    return value === 0 ? '0' : value.toFixed(1);
+  }
 
   function statusClass(category: string): string {
     return (
@@ -64,12 +92,13 @@
     </button>
   </div>
   <div class="table-scroll" role="region" aria-label="Species results">
-    <table class="species-data-table">
+    <table class="species-data-table" class:with-phylogeny={phylogeny}>
       <colgroup>
         <col class="species-column" />
-        <col class="family-column" />
+        {#if !phylogeny}<col class="family-column" />{/if}
         <col class="status-column" />
         <col class="dna-column" />
+        {#if phylogeny}<col class="gap-column" /><col class="edge2-column" />{/if}
         <col class="priority-column" />
       </colgroup>
       <thead
@@ -90,7 +119,7 @@
       >
       <tbody>
         {#if loading && !rows.length}
-          <tr><td colspan="5" class="empty-row">Loading species…</td></tr>
+          <tr><td colspan={columns.length} class="empty-row">Loading species…</td></tr>
         {:else if rows.length}
           {#each rows as row}
             {@const gbifHref = gbifSpeciesUrl(row.gbif_taxon_id)}
@@ -117,7 +146,8 @@
                   >
                 {/if}</td
               >
-              <td data-label="Family">{row.family || '—'}</td>
+              {#if !phylogeny}<td data-label="Family" class="family-cell">{row.family || '—'}</td
+                >{/if}
               <td data-label="IUCN status"
                 >{#if row.metadata_status && row.metadata_status !== 'assessed'}<span
                     class="status-badge status-na">Assessment unavailable</span
@@ -140,13 +170,44 @@
                   >{:else}<span class={`dna-badge dna-${row.dnaStatus}`}>{row.dnaLabel}</span
                   >{/if}</td
               >
+              {#if phylogeny}
+                {@const reason = row.phylogenetic_status
+                  ? unavailable[row.phylogenetic_status]
+                  : undefined}
+                <td data-label="Unsequenced history" class="score-cell"
+                  >{#if row.gap_myr != null}<span
+                      class="score-value"
+                      title={reason
+                        ? reason + (row.bounded ? boundNote : '')
+                        : 'Million years of branch length with no sequenced genome'}
+                      >{row.bounded ? '≤ ' : ''}{myr(row.gap_myr)} Myr</span
+                    >{:else}<span class="score-value missing-value" title={reason}>—</span>{/if}</td
+                >
+                <td data-label="EDGE2" class="score-cell"
+                  >{#if row.edge2_myr_median != null}<span
+                      class="score-value"
+                      title={row.edge2_myr_p025 != null && row.edge2_myr_p975 != null
+                        ? `95% interval ${myr(row.edge2_myr_p025)}–${myr(row.edge2_myr_p975)} Myr`
+                        : undefined}>{myr(row.edge2_myr_median)} Myr</span
+                    >{:else}<span class="score-value missing-value" title={reason}>—</span>{/if}</td
+                >
+              {/if}
               <td data-label="Priority" class="score-cell"
-                ><span class="score-value priority-value">{row.priority.toFixed(2)}</span></td
+                >{#if row.priority != null}<span
+                    class="score-value priority-value"
+                    title={row.priority_bounded && row.phylogenetic_status
+                      ? unavailable[row.phylogenetic_status] + boundNote
+                      : undefined}>{row.priority_bounded ? '≤ ' : ''}{row.priority.toFixed(2)}</span
+                  >{:else}<span
+                    class="score-value missing-value"
+                    title={(row.phylogenetic_status && unavailable[row.phylogenetic_status]) ??
+                      'No unsequenced history for this species'}>Unscored</span
+                  >{/if}</td
               >
             </tr>
           {/each}
         {:else}
-          <tr><td colspan="5" class="empty-row">{emptyMessage}</td></tr>
+          <tr><td colspan={columns.length} class="empty-row">{emptyMessage}</td></tr>
         {/if}
       </tbody>
     </table>

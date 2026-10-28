@@ -19,6 +19,15 @@ from tests.test_tile_export import prepared_fixture
 
 
 class MapServingTests(unittest.TestCase):
+    def test_bundle_selection_does_not_inherit_another_enrichment_generation(self):
+        from ark_pipeline.cli.map_serving import ENRICHMENT_SETTINGS, serving_environment
+
+        with patch.dict('os.environ', dict.fromkeys(ENRICHMENT_SETTINGS, '/other/generation')):
+            selected = serving_environment({'environment': {'PHYLOGENETIC_GENERATION_PATH': '/selected/tree'}})
+            self.assertEqual(selected['PHYLOGENETIC_GENERATION_PATH'], '/selected/tree')
+            for name in ENRICHMENT_SETTINGS[1:]:
+                self.assertEqual(selected[name], '')
+
     @unittest.skipUnless(shutil.which("tippecanoe"), "Tippecanoe is required for the native serving fixture")
     def test_static_archive_and_dynamic_serving_have_independent_publications(self):
         from ark_pipeline.cli.map_serving import global_preview_config

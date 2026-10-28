@@ -12,7 +12,9 @@ import tempfile
 import unittest
 import unittest.mock
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier
 
 from ark_pipeline.cli.sources_acquire import (
     Catalogue,
@@ -28,7 +30,13 @@ from ark_pipeline.cli.sources_acquire import (
     targets,
     update_public,
 )
-from ark_pipeline.cli.sources_download_iucn import download_catalogue, kingdom_name, only_list
+from ark_pipeline.cli.sources_download_iucn import (
+    atomic_json,
+    atomic_text,
+    download_catalogue,
+    kingdom_name,
+    only_list,
+)
 from ark_pipeline.cli.sources_sync import SourceStatus, sync_restricted_source
 from ark_pipeline.cli.sources_sync import main as sync_main
 
@@ -370,7 +378,8 @@ class DataAcquisitionTests(unittest.TestCase):
                         encoding="utf-8",
                     )
 
-                source = Source({**configured.values, "inventory_file": str(inventory_path)})
+                source = Source({**configured.values, "inventory_file": str(inventory_path),
+                                 "release_check_url": None})
                 catalogue = Catalogue(
                     sources={source.id: source},
                     profiles={"authorized": {"required_sources": [source.id]}},
@@ -527,6 +536,58 @@ class FakeIucnApi:
 
 
 class IucnCatalogTests(unittest.TestCase):
+    def test_concurrent_page_writes_use_independent_temporary_files(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "page.json"
+            barrier = Barrier(2)
+            replace = os.replace
+            temporary_paths = []
+
+            def publish(source, destination):
+                temporary_paths.append(source)
+                barrier.wait(timeout=5)
+                replace(source, destination)
+
+            with unittest.mock.patch("ark_pipeline.cli.sources_download_iucn.os.replace", side_effect=publish):
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    list(pool.map(lambda value: atomic_json(path, value), [{"page": 1}, {"page": 2}]))
+            self.assertEqual(len(set(temporary_paths)), 2)
+            self.assertIn(json.loads(path.read_text()), [{"page": 1}, {"page": 2}])
+            self.assertEqual(list(Path(folder).iterdir()), [path])
+
+    def test_interrupted_write_keeps_previous_file_and_cleans_temporary(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "catalog.jsonl"
+            path.write_text("previous")
+            with self.assertRaisesRegex(OSError, "interrupted"):
+                with atomic_text(path) as handle:
+                    handle.write("incomplete")
+                    raise OSError("interrupted")
+            self.assertEqual(path.read_text(), "previous")
+            self.assertEqual(list(Path(folder).iterdir()), [path])
+
+    def test_interrupted_catalogue_reuses_completed_pages(self):
+        with tempfile.TemporaryDirectory() as folder:
+            output, metadata = Path(folder) / "catalog", Path(folder) / "meta"
+
+            class Interrupted(FakeIucnApi):
+                def get(self, endpoint, query=None):
+                    if endpoint.endswith("PLANTAE"):
+                        raise OSError("interrupted")
+                    return super().get(endpoint, query)
+
+            with self.assertRaisesRegex(OSError, "interrupted"):
+                download_catalogue(Interrupted(), output, metadata, None, None)
+
+            class Resumed(FakeIucnApi):
+                def get(self, endpoint, query=None):
+                    if endpoint.endswith("ANIMALIA"):
+                        raise AssertionError("completed cached page must not be fetched again")
+                    return super().get(endpoint, query)
+
+            result = download_catalogue(Resumed(), output, metadata, None, None)
+            self.assertEqual(result["rows"], 2)
+
     def test_pagination_requires_stable_exact_unique_totals_and_preserves_output(self):
         cases = [
             ([([1], 3), ([], 3)], "incomplete"),

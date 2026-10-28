@@ -1241,6 +1241,23 @@
             "allowReserved": false
           },
           {
+            "name": "score",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "buckets",
+                "expected-loss",
+                "expected-loss-upper"
+              ],
+              "default": "buckets"
+            },
+            "required": false,
+            "deprecated": false,
+            "allowEmptyValue": false,
+            "allowReserved": false
+          },
+          {
             "name": "coverage_profile",
             "in": "query",
             "schema": {
@@ -2246,6 +2263,36 @@
               }
             ]
           },
+          "gap_upper_myr": {
+            "oneOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "gap_share_upper_myr": {
+            "oneOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "redlist_category": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "evidence_state": {
             "type": "string",
             "default": "unknown"
@@ -2719,7 +2766,14 @@
             "type": "string"
           },
           "priority": {
-            "type": "number"
+            "oneOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "metadata_status": {
             "type": "string",
@@ -2739,6 +2793,66 @@
             "oneOf": [
               {
                 "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "gap_myr": {
+            "oneOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "gap_upper_myr": {
+            "oneOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "edge2_myr_median": {
+            "oneOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "edge2_myr_p025": {
+            "oneOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "edge2_myr_p975": {
+            "oneOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "phylogenetic_status": {
+            "oneOf": [
+              {
+                "type": "string"
               },
               {
                 "type": "null"

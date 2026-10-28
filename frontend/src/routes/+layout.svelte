@@ -48,6 +48,10 @@
       href={withCoverageProfile('/methodology')}
       aria-current={page.url.pathname === '/methodology' ? 'page' : undefined}
       ><span>Methodology</span></a
+    ><a
+      href={withCoverageProfile('/research')}
+      aria-current={page.url.pathname.startsWith('/research') ? 'page' : undefined}
+      ><span>Research</span></a
     >
   </div>
 </nav>

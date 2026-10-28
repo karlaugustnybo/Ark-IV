@@ -109,6 +109,30 @@ class EvidenceScenarioTests(unittest.TestCase):
         self.assertEqual(len(e._cache), 1)
         self.assertEqual(e.rank(DnaRule('any-assembly'), {'EN': 3})['scenario_id'], assembly['scenario_id'])
 
+    def test_upper_bounds_include_withheld_species_and_shares_sum_to_branch_union(self):
+        e = self.engine()
+        for rule, represented in ((DnaRule(), set()), (DnaRule('any-assembly'), {'c'})):
+            rows = {r['iucn_sis_id']: r for r in e.calculate(rule)['rows']}
+            # '3' is unsafe and '0'/'1' are baseline-incomplete: all withheld, all bounded.
+            self.assertIsNone(rows['3']['gap_myr'])
+            expected = dict(zip('0123', tree().gaps(represented)))
+            self.assertEqual({k: r['gap_upper_myr'] for k, r in rows.items()}, expected)
+            union = pd_union(tree(), set('abcd')) - pd_union(tree(), represented)
+            self.assertAlmostEqual(sum(r['gap_share_upper_myr'] for r in rows.values()), union)
+        self.assertEqual(rows['0']['gap_share_upper_myr'], 6)  # 10/2 shared + 1 pendant
+        self.assertEqual(rows['3']['gap_share_upper_myr'], 3)  # sister 'c' is represented
+        t = tree()
+        np.testing.assert_allclose(t.gap_shares(set(), {'a': 2, 'b': 1}), [10 / 3 + 1 / 2, 10 / 3 + 1, 0, 0])
+
+    def test_extinct_species_claim_no_fair_share(self):
+        e = self.engine()
+        e.species[0]['redlist_category'] = 'EX'
+        rows = {r['iucn_sis_id']: r for r in e.rank(DnaRule(), {'EN': 3})['rows']}
+        self.assertIsNone(rows['0']['gap_share_upper_myr'])
+        self.assertEqual(rows['0']['gap_upper_myr'], 11)
+        self.assertEqual(rows['1']['gap_share_upper_myr'], 11)  # sole claimant of the shared stem
+        self.assertEqual(rows['1']['redlist_category'], 'EN')
+
     def test_tree_only_identity_does_not_seed_lineage_representation(self):
         rows = [dict(taxon_id='x', kingdom_taxid='k', family_taxid='f', genus_taxid='g', sample_acquired='yes', genomic_transfer_safe=False)]
         targets = rows + [dict(kingdom_taxid='k')]

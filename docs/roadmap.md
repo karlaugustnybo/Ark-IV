@@ -40,8 +40,9 @@ is not automatically a scientifically validated assumption.
 Work follows three roughly parallel tracks. Scientific validation outranks new
 acquisition and score surfaces.
 
-1. **Scientific validation.** Calibrate simplification and rasterization, then run
-   hotspot robustness across alternative rules and weights. Request independent
+1. **Scientific validation.** A first simplification and rasterization calibration
+   is done (28 October 2026: keep any-touch and 0.01° simplification). Next, run
+   hotspot robustness across alternative weights and report top 5–10% stability. Request independent
    biology review in parallel: weights, Data-Deficient treatment, population trends
    and new score adoption depend on it. Reviewer turnaround may be the longest lead time.
 2. **Reproducibility.** Propose a bring-your-own-data release profile with a synthetic
@@ -68,11 +69,14 @@ claim. Large v3 ranges may be simplified before intersection; 2.5-degree
 computational tiles are separate from that approximation. The antimeridian
 hole-placement bug is fixed.
 
-Remaining P0 work includes the boundary-contact repair and scientific calibration
-after the geometry fixes: measure per-species
-omitted/added cells and local effects against an unsimplified reference with the
-same v3 row policy, agree acceptance limits, and rebuild the timing fixture to
-include v3-only eligible rows. Review planar repair-area thresholds and the
+The same-policy simplification calibration has a first measurement. Against
+exact unsimplified any-touch, v3 omits 0.19% and adds 0.07% of an average
+species' cells (census-weighted, 683 sampled polygons). The 60 simplified
+polygons average 0.993 Jaccard, and no sampled species lost all its cells. See
+the [rasterization item](#test-sensitivity-of-the-polygon-rasterization-rule)
+and methodology §7. Remaining P0 work: the boundary-contact repair on main,
+local displacement and repair effects, reviewer-agreed acceptance limits, and
+rebuilding the timing fixture to include v3-only eligible rows. Review planar repair-area thresholds and the
 interpretation of coarse boundary filtering. See audit A01–A05 and A15.
 
 ### Verify complete and lossless data use
@@ -106,6 +110,13 @@ See A09–A11.
 
 All automatic crosswalk branches now share the minimum-agreement and
 maximum-conflict guard, and the downloader preserves generic field provenance.
+The October investigation adds explicit retirement, current-rank, kingdom and
+direct-SIS contradiction gates. Raw GoaT identity provenance requires a separate
+versioned record supplement because v3 search omits those records. Isolated
+catalogue reconciliation and full COL XR/legacy GBIF/OTT/tree evidence checks are
+available; they do not establish biological precision or activate serving data.
+Reconcile new/renamed catalogue taxa lacking current authoritative lineage and
+review merged IDs and source-concept conflicts before broadening transfer.
 Measure match precision independently of coverage. Review the broad
 sample/project/assembly evidence predicate and the `has_ebp_criteria_evidence`
 criteria-text check against a versioned assembly
@@ -368,6 +379,15 @@ Review the main species table and the cell-details table on the map page for lay
 
 Let users expand a species row in both the main species table and the map's cell-details table to inspect all available statistics and supporting metadata without leaving the table. Include taxonomy, conservation status, genomic evidence, score components and final scores, distribution statistics, and source provenance where available. Explain derived values and distinguish missing or uncertain evidence from zero values. Support keyboard-accessible expansion and collapse, with a readable layout on small screens.
 
+### Add a species card
+
+**Priority:** P3 · **Status:** Proposed
+
+Open a single-species card from the table or a cell's species list: status,
+DNA evidence, unsequenced history, ED/EDGE2 with intervals, where the species
+sits on the dated tree, and its cells on a small map. It is a reading view for
+one species, complementary to expandable table rows.
+
 ## 4. Documentation and communication
 
 ### Add map images to the README
@@ -589,6 +609,54 @@ OTT extinction flags, raw flags and explicit overrides. A missing dated leaf is 
 coverage gap, not an instruction to erase contemporary DNA evidence. This policy
 exists in the optional research source; no production map consumes its output.
 
+### Explore branch-length weightings and a map mode
+
+**Priority:** P2 · **Status:** In progress
+
+The species table scores priority as expected history lost (EDGE2 extinction
+probability × unsequenced Myr) by default, with the original DNA buckets as
+the alternative. Threat weight × Myr and × √Myr were tried and removed: on the
+local generation √Myr shared 892 of the top 1,000 with expected loss, and
+linear mainly promoted deep EN/VU/DD lineages. Species without a safe tree
+placement, and gaps withheld for an incomplete baseline, stay unscored rather
+than zero. The map still colours cells from bucket counts. A branch-length map
+mode needs served per-cell sums of gap per threat category.
+
+The phylogenetic stage now also publishes two bounds over every placed species,
+withheld ones included: `gap_upper_myr` (marginal gap assuming the species is
+unsequenced unless represented) and `gap_share_upper_myr` (each uncovered branch
+split equally among the unsequenced assessed species below it). Marginal gaps
+answer "what does sequencing only this species gain?" and suit the species table
+(`score_mode=expected-loss-upper`). Shares answer "how much of the remaining gap
+is this species responsible for?" and sum to the uncovered branch union, so they
+suit cell sums; marginal gaps summed over the local generation are 4.5× that
+union. Remaining work:
+
+- **Map gap layer:** the optional `--phylogenetic-aggregates` stage
+  (`cli/analytical_prepare.py`) now writes per-cell `share_upper_<cat>_myr` sums
+  for CR/EN/VU/NT/DD/LC and `share_unavailable_species` into
+  `opportunities_res3/res7.parquet`, so threat sliders can be reapplied in the
+  browser. Extinct species claim no share. **Before the next rebuild, check that
+  this works on a small real sample:** shares per cell are finite, all-cell sums
+  per category reconcile with the species-level shares (coarse memberships are
+  distinct), and res-3 values are not sums of res-7 cells. Still to do: serve the
+  columns in the map bundle and add a map mode with a legend that states it is
+  an upper bound and shows unavailable species (UI mocks first).
+- **Table UI:** done; withheld species are ranked at their upper bound by default.
+
+Weightings to try for data exploration, not as defaults:
+
+- **Log / half-saturation:** threat × ln(1 + gap/τ); "the first τ Myr matter most".
+- **Percentile:** threat × percentile(gap); bounded and robust to tree rescaling,
+  but loses units. A sensitivity check, not a headline.
+- **Bucket bridge:** bin gap into Myr bands near genus/family/order depth and
+  reuse the bucket sliders. Cheap with today's cell counts; discards most detail.
+- **Missing-gap fallback:** impute the median gap of the same DNA bucket for
+  unscored species, visibly flagged and switchable back to "exclude and count".
+
+Compare top-N overlap and cell rankings against the bucket score on a small
+fixture before promoting any of these.
+
 ### Integrate dated-tree identities, EDGE and DNA gaps into the data pipeline
 
 **Priority:** P1 · **Status:** Planned
@@ -636,6 +704,12 @@ range/stewardship builders and a reproducible robustness rehearsal. See the
 [acceptance record](pipeline/12_pipeline_acceptance.md) for measured scope,
 unavailable identities and the remaining execution/scientific gates. Table UI
 and activation remain separate work.
+
+**Pending rebuild:** the `rooted-gap-bounds-v2` kernel changed the calculation
+code identity, so the 25 October generation (`23cb9660…`) is stale. The loader
+and backend refuse it until the phylogenetic stage is rebuilt from the same
+pinned sources (the cloud `/probe` inputs), then Postgres is reloaded to fill
+`gap_upper_myr`.
 
 ### Compute Ark-IV EDGE-style scores from a dated global tree
 
@@ -748,7 +822,31 @@ layer deferred in [Add IUCN point data](#add-iucn-point-data); see A01 and A06.
 
 ### Test sensitivity of the polygon rasterization rule
 
-**Priority:** P0 · **Status:** Investigation
+**Priority:** P0 · **Status:** First pass complete (28 October 2026); follow-ups open
+
+**Result.** Keep any-touch. A CoreWeave run (about $8) measured 683 stratified
+sample polygons and every polygon in six 4° × 4° windows (21,692) from the
+112,218 eligible v3 polygons. Details are in methodology §7,
+[membership-rule sensitivity](../methodology.md#membership-rule-and-simplification-sensitivity).
+
+- Centroid, ≥ 10% and ≥ 25% rules omit 16.7%, 7.3% and 11.8% of an average
+  species' cells. They erase 109–116 of 121 one-cell ranges, while ranges over
+  100k cells change by only 0.7–2.1%.
+- Window cell-score Spearman stays at 0.73–0.997, but top-1% Jaccard falls to
+  0.05–0.75. Even 0.01° simplification, at 0.993 per-species Jaccard, keeps only
+  0.79–0.93 of the top 1%.
+- FAST and correct mode were identical on every measured polygon.
+
+Follow-ups:
+
+- Feed hotspot reporting at the top 5–10% into the
+  [robustness diagnostic](#run-a-hotspot-robustness-diagnostic).
+- Classify coastal ranges against a coastline layer.
+- Test a best-cell fallback before treating area rules as viable alternatives.
+- Inspect the 107 Madagascar-window species with seven contact cells and one
+  10–25% overlap cell.
+
+The original brief follows.
 
 The intended resolution-7 membership rule is any-touch polygon contact, including
 edge and vertex touching. Main still omits some exact boundary contacts (SPA-002);
@@ -777,7 +875,15 @@ see A01–A05.
 
 ### Run a hotspot robustness diagnostic
 
-**Priority:** P0 · **Status:** Proposed
+**Priority:** P0 · **Status:** In progress
+
+A first pass lives in `notebooks/hotspot_robustness.py`: 288 specifications
+(Data-Deficient weight, six DNA measures including three phylogenetic gap
+levels, rarity, taxonomy transfer, assessment window). Of the 2,020 baseline
+top-5% resolution-3 cells, 1,477 (73%) stay in the top 5% under ≥ 95% of the
+rarity-off specifications and 153 (8%) under < 50%. Rarity remains the largest
+lever (mean top-5% overlap 0.22 when switched on). Geometry, crosswalk-quality
+and per-class items below are not yet in the grid. See the methodology summary.
 
 Before acquiring additional data sources, quantify the stability of the
 current top-1%, top-5%, and top-10% resolution cells under plausible
@@ -790,8 +896,9 @@ alternative specifications of the existing model:
 - exclusion of near-name crosswalk matches versus the full accepted set;
 - matched taxonomy only versus all registered species;
 - polygon evidence only versus all spatial evidence;
-- each polygon rasterization rule tested above;
-- no simplified geometries on the calibration subset;
+- each polygon rasterization rule tested above (measured separately; the
+  top 1% is fragile, see the rasterization result);
+- no simplified geometries on the calibration subset (measured separately);
 - recent assessments only versus the full assessment record;
 - each taxonomic class scored separately.
 
@@ -903,6 +1010,12 @@ phylogenetic-gap work above, but the greedy version is itself a meaningful
 scientific feature. Cross-check portfolio results against the robustness and
 provenance work: a selected set should carry its own evidence and feasibility
 labels rather than silently repeating the headline score.
+
+A phylogenetic variant scores joint cell gain, `PD(S ∪ cell) − PD(S)`: the
+branch union of a cell's unsequenced species, so shared uncovered branches count
+once. It answers "what do we gain by sampling here?" rather than summing
+individual gaps. It needs a per-cell branch-union kernel and belongs in this
+portfolio mode, not in the weight controls.
 
 ### Investigate climate vulnerability and refugia
 

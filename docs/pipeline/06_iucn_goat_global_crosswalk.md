@@ -1,5 +1,32 @@
 # Global IUCN–GoaT identifier crosswalk
 
+## Screened crosswalk selection
+
+Rebuilds prefer the registered private `screened-crosswalk` product. Its package
+contains the screened Parquet, source summary, screening receipt and original
+provenance. `crosswalk_refresh` validates its complete IUCN/GoaT/NCBI/COL XR/
+legacy GBIF/OTT/tree bindings and selects a reusable managed generation at
+`derived/iucn-goat-crosswalk/current`. A changed contributing source requires a
+new screen; the build never silently falls back to the older matcher.
+
+To register a completed investigation, use:
+
+```sh
+uv run python -m ark_pipeline.cli.screened_crosswalk \
+  --root /private/data-root \
+  --investigation /private/investigation \
+  --release REVIEWED-RELEASE
+```
+
+Then `just data-build` or `just data-update` selects the product during preparation.
+For crosswalk selection alone, run `uv run python -m ark_pipeline.cli.crosswalk_refresh
+--root /private/data-root`. Neither registration nor crosswalk selection loads the
+database or rebuilds tiles. The registered pack is included in normal private
+source staging for cloud builds. Crosswalk coverage and screening eligibility do
+not establish independently measured biological precision.
+
+## Historical matching results
+
 The enriched results below are historical, not the coverage expected from a
 fresh deterministic refresh. The [September assumption audit](../reference/roadmap_assumption_audit.md)
 checks current behavior and source evidence. The [methodology](../../methodology.md#4-identities-and-taxonomy-matching)

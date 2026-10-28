@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import json
 import os
 import resource
+import shutil
 import signal
 import subprocess
 import time
@@ -31,7 +33,9 @@ from ark_pipeline.runtime.provenance import atomic_json
 LABELS = {"acquisition": "Acquire sources", "source_scan": "Source I/O & census", "sample_setup": "Stratified sample",
           "crosswalk": "Species matching", "pairs": "Spatial sources → H3", "lists": "Deduplicate & group",
           "boundaries": "Boundary preparation", "metadata": "Species metadata", "coarse_db": "Coarse database",
-          "coarse_cache": "Coarse metrics & map", "fine_metrics": "Fine metrics", "prepared_inputs": "Reconcile inputs", "tiles": "Compile map tiles"}
+          "coarse_cache": "Coarse metrics & map", "fine_metrics": "Fine metrics", "prepared_inputs": "Reconcile inputs", "tiles": "Compile map tiles",
+          "spatial_analytics": "Spatial analytics", "dna_evidence": "DNA evidence", "phylogenetic": "Phylogenetic scores",
+          "opportunities": "Opportunity aggregates"}
 CYAN, MUTED, GREEN = "#69d2e7", "#8796aa", "#91d7a3"
 
 
@@ -40,7 +44,20 @@ def spark(values):
     return "".join(blocks[min(7, max(0, int(value / 100 * 7)))] for value in values)
 
 
+def record_event(path: Path, **fields):
+    """Append one runner-owned lifecycle record beside the workers' own events."""
+    payload = json.dumps({**fields, "time": time.time()}, separators=(",", ":"), allow_nan=False) + "\n"
+    try:
+        with path.open("a") as stream:
+            stream.write(payload)
+    except OSError:
+        pass  # Telemetry loss must not abort the scientific calculation.
+
+
 class Dashboard:
+    baseline_label = "Benchmark"
+    duration = staticmethod(duration)
+
     def __init__(self, names, output: Path, resources: dict, *, prior=None, note="", mode="benchmark", ui="auto", console=None, identity=None):
         self.names = list(names)
         self.output, self.resources = output, resources
@@ -62,8 +79,10 @@ class Dashboard:
         self.stats = {"cpu": None, "ram_percent": None, "ram_used": None, "ram_total": None, "rss": None, "cores": None}
         self.processes = {}
         self.last_monitor = 0
+        self.last_resource_sample = 0
+        self.scratch_paths = []
         self.live = None
-        self.global_estimate = prior.get("estimate", {}).get("total_seconds") if prior else None
+        self.global_estimate = (prior.get("estimate", {}).get("full_run") or prior.get("estimate", {})).get("total_seconds") if prior else None
         self.identity = identity
         self.last_save = 0
         self.lock = None
@@ -191,6 +210,11 @@ class Dashboard:
             self.tasks.pop((name, event.get("task")), None)
         elif kind == "message":
             self.logs.append((event["time"], event["message"]))
+        elif kind == "command_start" and state["status"] == "pending":
+            # Commands without their own tracked stage still get exact boundaries.
+            self.accept({**event, "kind": "stage_start"})
+        elif kind == "command_end" and state["status"] == "running":
+            self.accept({**event, "kind": "stage_end", "elapsed": event["wall_seconds"]})
 
     def monitor(self, pid=None):
         if time.monotonic() - self.last_monitor < 0.5:
@@ -227,6 +251,44 @@ class Dashboard:
             self.stats.update(rss=rss, cores=cores)
         except (OSError, psutil.Error):
             self.stats.update(rss=None, cores=None)
+        self.record_resources(pid)
+
+    def record_resources(self, pid):
+        """Persist sampled process RSS/CPU separately from cgroup cache and spills."""
+        now = time.monotonic()
+        if now - self.last_resource_sample < 5:
+            return
+        self.last_resource_sample = now
+        sample = {"time": time.time(), "pid": pid, **self.stats,
+                  "running_stages": [n for n, s in self.states.items() if s["status"] == "running"]}
+        # These are container-wide counters; host RAM and summed process RSS
+        # describe different scopes and must not be interpreted interchangeably.
+        cgroup = Path('/sys/fs/cgroup')
+        for name in ('memory.current', 'memory.max', 'memory.stat', 'memory.events', 'cpu.stat', 'io.stat',
+                     'cpu.pressure', 'memory.pressure', 'io.pressure'):
+            try:
+                sample[name] = (cgroup / name).read_text().strip()
+            except OSError:
+                sample[name] = None
+        sample['process_io'] = []
+        for (process_id, created), process in self.processes.items():
+            with contextlib.suppress(psutil.Error, OSError, AttributeError):
+                io = process.io_counters()
+                sample['process_io'].append({'pid': process_id, 'created': created,
+                    'read_bytes': io.read_bytes, 'write_bytes': io.write_bytes})
+        scratch = {}
+        for root in self.scratch_paths:
+            try:
+                scratch[str(root)] = sum(p.stat().st_size for p in root.rglob('*') if p.is_file())
+            except OSError:
+                scratch[str(root)] = None
+        sample['scratch_logical_bytes'] = scratch
+        try:
+            sample['output_disk_free_bytes'] = shutil.disk_usage(self.output).free
+            with (self.output / 'resources.jsonl').open('a') as stream:
+                stream.write(json.dumps(sample, allow_nan=False) + '\n')
+        except OSError:
+            pass  # Resource telemetry must not abort the scientific calculation.
 
     def tick(self, pid=None, force=False):
         for event in self.reader.read():
@@ -249,7 +311,7 @@ class Dashboard:
         elapsed = now - self.started
         remaining, _ = self.forecast.total(self.names, now)
         unknown = sum(self.forecast.remaining(name, now) is None for name in self.names)
-        remaining_label = (duration(remaining) if remaining is not None else
+        remaining_label = (self.duration(remaining) if remaining is not None else
                            f"Unknown · {unknown} stage{'s' if unknown != 1 else ''} unestimated")
         heading = Text("  A R K  /  DATA LAB", style=f"bold {CYAN}")
         heading.append(f"    {self.mode.upper()}  ·  {self.status.upper()}", style=MUTED)
@@ -257,12 +319,12 @@ class Dashboard:
         forecast = Table.grid(expand=True, padding=(0, 1))
         forecast.add_column(style=MUTED)
         forecast.add_column(justify="right", style="bold white")
-        forecast.add_row("Elapsed", duration(elapsed))
+        forecast.add_row("Elapsed", self.duration(elapsed))
         forecast.add_row("Run remaining", remaining_label)
         finish = (datetime.fromtimestamp(now) + timedelta(seconds=remaining)).strftime("%H:%M:%S") if remaining is not None else "—"
         forecast.add_row("Expected finish", finish)
         if self.mode == "benchmark":
-            forecast.add_row("Full-build projection", duration(self.global_estimate))
+            forecast.add_row("Full-build projection", self.duration(self.global_estimate))
         machine = Table.grid(expand=True, padding=(0, 1))
         machine.add_column(style=MUTED)
         machine.add_column(justify="right")
@@ -285,13 +347,13 @@ class Dashboard:
         else:
             top.add_row(Panel(Group(forecast, Text(""), machine), title="RUN / MACHINE", border_style=MUTED))
         if compact:
-            summary = Text(f"Elapsed {duration(elapsed)}   Remaining {remaining_label}   Finish {finish}\n", style="bold white")
+            summary = Text(f"Elapsed {self.duration(elapsed)}   Remaining {remaining_label}   Finish {finish}\n", style="bold white")
             summary.append(f"CPU {'—' if cpu is None else f'{cpu:.0f}%'}   RAM {ram}   Pipeline {rss} / {cores}", style=CYAN)
             summary.append(f"\nWorker limits {self.resources['spatial_workers']} / {self.resources['metric_workers']} / {self.resources['tile_threads']}", style=MUTED)
             if self.forecast.active and self.states.get("pairs", {}).get("status") == "running":
                 summary.append(f" · {len(self.forecast.active)} active range jobs", style=CYAN)
             if self.mode == "benchmark":
-                summary.append(f"   Full build {duration(self.global_estimate)}", style="bold white")
+                summary.append(f"   Full build {self.duration(self.global_estimate)}", style="bold white")
             top = Panel(summary, title="RUN / MACHINE", border_style=MUTED)
         table = Table(expand=True, box=box.SIMPLE, show_edge=False, padding=(0, 1), header_style=f"bold {MUTED}")
         table.add_column("Done", width=5, justify="right", no_wrap=True)
@@ -299,7 +361,7 @@ class Dashboard:
         table.add_column("Measured work", ratio=3, no_wrap=True, overflow="ellipsis")
         table.add_column("Elapsed", justify="right", no_wrap=True)
         if not narrow:
-            table.add_column("Benchmark", justify="right")
+            table.add_column(self.baseline_label, justify="right")
         table.add_column("Live left", justify="right", no_wrap=True)
         visible_names = self.names
         visible_count = max(1, min(6, height - 19)) if compact else len(self.names)
@@ -327,14 +389,14 @@ class Dashboard:
             else:
                 progress = Text(state["phase"] if status != "pending" else "Waiting", style=color, overflow="ellipsis", no_wrap=True)
             spent = state.get("elapsed", now - state.get("started", now) + state.get("previous_elapsed", 0))
-            columns = [Text(marker, style=color), Text(LABELS.get(name, name), style=color), progress, duration(spent) if status != "pending" else "—"]
+            columns = [Text(marker, style=color), Text(LABELS.get(name, name), style=color), progress, self.duration(spent) if status != "pending" else "—"]
             if not narrow:
-                columns.append(duration(self.forecast.base.get(name)))
+                columns.append(self.duration(self.forecast.base.get(name)))
             left = self.forecast.remaining(name, now)
             phase_left = self.forecast.work_remaining(name, now) if work and work.get("scope") == "phase" else None
-            left_label = duration(left) if left is not None else "Estimating" if status == "running" else "—"
+            left_label = self.duration(left) if left is not None else "Estimating" if status == "running" else "—"
             if left is None and phase_left is not None and status == "running":
-                left_label = f"{duration(phase_left)} + ?"
+                left_label = f"{self.duration(phase_left)} + ?"
             columns.append("—" if status in {"passed", "failed", "interrupted"} else left_label)
             table.add_row(*columns)
         title = f"PIPELINE · {sum(s['status'] == 'passed' for s in self.states.values())}/{len(self.names)} stages complete"
@@ -444,7 +506,13 @@ def run_command(stage, output: Path, environment: dict, dashboard: Dashboard | N
     log_path = output / "logs" / (stage["name"] + ".log")
     log_path.parent.mkdir(parents=True, exist_ok=True)
     events = output / "progress.jsonl"
-    env = {**environment, "PIPELINE_PROGRESS_PATH": str(events), "PIPELINE_STAGE": stage["name"], "PYTHONUNBUFFERED": "1"}
+    env = {**environment, "PIPELINE_PROGRESS_PATH": str(events), "PIPELINE_STAGE": stage["name"],
+           "PYTHONUNBUFFERED": "1", "PYTHONFAULTHANDLER": "1"}
+    if dashboard:
+        roots = [Path(environment['GLOBAL_PREVIEW_ROOT']) / 'scratch'] if environment.get('GLOBAL_PREVIEW_ROOT') else []
+        if environment.get('DUCKDB_SCRATCH_DIR'):
+            roots.append(Path(environment['DUCKDB_SCRATCH_DIR']))
+        dashboard.scratch_paths = sorted(set(roots))
     usage_before = resource.getrusage(resource.RUSAGE_CHILDREN)
     started = time.monotonic()
     result = {**stage, "status": "running", "started_at": datetime.now().isoformat(), "log": str(log_path), "peak_process_tree_rss_bytes": None}
@@ -452,6 +520,7 @@ def run_command(stage, output: Path, environment: dict, dashboard: Dashboard | N
         dashboard.begin_stage(stage["name"])
     elif not dashboard or not dashboard.enabled:
         print(f"Pipeline: {stage['name']} · log: {log_path}", flush=True)
+    record_event(events, stage=stage["name"], kind="command_start", pid=os.getpid(), command=[str(v) for v in stage["command"]])
     with log_path.open("w") as log:
         process = subprocess.Popen(stage["command"], cwd=cwd, env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
         tail = LogTail(log_path)
@@ -471,6 +540,9 @@ def run_command(stage, output: Path, environment: dict, dashboard: Dashboard | N
                     pass
         except BaseException as error:
             _terminate_group(process)
+            record_event(events, stage=stage["name"], kind="command_end", pid=os.getpid(), exit_code=process.returncode,
+                         status="interrupted" if isinstance(error, KeyboardInterrupt) else "failed",
+                         wall_seconds=time.monotonic() - started, peak_process_tree_rss_bytes=result["peak_process_tree_rss_bytes"])
             if dashboard:
                 for name, state in dashboard.states.items():
                     if state["status"] == "running":
@@ -484,6 +556,9 @@ def run_command(stage, output: Path, environment: dict, dashboard: Dashboard | N
         result["filesystem_output_note"] = "Block-write accounting unavailable or zero; not evidence of zero writes."
     result.update(wall_seconds=time.monotonic() - started, exit_code=process.returncode,
                   status="passed" if process.returncode == 0 else "action-required" if process.returncode == 2 else "failed")
+    record_event(events, stage=stage["name"], kind="command_end", pid=os.getpid(), exit_code=process.returncode,
+                 status=result["status"], wall_seconds=result["wall_seconds"],
+                 peak_process_tree_rss_bytes=result["peak_process_tree_rss_bytes"])
     if dashboard:
         tail.update(dashboard)
         dashboard.tick(force=True)

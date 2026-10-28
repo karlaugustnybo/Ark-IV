@@ -145,6 +145,44 @@ class LiveEstimateTests(unittest.TestCase):
 
 
 class EventAndDisplayTests(unittest.TestCase):
+    def test_plain_runner_retains_progress_and_resource_samples(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            scratch = output / 'scratch'
+            scratch.mkdir()
+            (scratch / 'spill.tmp').write_bytes(b'12345')
+            display = Dashboard(['pairs'], output, RESOURCES, ui='plain', identity={'fixture': 1})
+            command = [sys.executable, '-c',
+                "from ark_pipeline.runtime.progress import emit; emit('phase', phase='fixture'); import time; time.sleep(.1)"]
+            with display:
+                measured = run_command({'name': 'pairs', 'command': command}, output,
+                    {**os.environ, 'DUCKDB_SCRATCH_DIR': str(scratch)}, display)
+                display.status = measured['status']
+            self.assertEqual(measured['exit_code'], 0)
+            self.assertFalse(display.enabled)
+            self.assertTrue((output / 'logs/pairs.log').is_file())
+            events = [json.loads(line) for line in (output / 'progress.jsonl').read_text().splitlines()]
+            self.assertTrue(any(event.get('phase') == 'fixture' for event in events))
+            samples = [json.loads(line) for line in (output / 'resources.jsonl').read_text().splitlines()]
+            self.assertEqual(samples[0]['scratch_logical_bytes'][str(scratch)], 5)
+            self.assertIsNotNone(samples[0]['rss'])
+            self.assertEqual(json.loads((output / 'dashboard-state.json').read_text())['status'], 'passed')
+            commands = [event for event in events if event['kind'].startswith('command_')]
+            self.assertEqual([(e['kind'], e['stage']) for e in commands], [('command_start', 'pairs'), ('command_end', 'pairs')])
+            self.assertEqual(commands[1]['exit_code'], 0)
+
+    def test_runner_command_records_bound_stages_without_their_own_events(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            (output / 'progress.jsonl').write_text(
+                json.dumps({'stage': 'lists', 'kind': 'command_start', 'time': 10}) + '\n'
+                + json.dumps({'stage': 'lists', 'kind': 'command_end', 'status': 'passed', 'wall_seconds': 42.0, 'time': 52}) + '\n')
+            display = Dashboard(['pairs', 'lists'], output, RESOURCES, ui='plain')
+            display.tick()
+            self.assertEqual(display.states['lists']['status'], 'passed')
+            self.assertEqual(display.states['lists']['elapsed'], 42.0)
+            self.assertEqual(display.states['pairs']['status'], 'pending')
+
     def test_percentage_rows_are_stable_single_lines_and_total_is_honest(self):
         for width, height in ((95, 54), (128, 45), (80, 24)):
             with self.subTest(width=width), tempfile.TemporaryDirectory() as temporary:

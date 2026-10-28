@@ -28,7 +28,7 @@ description = "Global ADM2 map-filter boundaries, acquired independently of IUCN
 required_sources = ["geoboundaries-adm2"]
 
 [profiles.monitor]
-description = "Cheap release checks and public inputs refreshed by the monthly acquisition run."
+description = "Metadata inputs and the optional full IUCN catalogue; lightweight release checks run separately."
 required_sources = [
   "iucn-assessment-catalog",
   "goat-species",
@@ -40,6 +40,10 @@ required_sources = [
 description = "Optional pinned dated tree and OTT taxonomy; independent of spatial acquisition."
 required_sources = ["dated-tree", "ott-taxonomy"]
 
+[profiles.taxonomy-review]
+description = "Pinned current COL XR and legacy GBIF inputs for explicit taxonomy review."
+required_sources = ["col-xr", "gbif-backbone"]
+
 [[sources]]
 id = "geoboundaries-adm2"
 provider = "geoBoundaries"
@@ -50,6 +54,7 @@ required = true
 official_url = "https://www.geoboundaries.org/api.html"
 terms_url = "https://www.geoboundaries.org/api.html"
 inventory_file = "config/geoboundaries_adm2.toml"
+release_check_url = "https://www.geoboundaries.org/api/current/gbOpen/ALL/ADM2/"
 output_file = "geoboundaries-adm2.zip"
 metadata_file = "geoboundaries-adm2.metadata.json"
 command = ["uv", "run", "python", "-m", "ark_pipeline.cli.sources_download_adm2", "{output}", "--previous", "{previous}"]
@@ -120,6 +125,7 @@ required = true
 official_url = "https://www.hydrosheds.org/products/hydrobasins"
 terms_url = "https://data.hydrosheds.org/file/technical-documentation/HydroSHEDS_TechDoc_v1_4.pdf"
 inventory_file = "config/hydrobasins_v1c.toml"
+release_check_url = "https://www.hydrosheds.org/products/hydrobasins"
 allowed_suffixes = [".zip"]
 archive_required_suffixes = [".shp", ".dbf", ".shx"]
 
@@ -178,6 +184,36 @@ terms_url = "https://creativecommons.org/licenses/by/4.0/"
 download_url = "https://hosted-datasets.gbif.org/datasets/backbone/current/backbone.zip"
 output_file = "backbone.zip"
 
+[[sources]]
+id = "col-xr"
+provider = "Catalogue of Life / ChecklistBank"
+description = "Pinned COL XR Darwin Core Archive, kept separate from legacy GBIF identifiers for taxonomy review."
+access = "public-download"
+update_policy = "pinned"
+required = false
+release = "2026-10-16-XR"
+official_url = "https://www.checklistbank.org/dataset/316691/about"
+terms_url = "https://www.catalogueoflife.org/data/metadata"
+release_check_url = "https://api.checklistbank.org/dataset?origin=xrelease&sourceKey=3&limit=1&sortBy=issued&sortOrder=desc"
+download_url = "https://download.checklistbank.org/col/monthly/2026-10-16_xr_dwca.zip"
+output_file = "col-xr-dwca.zip"
+file_sha256 = { "col-xr-dwca.zip" = "77e7c76d4a049408c8aa88ff0682e24ee303b534e6a0e1c9d9f45e28d9cadda3" }
+archive_required_suffixes = [".xml", ".tsv"]
+archive_column_requirements = [
+  { member = "Taxon.tsv", columns = ["dwc:taxonID", "dwc:acceptedNameUsageID", "dwc:taxonomicStatus", "dwc:taxonRank", "dwc:genericName", "dwc:specificEpithet", "dwc:kingdom", "dwc:family"] },
+]
+
+[[sources]]
+id = "screened-crosswalk"
+provider = "ARK-IV"
+description = "Private screened IUCN/GoaT crosswalk bound to its complete registered source set; selected for rebuilds until re-screening is required."
+access = "manual"
+update_policy = "when-provider-releases"
+required = false
+terms_url = "https://www.iucnredlist.org/terms/terms-of-use"
+required_files = ["iucn_goat_crosswalk.parquet", "match_summary.json", "screening_receipt.json", "provenance.json"]
+allowed_suffixes = [".parquet", ".json"]
+
 # These already-supported research inputs are optional registered sources.
 [[sources]]
 id = "dated-tree"
@@ -202,6 +238,7 @@ update_policy = "pinned"
 required = false
 release = "OTT-3.7.3"
 official_url = "https://files.opentreeoflife.org/ott/ott3.7.3/"
+release_check_url = "https://files.opentreeoflife.org/ott/"
 terms_url = "https://tree.opentreeoflife.org/about/licenses"
 download_url = "https://files.opentreeoflife.org/ott/ott3.7.3/ott3.7.3.tgz"
 output_file = "ott3.7.3.tgz"

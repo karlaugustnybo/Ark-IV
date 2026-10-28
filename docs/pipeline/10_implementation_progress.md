@@ -1,5 +1,23 @@
 # Scoring/evidence implementation progress
 
+**Full FAST execution, 22 October: incomplete.** The first eight-hour worker
+completed spatial pairs, aggregation and all 122 fine partitions, then reached
+its build deadline during spatial analytics. Its interrupted checkpoint was
+committed privately. The authorized four-hour continuation restored all packs
+with SHA-256 verification and reused the completed geometry and fine partitions,
+but `serving_tiles record` crashed with exit code 139 inside `global-prepare`.
+The exact native cause is not established; the cgroup reported no OOM kills.
+The continuation retained `scoring-full-candidate-interrupted:v1` (20,089,487,360
+bytes) in the existing private storage project. Local private diagnostics include
+`fullrun/continuation-status.json`, `continuation-retention.json` and
+`continuation-build.log`. Both owned workers are confirmed stopped and the
+monitor schedule is disabled. Maximum lifetime compute reservations total
+$20.4288; this is not an invoice. No additional allocation or duplicate build was
+started after this failure. DNA/phylogenetic/opportunity/tile completion is not
+established for this candidate. Inputs remain the reviewed frozen snapshots;
+the latest-data request is still unmet after the GoaT provider refresh failed.
+Correct-path validation, database loading and activation were not run.
+
 This log tracks implementation of [the milestone plan](10_phylogenetic_scoring_plan.md).
 Code completion, fixture validation, scientific acceptance and full-data execution
 are separate gates. No new default scientific score is adopted.
@@ -370,3 +388,98 @@ code changed after the final 124-check cloud suite; subsequent edits are docs.
 Checked surfaces were source/identity boundaries, generation/checkpoint reuse,
 headless DNA/tree/range/robustness stages, coarse/fine base compatibility and
 isolated scenario APIs. Real table/map interactions remain the later UI step.
+
+### 25 October: native-crash diagnostic preparation
+
+The retained log narrows the continuation failure to `serving_tiles record`,
+after all 122 fine partitions passed reuse validation. It does not identify
+the native failing call. The CLI now enables Python fault tracing and emits
+flushed validation boundaries on stderr, including membership, metadata, coarse
+metrics, Arrow snapshot and export reconciliation. Scientific checks and
+publication rules are unchanged. Ruff, syntax parsing and whitespace checks
+passed locally; the crash has not been reproduced or fixed. No worker was
+allocated. A focused cloud replay against the retained v1 checkpoint needs a
+new bounded allocation; the previous continuation authorization has ended.
+
+### 25 October: retained-checkpoint replay passed
+
+On an isolated 8 CPU / 32 GiB worker, the exact `serving_tiles record`
+command passed all validation boundaries against the SHA-256-verified retained
+v1 checkpoint in 275.5 seconds. This did not reproduce or resolve the earlier
+native exit 139. Diagnostics were recovered locally and the diagnostic worker
+was explicitly stopped. The user-authorized eight-hour FAST continuation has
+been allocated with a $13.6192 compute ceiling; it retains fault tracing and
+file-based progress events even with plain terminal output. Full completion
+and the latest-data request remain unestablished.
+
+### 25 October: full FAST continuation built successfully (retention subsequently confirmed below)
+
+The retained-source continuation passed all eight preparation commands at
+18:46:56 UTC: spatial pairs, aggregation, global serving preparation, spatial
+analytics, DNA evidence, all-clade phylogenetic enrichment, opportunity
+aggregates and tiles. Build time was 13,729.2 seconds (3 h 49 m), excluding
+restoration and retention. Spatial output covers 96,631,588 fine cells and
+115,408 mapped species, with 92,966,356 jurisdiction memberships. DNA retains
+171,604 assessment targets and 1,795,920 evidence records; the phylogeny retains
+2,294,776 tips with 150,270 assessed ED/EDGE-scored tips. Resolution-3 and -7
+opportunity aggregates were published separately. These are frozen-source FAST
+outputs with the existing partial-basin omissions, not current-source or
+correct-path acceptance. Tile compilation passed in 812.7 seconds.
+
+The prior native fault did not recur; prepared-input validation passed in
+373.2 seconds in this continuation. Its root cause remains unknown. Native
+query memory pressure and substantial DuckDB disk spills were observed during
+spatial analytics despite the configured 8 GB per-connection limit. Additional
+performance work must use these global observations rather than the earlier
+small-sample RAM recommendation alone. The worker is retaining the final pack;
+artifact commitment and cleanup must be confirmed before calling retention done.
+
+### 25 October: final retention and cleanup verified
+
+**Full FAST completion, 25 October:** all eight preparation commands passed
+on the reviewed frozen inputs. The continuation build took 13,729.2 seconds
+(3 h 49 m), excluding restoration and retention. Final private catalogue
+`scoring-full-candidate-final:v0` is independently confirmed `COMMITTED`; its
+inventory matches the recovered retention receipt for 21,718,538,240 bytes.
+All four full-run/diagnostic workers are confirmed stopped and monitoring is
+disabled. Lifetime compute reservations total $35.7504, not an invoice.
+
+The spatial output covers 96,631,588 fine cells and 115,408 mapped species,
+with 92,966,356 jurisdiction memberships. DNA retains 171,604 assessed records;
+the complete phylogeny retains 2,294,776 tips and scores 150,270 assessed tips.
+DNA, spatial, phylogenetic and opportunity receipts passed; tiles passed.
+This supersedes the earlier incomplete execution status. Known basin omissions
+remain explicit. The latest-data request remains unmet; correct-path coverage,
+scientific adoption, website controls, database loading and activation are
+separate remaining work. The earlier native crash did not recur and its root
+cause remains unresolved. No final-pack download/restore has been performed.
+
+### Monitoring default after the completed run
+
+[Run report](14_fast_run_report_2026_10_25.md) records measured outcomes and
+limits. The 104,676 retained progress events are verified; no continuous resource
+series exists retrospectively. Full preparation now always uses the monitored
+runner, independent of terminal mode, and saves five-second resource samples,
+command measurements, progress and logs. Spatial analytics emits its major
+phases and jurisdiction work counts. Cloud persistence includes run telemetry.
+Focused mocked-runner and short subprocess tests verify recording with plain
+output; no new paid cloud work or production execution was started.
+
+### 25 October: local serving, ERDA archival and event analysis complete
+
+The complete final pack was downloaded, checksum-verified and restored to the
+external T7 disk with immutable scientific receipts and a separate relocated
+runtime descriptor. Future `just start` / `just dev` select this bundle and its
+matching analysis generations. The isolated local database contains 173,498
+metadata records; targeted metadata, coarse/fine map and species-detail checks
+passed. After explicit authorization the existing API was replaced and remains
+running at `http://127.0.0.1:8000` with the new selection.
+
+Three superseded serving directories were archived privately to ERDA:
+10,343,976,960 bytes in total, each verified by full SFTP readback and SHA-256
+before local removal. Raw inputs and old databases were retained. The subsequent
+[event analysis](../performance/2026-10-25_fast_run_events.md) measures the spatial
+completion interval at 184.5 minutes, 80.6% of this reused-output continuation.
+Continuous historical resource measurements remain unavailable; the new default
+recording applies to future runs. No additional cloud allocation, correct-path
+execution or publication was performed.

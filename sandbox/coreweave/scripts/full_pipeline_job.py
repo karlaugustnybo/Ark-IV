@@ -15,6 +15,7 @@ from cloud_storage import main as storage_main
 from launch import owned_process
 
 from ark_pipeline.cli import benchmark_pipeline as bp
+from ark_pipeline.runtime.dashboard import Dashboard
 from ark_pipeline.runtime.provenance import atomic_json
 from ark_pipeline.runtime.resources import positive_int, worker_count
 
@@ -159,7 +160,17 @@ def run_command(name, command, environment, report, deadline):
     if time.monotonic() >= deadline:
         raise RuntimeError("Compute deadline exhausted before stage launch")
     start = time.monotonic()
-    with (OUT / "logs" / f"{name}.log").open("w") as log:
+    telemetry = Dashboard([name], OUT / 'runs' / name, {}, ui='plain',
+                          identity={'command': command})
+    telemetry.scratch_paths = [OUT / 'scratch']
+    if environment.get('DUCKDB_SCRATCH_DIR'):
+        telemetry.scratch_paths.append(Path(environment['DUCKDB_SCRATCH_DIR']))
+    environment = {**environment, 'PIPELINE_STAGE': name,
+                   'PIPELINE_PROGRESS_PATH': str(telemetry.output / 'progress.jsonl'),
+                   'PYTHONUNBUFFERED': '1', 'PYTHONFAULTHANDLER': '1'}
+    last_guard = 0
+    with telemetry, (OUT / "logs" / f"{name}.log").open("w") as log:
+        telemetry.begin_stage(name)
         with owned_process(
             command,
             stdout=log,
@@ -168,9 +179,13 @@ def run_command(name, command, environment, report, deadline):
             env=environment,
         ) as child:
             while child.poll() is None:
+                telemetry.tick(child.pid)
                 try:
-                    child.wait(timeout=15)
+                    child.wait(timeout=1)
                 except subprocess.TimeoutExpired:
+                    if time.monotonic() - last_guard < 15:
+                        continue
+                    last_guard = time.monotonic()
                     usage = disk_bytes()
                     report["peak_allocated_scratch_bytes"] = max(
                         report.get("peak_allocated_scratch_bytes", 0), usage
@@ -186,6 +201,9 @@ def run_command(name, command, environment, report, deadline):
                         raise RuntimeError(
                             "Job stopped to preserve time/disk/memory headroom for result persistence"
                         )
+        telemetry.status = 'passed' if child.returncode == 0 else 'failed'
+        telemetry.accept({'stage': name, 'kind': 'stage_end', 'time': time.time(),
+                          'status': telemetry.status, 'elapsed': time.monotonic() - start})
     entry = {"name": name, "seconds": time.monotonic() - start, "exit_code": child.returncode}
     report["stages"].append(entry)
     atomic_json(OUT / "run-report.json", report)
@@ -344,6 +362,8 @@ def main(argv=None):
                 includes += [
                     name
                     for name in (
+                        "runs",
+                        "prepare-report.json",
                         "coverage-audit",
                         "preflight",
                         "serving-selection.json",

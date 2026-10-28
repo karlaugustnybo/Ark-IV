@@ -76,8 +76,28 @@ VALID_SORTS = {
     "redlist_category": "CASE redlist_category WHEN 'Critically Endangered' THEN 1 WHEN 'Endangered' THEN 2 WHEN 'Vulnerable' THEN 3 WHEN 'Near Threatened' THEN 4 WHEN 'Data Deficient' THEN 5 WHEN 'Least Concern' THEN 6 ELSE 7 END",
     "threat_score": "threat_score",
     "dna_level": "dna_level_score",
+    "unsequenced_myr": "gap_myr",
+    "unsequenced_myr_upper": "gap_upper_myr",
+    "edge2": "edge2_myr_median",
     "priority": "priority",
 }
+# Median extinction probabilities of the pinned dated-complete-tree
+# `p_extinction.csv`, the same point values used for EDGE2. DD has no
+# category row, so the engine falls back to the pooled median.
+EXTINCTION_PROBABILITY = {
+    "Critically Endangered": 0.969488,
+    "Endangered": 0.487548,
+    "Vulnerable": 0.237338,
+    "Near Threatened": 0.126919,
+    "Data Deficient": 0.232426,
+    "Least Concern": 0.05631,
+}
+# `buckets` is the original categorical score. `expected-loss` multiplies the
+# extinction probability by the species' unsequenced branch length (`gap_myr`)
+# and is null when the gap is unavailable or withheld for an incomplete baseline.
+# `expected-loss-upper` uses `gap_upper_myr` instead: withheld species count as
+# unsequenced, and only species without a tree placement stay null.
+ScoreMode = Literal["buckets", "expected-loss", "expected-loss-upper"]
 VALID_DNA_FILTERS.add("goat_data_deficient")
 MAX_SEARCH_LENGTH = 120
 
@@ -304,6 +324,7 @@ async def species_page(
     municipality: str = "",
     eez: str = "",
     conservation_framework: str = "",
+    score: ScoreMode = "buckets",
     coverage_profile: Literal["resident", "with-passage"] = "resident",
 ) -> SpeciesPage:
     if not all(
@@ -320,6 +341,14 @@ async def species_page(
     sort_key = sort if sort in VALID_SORTS else "priority"
     sort_sql = VALID_SORTS[sort_key]
     dna_tie_break_sql = ", dna_level_rank ASC" if sort_key in {"dna_level", "priority"} else ""
+    # Bucket weights only appear in DNA labels when they drive the score.
+    labels = {
+        n: f" (' || ${n}::double precision::text || ')" if score == "buckets" else ""
+        for n in (7, 8, 9, 11)
+    }
+    extinction_sql = " ".join(
+        f"WHEN '{name}' THEN {value}" for name, value in EXTINCTION_PROBABILITY.items()
+    )
     order_sql = "ASC" if order.lower() == "asc" else "DESC"
     query = _clean_search(search)
     redlist_values = _comma_values(redlist, VALID_REDLIST_FILTERS)
@@ -405,12 +434,20 @@ async def species_page(
         conservation_values or None,
         per_page,
         (page - 1) * per_page,
+        score,
     ]
     rows = await pool.fetch(
         f"""
         WITH {_filtered_species_cte(12, include_fuzzy=use_fuzzy)}, scored AS (
             SELECT gbif_accepted_id, iucn_sis_id, iucn_assessment_id,
                 gbif_taxon_id, goat_taxon_id,
+                -- A scored species' upper bound equals its gap, so rows loaded before
+                -- the bounds existed still rank scored species in the upper mode.
+                phylo.gap_myr,
+                COALESCE(phylo.gap_upper_myr, CASE WHEN phylo.phylogenetic_status IS NULL
+                    THEN phylo.gap_myr END) AS gap_upper_myr,
+                phylo.edge2_myr_median, phylo.edge2_myr_p025, phylo.edge2_myr_p975,
+                phylo.phylo_sis_id, phylo.phylogenetic_status,
                 COALESCE(species_name, '') AS species_name, COALESCE(family, '') AS family,
                 COALESCE(redlist_category, 'Not Assessed') AS redlist_category,
                 match_rank, metadata_status, spatial_redlist_category, iucn_assessment_latest,
@@ -419,10 +456,11 @@ async def species_page(
                     WHEN 'Vulnerable' THEN $3::double precision WHEN 'Near Threatened' THEN $4::double precision
                     WHEN 'Data Deficient' THEN $5::double precision WHEN 'Least Concern' THEN $6::double precision ELSE 0
                 END::float AS threat_score,
-                CASE WHEN goat_data_deficient = true THEN 'GoaT Data Deficient (' || $11::double precision::text || ')'
-                    WHEN family_has_dna = false THEN 'Missing Family (' || $7::double precision::text || ')'
-                    WHEN genus_has_dna = false THEN 'Missing Genus (' || $8::double precision::text || ')'
-                    WHEN has_dna_species_level = false THEN 'Missing Species (' || $9::double precision::text || ')'
+                CASE redlist_category {extinction_sql} END::float AS extinction_probability,
+                CASE WHEN goat_data_deficient = true THEN 'GoaT Data Deficient{labels[11]}'
+                    WHEN family_has_dna = false THEN 'Missing Family{labels[7]}'
+                    WHEN genus_has_dna = false THEN 'Missing Genus{labels[8]}'
+                    WHEN has_dna_species_level = false THEN 'Missing Species{labels[9]}'
                     ELSE 'Already Sampled' END AS dna_level,
                 CASE WHEN goat_data_deficient = true THEN $11::double precision
                     WHEN family_has_dna = false THEN $7::double precision WHEN genus_has_dna = false THEN $8::double precision
@@ -431,19 +469,30 @@ async def species_page(
                     WHEN family_has_dna = false THEN 1 WHEN genus_has_dna = false THEN 3
                     WHEN has_dna_species_level = false THEN 4 ELSE 5 END AS dna_level_rank
             FROM filtered_species
+            LEFT JOIN (
+                SELECT iucn_sis_id AS phylo_sis_id, gap_myr, gap_upper_myr, edge2_myr_median,
+                    edge2_myr_p025, edge2_myr_p975, availability_reason AS phylogenetic_status
+                FROM species_phylogenetic_scores
+            ) phylo ON phylo.phylo_sis_id = filtered_species.iucn_sis_id
         )
         SELECT gbif_accepted_id, iucn_sis_id, iucn_assessment_id,
                gbif_taxon_id, goat_taxon_id,
                species_name, family, redlist_category, threat_score, dna_level,
                metadata_status, spatial_redlist_category, iucn_assessment_latest,
-               (threat_score * dna_level_score)::float AS priority
+               gap_myr, gap_upper_myr, edge2_myr_median, edge2_myr_p025, edge2_myr_p975,
+               CASE WHEN phylo_sis_id IS NULL THEN 'not_loaded' ELSE phylogenetic_status END
+                   AS phylogenetic_status,
+               (CASE WHEN $23::text = 'buckets' THEN threat_score * dna_level_score
+                   WHEN $23::text = 'expected-loss-upper' THEN extinction_probability * gap_upper_myr
+                   WHEN gap_myr IS NULL OR phylogenetic_status IS NOT NULL THEN NULL
+                   ELSE extinction_probability * gap_myr END)::float AS priority
         FROM scored
         ORDER BY match_rank ASC,
                  CASE WHEN match_rank = 4 THEN GREATEST(
                      similarity(normalize_species_search(species_name), normalize_species_search($12::text)),
                      similarity(normalize_species_search(family), normalize_species_search($12::text))
                  ) ELSE 1 END DESC,
-                 {sort_sql} {order_sql}{dna_tie_break_sql}, species_name ASC
+                 {sort_sql} {order_sql} NULLS LAST{dna_tie_break_sql}, species_name ASC
         LIMIT $21::int OFFSET $22::int
         """,
         *values,

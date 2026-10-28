@@ -18,14 +18,52 @@ registration; `sources_acquire` manages manifests, validation and snapshots.
 `sources_fetch_iucn_details` retrieves queued exact-ID evidence into private
 outputs; retrieval never merges taxonomic identities.
 
-Commands: `just download`, `just update`, `just data-status`.
+Commands: `just download`, `just update`, `just check-sources` (read-only source
+validity and upstream releases), `just data-status` (stage readiness).
+
+`just col-download` acquires the separately pinned COL XR archive.
+`cli/taxonomy_review.py` consumes a bounded matcher review queue and compares
+COL XR with legacy GBIF name concepts. Reports retain separate ID namespaces and
+never authorize crosswalk acceptance or trait transfer. `check-sources --profile
+taxonomy-review` and `--profile phylogenetic` cover the optional taxonomy packs.
 
 ## 02 — Resolve taxonomy
 
 `cli/crosswalk_refresh.py` selects validated snapshots and publishes a reusable
 crosswalk. `cli/crosswalk_match.py` implements the IUCN–GoaT matching rules.
 
+When `screened-crosswalk` is registered, refresh installs/reuses that immutable
+source pack at `derived/iucn-goat-crosswalk/current`. All contributing source
+versions and checksums must match; stale screened products stop the build without
+falling back to matching-only output. Serving preparation and the direct serving
+recipes default to this managed path. Register a newly screened investigation with
+`uv run python -m ark_pipeline.cli.screened_crosswalk --root /private/data-root
+--investigation /private/investigation --release REVIEWED-RELEASE`. The command
+checks the original receipts and source content before registering a private copy.
+Its source files follow the normal acquisition manifest into private cloud staging.
+
 These run automatically during `just data-build` and `just data-update`.
+
+Private crosswalk investigations have separate opt-in entry points:
+
+- `cli/crosswalk_catalogue.py` reconciles the registered IUCN catalogue and
+  tabular export into an isolated union with per-SIS scope/lineage reasons.
+  `--taxon-evidence` can supply completed exact-SIS retrievals from
+  `sources_fetch_iucn_details`; release, rank, name and assessment must agree.
+- `cli/sources_fetch_goat_provenance.py` retrieves resumable raw-record batches
+  for a JSON array of GoaT IDs. Search summaries omit this identity evidence.
+  `crosswalk_match` and `crosswalk_refresh` accept its versioned output through
+  `--goat-provenance-json`; stale snapshot supplements are rejected.
+- `cli/crosswalk_evidence.py` audits every supplied crosswalk row against pinned
+  COL XR, legacy GBIF, explicit OTT identifiers and dated-tree tips. Its separate
+  `screened_crosswalk.parquet` withholds transfers on COL concept conflicts;
+  matching names or a tree link cannot grant transfer permission.
+  Pass the prepared catalogue's `--scope /private/output/scope.json` to withhold
+  transfers for old-only SIS IDs until their catalogue absence is reconciled.
+
+All three require explicit private output paths. They do not update serving
+artifacts or databases. The catalogue-prepared CSVs can be supplied directly to
+`crosswalk_match`; old-only IDs and missing current lineage stay explicit.
 
 ## 03 — Cover spatial sources and aggregate species
 

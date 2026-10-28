@@ -24,6 +24,7 @@ from ark_pipeline.aggregation.species_lists import (
 from ark_pipeline.builders.phylogenetic import load_generation
 from ark_pipeline.cli.spatial_analytics import checked_memberships
 from ark_pipeline.dna_evidence import DnaRule
+from ark_pipeline.runtime.progress import emit
 from ark_pipeline.runtime.provenance import (
     code_fingerprint,
     dependency_identity,
@@ -39,6 +40,7 @@ def build(args):
     weights = {category.upper(): getattr(args, category) for category in ('cr', 'en', 'vu', 'nt', 'dd', 'lc')}
     tree = args.phylogenetic_generation.resolve(strict=True)
     tree_hash = sha256(tree / 'receipt.json')
+    emit('phase', phase='Rank phylogenetic scenario', force=True)
     engine, _ = load_generation(tree)
     scenario = engine.rank(rule, weights)
     memberships, membership_hash, fine = checked_memberships(args.h3_root, args.profile)
@@ -76,6 +78,7 @@ def build(args):
         args.scratch_dir.mkdir(parents=True, exist_ok=True)
         connection.execute('SET temp_directory=?', [str(args.scratch_dir.resolve())])
         for resolution, paths in ((3, [coarse]), (7, fine)):
+            emit('phase', phase=f'Resolution-{resolution} opportunity aggregation', force=True)
             output = target / f'opportunities_res{resolution}.parquet'
             # Only an unpublished, interrupted generation may be resumed here.
             output.unlink(missing_ok=True)

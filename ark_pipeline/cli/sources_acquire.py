@@ -10,9 +10,12 @@ from __future__ import annotations
 
 import argparse
 import csv
+import fcntl
 import hashlib
+import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -223,6 +226,16 @@ def validate_input_files(source: Source, files: dict[str, Path]) -> list[str]:
                         f"{logical_name}: archive missing member type(s): "
                         + ", ".join(absent_suffixes)
                     )
+        for requirement in source.get("archive_column_requirements", []):
+            try:
+                with zipfile.ZipFile(path) as archive, archive.open(requirement["member"]) as raw:
+                    with io.TextIOWrapper(raw, encoding="utf-8-sig", newline="") as handle:
+                        header = set(next(csv.reader(handle, delimiter="\t", quoting=csv.QUOTE_NONE)))
+                absent = sorted(set(requirement["columns"]) - header)
+                if absent:
+                    errors.append(f"{logical_name}/{requirement['member']}: missing column(s): {', '.join(absent)}")
+            except (OSError, UnicodeError, StopIteration, csv.Error, KeyError, zipfile.BadZipFile) as error:
+                errors.append(f"{logical_name}: invalid archive table {requirement['member']}: {error}")
         required_columns = source_columns(source, logical_name)
         if required_columns:
             try:
@@ -271,15 +284,27 @@ def source_record(
 
 
 def activate(data_root: Path, base: dict[str, Any], updates: dict[str, Any]) -> Path:
-    manifest = dict(base)
-    manifest["schema_version"] = MANIFEST_SCHEMA_VERSION
-    manifest["updated_at"] = iso_now()
-    manifest["sources"] = {**base.get("sources", {}), **updates}
+    """Merge completed sources without dropping concurrent registrations.
+
+    Downloads run outside the lock. A competing update of the same source must
+    be reviewed rather than silently replacing a selection made during the run.
+    """
+    root = acquisition_root(data_root)
+    root.mkdir(parents=True, exist_ok=True)
     current = current_manifest_path(data_root)
-    atomic_json(current, manifest)
-    timestamp = utc_now().strftime("%Y%m%dT%H%M%S.%fZ")
-    historical = acquisition_root(data_root) / "manifests" / f"{timestamp}.json"
-    atomic_json(historical, manifest)
+    with (root / ".manifest.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        latest = load_manifest(data_root)
+        for source_id, record in updates.items():
+            selected = latest.get("sources", {}).get(source_id)
+            if selected != base.get("sources", {}).get(source_id) and selected != record:
+                raise ValueError(f"{source_id}: active selection changed during acquisition; retry against the current manifest")
+        manifest = {**latest, "schema_version": MANIFEST_SCHEMA_VERSION,
+                    "updated_at": iso_now(), "sources": {**latest.get("sources", {}), **updates}}
+        timestamp = utc_now().strftime("%Y%m%dT%H%M%S.%fZ")
+        historical = root / "manifests" / f"{timestamp}.json"
+        atomic_json(historical, manifest)
+        atomic_json(current, manifest)
     return current
 
 
@@ -383,11 +408,32 @@ def register_manual(args: argparse.Namespace, catalogue: Catalogue) -> int:
 
 
 def age_days(record: dict[str, Any]) -> float:
-    acquired = str(record.get("acquired_at", "")).replace("Z", "+00:00")
+    acquired = str(record.get("checked_at") or record.get("acquired_at", "")).replace("Z", "+00:00")
     try:
         return (utc_now() - datetime.fromisoformat(acquired)).total_seconds() / 86400
     except ValueError:
         return float("inf")
+
+
+def registered_errors(root: Path, source: Source, record: dict[str, Any] | None) -> list[str]:
+    """Validate selected files before trusting freshness or HTTP validators.
+
+    Ordinary checks inspect sizes and source contracts. Full digest verification
+    remains available through doctor --deep; pinned checksums are always checked.
+    """
+    if record is None:
+        return ["not registered"]
+    files = {}
+    errors = []
+    for item in record.get("files", []):
+        path = resolve_stored_path(root, item["path"])
+        files[item["logical_name"]] = path
+        if not path.is_file():
+            errors.append(f"missing registered file: {item['path']}")
+        elif path.stat().st_size != item.get("bytes"):
+            errors.append(f"registered size changed: {item['path']}")
+    errors.extend(validate_input_files(source, files))
+    return errors
 
 
 def is_due(source: Source, record: dict[str, Any] | None, force: bool) -> bool:
@@ -443,29 +489,58 @@ def download(
     *,
     url: str | None = None,
 ) -> dict[str, Any] | None:
-    request = urllib.request.Request(
-        url or source.get("download_url"), headers=request_headers(previous), method="GET"
-    )
+    requested_url = url or source.get("download_url")
+    receipt_path = destination.with_name(destination.name + ".download.json")
     try:
-        with urllib.request.urlopen(request, timeout=180) as response, destination.open("wb") as output:
+        receipt = json.loads(receipt_path.read_text())
+    except (OSError, ValueError):
+        receipt = {}
+    offset = destination.stat().st_size if destination.is_file() else 0
+    validator = receipt.get("etag")
+    if not validator or validator.startswith("W/"):
+        validator = receipt.get("last_modified")
+    resume = (requested_url.startswith(("http://", "https://"))
+              and receipt.get("request_url") == requested_url and validator
+              and isinstance(receipt.get("total"), int) and 0 < offset < receipt["total"])
+    headers = request_headers(None if resume else previous)
+    if resume:
+        headers.update({"Range": f"bytes={offset}-", "If-Range": validator})
+    request = urllib.request.Request(requested_url, headers=headers, method="GET")
+    try:
+        with urllib.request.urlopen(request, timeout=180) as response:
             try:
                 total = max(0, int(response.headers.get("Content-Length") or 0))
             except ValueError:
                 total = 0
-            completed = 0
-            while chunk := response.read(8 * 1024 * 1024):
-                output.write(chunk)
-                completed += len(chunk)
-                emit(task="download", phase=f"Download {destination.name}", completed=completed, total=total,
-                     fraction=min(1, completed / total) if total else None, unit="download bytes")
+            append = response.status == 206
+            if append:
+                match = re.fullmatch(r"bytes (\d+)-(\d+)/(\d+)", response.headers.get("Content-Range", ""))
+                if (not resume or not match or int(match[1]) != offset
+                        or int(match[3]) != receipt["total"]
+                        or int(match[2]) < offset or int(match[2]) >= int(match[3])
+                        or (total and total != int(match[2]) - offset + 1)
+                        or (receipt.get("etag") and response.headers.get("ETag")
+                            and receipt["etag"] != response.headers.get("ETag"))):
+                    raise ValueError("Invalid or changed HTTP range response; partial file preserved")
+                total = int(match[3])
+            remote = {"url": response.geturl(), "etag": response.headers.get("ETag"),
+                      "last_modified": response.headers.get("Last-Modified")}
+            completed = offset if append else 0
+            with destination.open("ab" if append else "wb") as output:
+                atomic_json(receipt_path, {**remote, "request_url": requested_url, "total": total})
+                while chunk := response.read(8 * 1024 * 1024):
+                    output.write(chunk)
+                    completed += len(chunk)
+                    emit(task="download", phase=f"Download {destination.name}", completed=completed, total=total,
+                         fraction=min(1, completed / total) if total else None, unit="download bytes")
+            if total and completed != total:
+                raise ValueError(f"Incomplete download: {completed}/{total} bytes; rerun to resume when validators permit")
             emit("task_end", task="download")
-            return {
-                "url": response.geturl(),
-                "etag": response.headers.get("ETag"),
-                "last_modified": response.headers.get("Last-Modified"),
-            }
+            return remote
     except urllib.error.HTTPError as error:
         if error.code == 304:
+            if resume:
+                raise ValueError("Unexpected not-modified response for a partial download") from error
             return None
         raise
 
@@ -540,14 +615,16 @@ def update_public(args: argparse.Namespace, catalogue: Catalogue) -> int:
     for source in selected:
         emit("message", message=f"Check source: {source.id}")
         previous = manifest.get("sources", {}).get(source.id)
-        if not is_due(source, previous, args.force):
+        errors = registered_errors(args.root, source, previous)
+        if not errors and not is_due(source, previous, args.force):
             status.append({"source": source.id, "status": "current"})
             continue
         if args.dry_run:
             status.append({"source": source.id, "status": "due"})
             continue
 
-        staging = acquisition_root(args.root) / ".staging" / source.id
+        staging_root = getattr(args, "staging_root", None) or acquisition_root(args.root) / ".staging"
+        staging = staging_root / source.id
         staging.mkdir(parents=True, exist_ok=True)
         inventory = source_inventory(source)
         inventory_downloads = [
@@ -622,9 +699,13 @@ def update_public(args: argparse.Namespace, catalogue: Catalogue) -> int:
         output = staging / output_name
         remote: dict[str, Any] | None = None
         if source.get("access") == "public-download":
-            remote = download(source, previous, output)
+            remote = download(source, previous if not errors and not args.force else None, output)
             if remote is None:
+                if errors or previous is None:
+                    raise ValueError(f"{source.id}: not-modified response without valid local files")
+                updates[source.id] = {**previous, "checked_at": iso_now()}
                 status.append({"source": source.id, "status": "not-modified"})
+                shutil.rmtree(staging)
                 continue
         elif source.get("access") in {"public-command", "authenticated-command"}:
             if source.get("access") == "authenticated-command":
@@ -845,6 +926,7 @@ def build_parser() -> argparse.ArgumentParser:
     update_parser.add_argument("--source", action="append")
     update_parser.add_argument("--force", action="store_true")
     update_parser.add_argument("--dry-run", action="store_true")
+    update_parser.add_argument("--staging-root", type=Path, help="isolated resumable download directory")
     return parser
 
 

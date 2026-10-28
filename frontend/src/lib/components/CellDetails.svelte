@@ -20,7 +20,8 @@
   import { weights, type WeightKey } from '$lib/stores/weights';
   import { knowledgeLimitsText, occupancyCaveatText } from '$lib/map/cellCaveats';
 
-  type ScoredSpecies = CellSpeciesRow & SpeciesTableRow & { threat: number; dna: number };
+  type ScoredSpecies = CellSpeciesRow &
+    SpeciesTableRow & { threat: number; dna: number; priority: number };
   type BoundaryMembership = NonNullable<CellDetailsResponse['boundaries']>[number];
   type BoundaryGroup = {
     framework: string;

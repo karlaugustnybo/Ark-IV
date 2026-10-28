@@ -1,0 +1,188 @@
+{
+  "schema_version": 1,
+  "label": "2026-10-25 FAST continuation (reused pairs, lists and fine partitions)",
+  "created_at": "2026-10-25T18:46:56+00:00",
+  "mode": "fast",
+  "reused": [
+    "pairs",
+    "lists",
+    "fine_metrics"
+  ],
+  "resources": {
+    "workers": 8,
+    "spatial_workers": 8,
+    "metric_workers": 8,
+    "duckdb_threads": 4,
+    "metric_threads": 1,
+    "tile_threads": 4,
+    "tile_duckdb_threads": 4
+  },
+  "workload": {
+    "archive_pair_rows": 38743049338,
+    "exact_duplicates_removed": 7788716459,
+    "res3_cells": 40383,
+    "res3_relationships": 18492398,
+    "res7_cells": 96631588,
+    "res7_relationships": 30954332879,
+    "source_support_bytes": 4792359712
+  },
+  "order": [
+    "pairs",
+    "lists",
+    "boundaries",
+    "metadata",
+    "coarse_db",
+    "coarse_cache",
+    "fine_metrics",
+    "prepared_inputs",
+    "spatial_analytics",
+    "dna_evidence",
+    "phylogenetic",
+    "opportunities",
+    "tiles"
+  ],
+  "stages": {
+    "restore": 619.0,
+    "pairs": 15.6,
+    "lists": 20.5,
+    "boundaries": 0.5,
+    "metadata": 272.0,
+    "coarse_db": 5.6,
+    "coarse_cache": 164.0,
+    "fine_metrics": 95.6,
+    "prepared_inputs": 373.2,
+    "spatial_analytics": 11074.8,
+    "dna_evidence": 51.9,
+    "phylogenetic": 197.7,
+    "opportunities": 638.0,
+    "tiles": 812.7,
+    "retention": 601.0
+  },
+  "reconstructed_stages": {
+    "pairs": {
+      "estimated_seconds": 12881.9,
+      "source": "original FAST build reconstructed from driver/receipt timestamps",
+      "started_epoch": 1792592698.1024346,
+      "completed_at": "2026-10-21T17:59:40Z",
+      "evidence": [
+        "fullrun/recovery/extracted/fullrun/status.json: full-build.started_epoch",
+        "spatial/archives/*/*receipt.json: latest completed_at",
+        "spatial/hydrobasins/receipt.json: metrics.wall_seconds"
+      ],
+      "limitations": "Reconstructed stage window includes polygons, points and partial HydroBASINS coverage; second-resolution receipt timestamps approximate the end. It is not a precise-mode or complete-basin measurement. Archive and basin receipt durations sum to 12865.5 s, independently supporting the window."
+    },
+    "lists": {
+      "estimated_seconds": 5330.0,
+      "source": "original FAST aggregation reconstructed from receipt timestamps",
+      "started_at": "2026-10-21T17:59:40Z",
+      "completed_at": "2026-10-21T19:28:30Z",
+      "evidence": [
+        "spatial/archives/*/*receipt.json: latest completed_at",
+        "spatial/serving/generations/*/receipt.json: completed_at"
+      ],
+      "limitations": "Uses the last pair receipt as the aggregation boundary; includes intervening orchestration and input checks. Timestamp resolution is one second, rather than an isolated command timer."
+    },
+    "fine_metrics": {
+      "estimated_seconds": 511.506637,
+      "source": "original FAST fine metrics reconstructed from retained TAR timestamps",
+      "started_epoch": 1792611364.821824,
+      "completed_epoch": 1792611876.328461,
+      "partition_receipts": 122,
+      "evidence": [
+        "preview.tar: full-candidate/res7_aggregates/.aggregate.lock mtime",
+        "preview.tar: latest of 122 full-candidate/res7_aggregates/base_*.receipt.json mtimes"
+      ],
+      "limitations": "Lock creation to the final partition receipt measures the original partition build window. Finalization after that receipt is excluded, so this is a lower-bound prior, not a complete stage timer."
+    }
+  },
+  "phases": {
+    "tiles": [
+      [
+        "Validate prepared inputs",
+        367.9
+      ],
+      [
+        "Prepare dynamic fine data",
+        39.8
+      ],
+      [
+        "Compile coarse PMTiles",
+        28.4
+      ],
+      [
+        "Compile tile zooms & archive indexes",
+        11.9
+      ],
+      [
+        "Validate complete map serving output",
+        364.7
+      ]
+    ]
+  },
+  "notes": [
+    "Continuation build: pair, list and fine-partition outputs were reused, so those stages are receipt/checksum timings, not fresh computation.",
+    "spatial_analytics, dna_evidence, phylogenetic and opportunities had no stage records in this run; their durations are worker-process event windows between neighbouring stages (about 2 s resolution).",
+    "restore and retention come from the driver journal and include pack downloads and uploads."
+  ],
+  "spatial_calibration": {
+    "mode": "fast",
+    "measured_at": "2026-10-27T17:56:45Z",
+    "estimated_seconds": 1009.6408213270001,
+    "source": "verified full-input spatial stage benchmark, 27 October 2026",
+    "code_sha256": "e3709d6690e6a1b4e11c723b284084b68bdeb86370c1fe354ff7a7939f209037",
+    "membership_receipt_sha256": "306596a6c4d5a3644914c77c0a65f56b2800b24a023d2f7ebabd6b54793f1183",
+    "profile": "iucn-richness-fast-v3-partial-basins",
+    "coverage_status": "partial",
+    "resources": {
+      "cpu": 8,
+      "memory_gib": 32,
+      "spatial_workers": 8,
+      "duckdb_threads": 4,
+      "duckdb_memory_limit": "8GB"
+    },
+    "phases": [
+      [
+        "Verify membership publication",
+        4.940035581588745
+      ],
+      [
+        "Mapped-cell jurisdiction intersections",
+        111.85099911689758
+      ],
+      [
+        "Global range and stewardship aggregation",
+        0.005069255828857422
+      ],
+      [
+        "Prove canonical membership uniqueness",
+        141.68906259536743
+      ],
+      [
+        "Mapped-cell areas",
+        184.02995014190674
+      ],
+      [
+        "Global species range denominators",
+        81.72904014587402
+      ],
+      [
+        "Jurisdiction stewardship aggregation",
+        484.7709000110626
+      ],
+      [
+        "Validate and publish spatial analytics",
+        0.3977491855621338
+      ]
+    ],
+    "validation": {
+      "jurisdiction_memberships": 92966356,
+      "species_ranges": 115408,
+      "stewardship_rows": 1047624,
+      "omitted_species": 26,
+      "nonfloating_columns": "exact",
+      "maximum_relative_area_error": 2.2879905362430162e-14
+    },
+    "evidence": "docs/performance/spatial_analytics_optimization.md",
+    "limitations": "Measured on the complete frozen FAST memberships with partial basin coverage, 8 CPU/32 GiB, eight intersection workers, four SQL threads and an 8-GB DuckDB limit. Different inputs, hardware, cache state or resource settings can change runtime; precise mode is not calibrated."
+  }
+}

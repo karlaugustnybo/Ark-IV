@@ -22,6 +22,7 @@ import pyarrow.parquet as pq
 import pyogrio
 from shapely.geometry import box
 
+from ark_pipeline.aggregation.species_lists import write_receipt
 from ark_pipeline.cli.benchmark_pipeline import (
     DEFAULT_PROFILE,
     build_pairs,
@@ -34,7 +35,12 @@ from ark_pipeline.cli.benchmark_pipeline import (
 )
 from ark_pipeline.cli.benchmark_sample import build_sample
 from ark_pipeline.cli.benchmark_stage import CROSSWALK, INPUT_FLAGS, PREREQUISITES, replay_plan
-from ark_pipeline.runtime.benchmark_estimates import estimate
+from ark_pipeline.runtime.benchmark_estimates import (
+    estimate,
+    full_run_estimate,
+    markdown_report,
+    previous_full_run,
+)
 from ark_pipeline.runtime.checkpoints import artifact_inventory, benchmark_environment
 from ark_pipeline.runtime.provenance import atomic_json, sha256
 from ark_pipeline.spatial.coverage import load_spatial_profile
@@ -81,6 +87,25 @@ def fixture(root: Path, profile: Path = DEFAULT_PROFILE) -> tuple[Path, Path]:
 
 
 class BenchmarkModelTests(unittest.TestCase):
+    def test_full_spatial_calibration_requires_matching_mode_and_producer_code(self):
+        projection = {'total_seconds': 5, 'projected_workload': {'res7_relationships': 100},
+                      'stages': [{'name': 'spatial_analytics', 'estimated_seconds': 5}]}
+        baseline = {'path': 'run.json', 'mode': 'fast',
+                    'stages': {'spatial_analytics': 1000, 'dna_evidence': 1, 'phylogenetic': 1, 'opportunities': 1},
+                    'spatial_calibration': {'mode': 'fast', 'code_sha256': 'verified', 'estimated_seconds': 10,
+                                            'source': 'full-input stage benchmark', 'limitations': 'Frozen inputs'}}
+        with patch('ark_pipeline.runtime.benchmark_estimates.code_fingerprint', return_value='verified'):
+            fast = full_run_estimate(projection, baseline, 'fast')
+            self.assertEqual(fast['stages'][0]['estimated_seconds'], 10)
+            self.assertEqual(fast['stages'][0]['source'], 'full-input stage benchmark')
+            self.assertIn('Frozen inputs', fast['gaps'])
+            precise = full_run_estimate(projection, baseline, 'precise')
+            self.assertEqual(precise['stages'][0]['estimated_seconds'], 5)
+            unbenchmarked = full_run_estimate({**projection, 'stages': []}, baseline, 'fast')
+            self.assertEqual(unbenchmarked['stages'][0]['estimated_seconds'], 10)
+        with patch('ark_pipeline.runtime.benchmark_estimates.code_fingerprint', return_value='changed'):
+            self.assertEqual(full_run_estimate(projection, baseline, 'fast')['stages'][0]['estimated_seconds'], 1000)
+
     def observations(self):
         return {"pair_rows": 103, "write_seconds": 2, "observations": [
             {"size_bin": 0, "kernel_seconds": 1, "output_pairs": 1, "forced_extreme": False},
@@ -134,6 +159,103 @@ class BenchmarkModelTests(unittest.TestCase):
             static = estimate([{'name': 'tiles', 'wall_seconds': 10}], population, pairs, lists)
             self.assertGreater(static['stages'][0]['estimated_seconds'], tile['estimated_seconds'])
         self.assertEqual(projections[0], projections[1])
+
+    def test_full_run_eta_prefers_fresh_previous_timings_and_adds_unbenchmarked_stages(self):
+        pairs = self.observations()
+        lists = {"res3_cells": 1, "res3_relationships": 3, "res7_cells": 10, "res7_relationships": 100}
+        stages = [{"name": "pairs", "wall_seconds": 12}, {"name": "metadata", "wall_seconds": 5},
+                  {"name": "tiles", "wall_seconds": 2}]
+        projection = estimate(stages, {"size_bin_counts": [100]}, pairs, lists)
+        baseline = {"path": "run.json", "label": "run", "mode": "fast", "reused": ["pairs"],
+                    "resources": {"workers": 8}, "workload": {"res7_relationships": 75},
+                    "order": ["restore", "pairs", "metadata", "spatial_analytics", "tiles", "phylogenetic", "retention"],
+                    "stages": {"restore": 60, "pairs": 1, "metadata": 50, "spatial_analytics": 1000,
+                               "tiles": 700, "phylogenetic": 30, "dna_evidence": 20,
+                               "opportunities": 10, "retention": 40}}
+        projected = {s["name"]: s["estimated_seconds"] for s in projection["stages"]}
+        result = full_run_estimate(projection, baseline, "fast", {"workers": 8})
+        seconds = {s["name"]: s["estimated_seconds"] for s in result["stages"]}
+        # A reused stage keeps the projection; fresh and unbenchmarked stages are measured.
+        self.assertEqual(seconds, {"pairs": projected["pairs"], "metadata": 50, "tiles": 700,
+                                   "spatial_analytics": 1000, "phylogenetic": 30,
+                                   "dna_evidence": 20, "opportunities": 10})
+        self.assertEqual(result["total_seconds"], sum(seconds.values()))
+        self.assertEqual(result["cloud_overhead_seconds"], 100)
+        self.assertTrue(any("HydroBASINS routes remain unestimated" in gap for gap in result["gaps"]))
+        # Another coverage mode scales spatial analytics by projected/observed fine relationships.
+        other = full_run_estimate(projection, baseline, "precise", {"workers": 7})
+        ratio = projection["projected_workload"]["res7_relationships"] / 75
+        self.assertAlmostEqual({s["name"]: s["estimated_seconds"] for s in other["stages"]}["spatial_analytics"], 1000 * ratio)
+        self.assertTrue(any("fast coverage" in gap for gap in other["gaps"]))
+        self.assertTrue(any("differ" in gap for gap in other["gaps"]))
+        self.assertIsNone(full_run_estimate(projection, None, "fast"))
+        report = {"status": "passed", "output": "out", "resources": {}, "stages": [],
+                  "estimate": {**projection, "full_run": result}}
+        self.assertIn("Cloud run including restore and retention", markdown_report(report))
+
+        baseline["reused"] = []
+        precise = full_run_estimate(projection, baseline, "precise")
+        self.assertEqual(next(s["estimated_seconds"] for s in precise["stages"] if s["name"] == "pairs"), projected["pairs"])
+        baseline["reused"] = ["spatial_analytics"]
+        partial = full_run_estimate(projection, baseline, "fast")
+        self.assertIsNone(partial["total_seconds"])
+        report["estimate"]["full_run"] = partial
+        self.assertNotIn("Cloud run including restore and retention", markdown_report(report))
+        self.assertIn("missing fresh timings for spatial_analytics", markdown_report(report))
+
+    def test_incomplete_baseline_cannot_claim_a_full_total(self):
+        projection = {"total_seconds": 10, "projected_workload": {"res7_relationships": 100},
+                      "stages": [{"name": "pairs", "estimated_seconds": 10}]}
+        baseline = {"path": "run.json", "mode": "fast", "stages": {"pairs": 1, "restore": 2}}
+        result = full_run_estimate(projection, baseline, "fast")
+        self.assertIsNone(result["total_seconds"])
+        self.assertIsNone(result["cloud_overhead_seconds"])
+        self.assertTrue(any("opportunities" in gap for gap in result["gaps"]))
+        baseline["continued_from"] = "older-run"
+        continued = full_run_estimate(projection, baseline, "fast")
+        self.assertEqual(continued["stages"][0]["estimated_seconds"], 10)
+        self.assertTrue(any("unknown reuse" in s["source"] for s in continued["stages"]))
+        self.assertIsNone(full_run_estimate({"total_seconds": None}, baseline, "fast"))
+
+    def test_reconstructed_original_work_replaces_reuse_but_not_fresh_or_precise_timings(self):
+        names = ("pairs", "lists", "fine_metrics")
+        projection = {"total_seconds": 300, "projected_workload": {"res7_relationships": 100},
+                      "stages": [{"name": name, "estimated_seconds": 100} for name in names]}
+        baseline = {"path": "run.json", "label": "continuation", "mode": "fast", "reused": list(names),
+                    "stages": {**dict.fromkeys(names, 1), "spatial_analytics": 5, "dna_evidence": 5,
+                               "phylogenetic": 5, "opportunities": 5, "restore": 5, "retention": 5},
+                    "reconstructed_stages": {name: {"estimated_seconds": seconds,
+                        "source": "original FAST reconstructed from receipts", "limitations": "Finalization excluded",
+                        "evidence": ["synthetic receipt"]} for name, seconds in zip(names, (20, 30, 40))}}
+        result = full_run_estimate(projection, baseline, "fast")
+        by_name = {s["name"]: s for s in result["stages"]}
+        self.assertEqual([by_name[name]["estimated_seconds"] for name in names], [20, 30, 40])
+        self.assertEqual(result["total_seconds"], 110)
+        self.assertEqual(by_name["fine_metrics"]["reconstruction"]["evidence"], ["synthetic receipt"])
+        report = {"status": "passed", "output": "out", "resources": {}, "stages": [],
+                  "estimate": {**projection, "full_run": result}}
+        rendered = markdown_report(report)
+        self.assertIn("original FAST reconstructed from receipts", rendered)
+        self.assertIn("fine_metrics: Finalization excluded", rendered)
+        self.assertFalse(any("HydroBASINS routes remain unestimated" in gap for gap in result["gaps"]))
+        precise = full_run_estimate(projection, baseline, "precise")
+        self.assertEqual([s["estimated_seconds"] for s in precise["stages"][:3]], [100, 100, 100])
+        self.assertTrue(any("HydroBASINS routes remain unestimated" in gap for gap in precise["gaps"]))
+        baseline["reused"] = []
+        fresh = full_run_estimate(projection, baseline, "fast")
+        self.assertEqual([s["estimated_seconds"] for s in fresh["stages"][:3]], [1, 1, 1])
+        self.assertFalse(any("Finalization excluded" in gap for gap in fresh["gaps"]))
+
+    def test_previous_full_run_prefers_same_mode(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name, mode, created in (("a", "precise", "2026-01-01"), ("b", "fast", "2026-02-01")):
+                (root / f"{name}.json").write_text(json.dumps({"mode": mode, "created_at": created, "stages": {}}))
+            (root / "writing.json").write_text('{"created_at":')
+            (root / "invalid.json").write_text(json.dumps({"mode": "fast", "created_at": "2026-03-01", "stages": {"pairs": -1}}))
+            self.assertEqual(previous_full_run("precise", root)["path"], str(root / "a.json"))
+            self.assertEqual(previous_full_run("other", root)["path"], str(root / "b.json"))
+            self.assertEqual(previous_full_run("fast", root / "missing"), None)
 
     def test_census_includes_extremes_and_h3_projection_is_capped(self):
         pairs = self.observations()
@@ -575,6 +697,49 @@ class BenchmarkReplayInputTests(unittest.TestCase):
 
 
 class BenchmarkRunnerTests(unittest.TestCase):
+    def test_spatial_replay_runs_without_polygon_sample_or_registered_archives(self):
+        import pyarrow as pa
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / 'saved'
+            raw = root / 'raw'
+            atomic_json(raw / 'acquisition/current.json', {'schema_version': 1, 'sources': {}})
+            part = source / 'spatial/serving/current/res7_merged_parts/fixture.parquet'
+            part.parent.mkdir(parents=True)
+            pq.write_table(pa.table({'h3_cell': pa.array([int(h3.latlng_to_cell(55, 12, 7), 16)], type=pa.uint64()),
+                                    'species_ids': [[1, 2]]}), part)
+            write_receipt(part.parent.parent / 'receipt.json', {'fixture': 1}, {'fine': part}, {})
+            boundary = root / 'boundary.geojson'
+            boundary_fixture(boundary)
+            args = parser().parse_args(['--root', str(raw), '--output-root', str(source),
+                '--sample', str(root / 'absent.parquet'), '--admin0', str(boundary), '--eez', str(boundary), '--dry-run'])
+            config, _, _ = plan(args)
+            config['reviewed_evidence'] = reviewed_evidence_identity()
+            atomic_json(source / 'config.json', config)
+            atomic_json(source / 'benchmark-report.json', {'stages': [{'name': 'lists', 'status': 'passed'}],
+                'artifacts': artifact_inventory(source),
+                'acquisition_manifest_sha256': sha256(raw / 'acquisition/current.json')})
+            atomic_json(source / 'dashboard-state.json', {'identity': {'external_files': {str(boundary.resolve()): sha256(boundary)}}})
+            output = root / 'replay'
+            report = run(parser().parse_args(['--only-stage', 'spatial_analytics', '--from-run', str(source),
+                '--output-root', str(output), '--workers', '1', '--memory-limit', '256MB', '--ui', 'plain']))
+            self.assertEqual(report['status'], 'passed', report.get('error'))
+            self.assertEqual([stage['name'] for stage in report['stages']], ['spatial_analytics'])
+            self.assertIn('Jurisdiction stewardship aggregation', report['stages'][0]['phase_seconds'])
+            self.assertFalse((root / 'absent.parquet').exists())
+            self.assertTrue((output / 'analysis/spatial/current/receipt.json').is_file())
+
+    def test_stage_phase_timings_exclude_previous_attempt_and_survive_failure(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            (output / 'progress.jsonl').write_text(json.dumps({'stage': 'failure', 'kind': 'phase', 'phase': 'Old attempt', 'time': 0}) + '\n')
+            code = "from ark_pipeline.runtime.progress import emit; emit('phase', phase='Current attempt', force=True); raise SystemExit(7)"
+            result = run_stage({'name': 'failure', 'command': [sys.executable, '-c', code]}, output, dict(os.environ))
+            self.assertEqual(result['exit_code'], 7)
+            self.assertEqual(set(result['phase_seconds']), {'Current attempt'})
+            self.assertGreater(result['phase_seconds']['Current attempt'], 0)
+
     def test_stage_replay_requires_both_options_and_completed_prerequisites(self):
         for options in (["--only-stage", "pairs"], ["--from-run", "/unused"]):
             with self.assertRaisesRegex(ValueError, "together"):
@@ -584,7 +749,7 @@ class BenchmarkRunnerTests(unittest.TestCase):
             source.mkdir()
             sample = source / "sample.parquet"
             sample.touch()
-            config, _, _ = plan(parser().parse_args(["--root", temporary, "--sample", str(sample), "--output-root", str(source)]))
+            config, _, _ = plan(parser().parse_args(["--root", temporary, "--sample", str(sample), "--output-root", str(source), "--dry-run"]))
             atomic_json(source / "config.json", config)
             atomic_json(source / "benchmark-report.json", {"stages": []})
             with self.assertRaisesRegex(ValueError, "prerequisites: pairs"):
@@ -624,6 +789,11 @@ class BenchmarkRunnerTests(unittest.TestCase):
                              "TILE_DIR", "EXPORT_DIR", "MAP_METADATA_PATH", "PMTILES_PATH", "DUCKDB_SCRATCH_DIR"):
                 self.assertTrue(Path(env[variable]).is_relative_to(output.resolve()))
             self.assertTrue(all("just" not in s["command"] for s in stages))
+            analytics = next(stage for stage in stages if stage['name'] == 'spatial_analytics')
+            self.assertIn('ark_pipeline.cli.spatial_analytics', analytics['command'])
+            self.assertIn('admin0=' + config['boundaries']['admin0'], analytics['command'])
+            self.assertIn('eez=' + config['boundaries']['eez'], analytics['command'])
+            self.assertEqual(analytics['command'][analytics['command'].index('--coverage-status') + 1], 'partial')
             self.assertEqual(run(args)["status"], "planned")
             self.assertFalse(output.exists())
 
@@ -702,7 +872,8 @@ class BenchmarkRunnerTests(unittest.TestCase):
             self.assertGreater(report["estimate"]["total_seconds"], 0)
             self.assertEqual(report["estimate"]["serving_contract"], "dynamic-h3-v1")
             self.assertEqual(report["live_projection"]["serving_contract"], "dynamic-h3-v1")
-            self.assertEqual(len(report["stages"]), 11)
+            self.assertEqual(len(report["stages"]), 12)
+            self.assertIn("spatial_analytics", [stage["name"] for stage in report["stages"]])
             self.assertEqual(report["stages"][:2], interrupted["stages"])
             self.assertTrue(any("Resumed after interruption" in warning for warning in report["warnings"]))
             self.assertTrue(all(s["status"] == "passed" for s in report["stages"]))
@@ -717,6 +888,13 @@ class BenchmarkRunnerTests(unittest.TestCase):
             publication = json.loads((output / "tiles/current/receipt.json").read_text())
             self.assertEqual(publication["identity"]["prepared"], prepared)
             self.assertTrue((output / "benchmark-report.md").is_file())
+            analytics_receipt = json.loads((output / 'analysis/spatial/current/receipt.json').read_text())
+            self.assertTrue({'jurisdictions', 'species_ranges', 'stewardship'} <= set(analytics_receipt['outputs']))
+            self.assertEqual(analytics_receipt['identity']['coverage_status'], 'partial')
+            full_run = report["estimate"]["full_run"]
+            if full_run:
+                self.assertTrue(any(s["name"] == "spatial_analytics" for s in full_run["stages"]))
+                self.assertIn("Full-run ETA", (output / "benchmark-report.md").read_text())
             events = [json.loads(line) for line in (output / "progress.jsonl").read_text().splitlines()]
             self.assertEqual(sum(e["kind"] == "geometry_done" for e in events), 4)
             self.assertTrue(any(e["kind"] == "pair_write" for e in events))
@@ -745,7 +923,7 @@ class BenchmarkRunnerTests(unittest.TestCase):
             self.assertEqual(tile_report["features"], report["workload"]["res3_cells"])
             # Exercise actual stages through the replay CLI with immutable inputs.
             original_inventory = artifact_inventory(output)
-            for stage_name in ("pairs", "lists", "coarse_db", "coarse_cache", "fine_metrics", "prepared_inputs", "tiles"):
+            for stage_name in ("pairs", "lists", "coarse_db", "coarse_cache", "fine_metrics", "spatial_analytics", "prepared_inputs", "tiles"):
                 replay_output = root / f"replay-{stage_name}"
                 replay = run(parser().parse_args([
                     "--only-stage", stage_name, "--from-run", str(output), "--output-root", str(replay_output),

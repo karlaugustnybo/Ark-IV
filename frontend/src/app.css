@@ -19,7 +19,7 @@ body {
   font-size: 0.9rem;
 }
 .search-notice {
-  width: min(80%, 1200px);
+  width: min(90%, 1180px);
   margin: -0.5rem auto 1rem;
   color: var(--color-gray-700);
   font-family: var(--font-sans);
@@ -462,7 +462,7 @@ body {
   display: none;
 }
 .species-table-toolbar {
-  width: min(80%, 1200px);
+  width: min(90%, 1180px);
   margin: var(--space-24) auto var(--space-12);
   display: flex;
   align-items: end;
@@ -487,7 +487,7 @@ body {
   padding: 0.65rem 2rem 0.65rem 0.75rem;
 }
 .species-table-frame {
-  width: min(80%, 1200px);
+  width: min(90%, 1180px);
   margin: 0 auto;
   overflow: hidden;
   border: 1px solid var(--color-tinted-cream);
@@ -520,6 +520,45 @@ body {
 }
 .species-data-table .priority-column {
   width: 10%;
+}
+/* Column widths never depend on the rows on screen, so paging keeps every
+   column in place. Number columns are sized for their widest possible value
+   ("≤ 4000.0 Myr", "Unscored") and longest header word; text columns share the
+   rest and wrap. Narrow windows scroll instead of squeezing the numbers. */
+.species-data-table.with-phylogeny {
+  min-width: 56rem;
+}
+.species-data-table.with-phylogeny col {
+  width: auto;
+}
+.species-data-table.with-phylogeny .species-column {
+  width: 26%;
+}
+.species-data-table.with-phylogeny .gap-column {
+  width: 9.5rem;
+}
+.species-data-table.with-phylogeny .edge2-column {
+  width: 7rem;
+}
+.species-data-table.with-phylogeny .priority-column {
+  width: 7.5rem;
+}
+.species-data-table.with-phylogeny th:nth-child(n) {
+  min-width: 0;
+}
+.species-data-table.with-phylogeny .species-name,
+.species-data-table.with-phylogeny .species-name :is(a, em) {
+  white-space: normal;
+}
+/* Six columns leave no room for one-line labels such as "Unsequenced history". */
+.species-data-table.with-phylogeny th {
+  white-space: normal;
+}
+/* Badges wrap instead of clipping when the window narrows the fixed columns. */
+.species-data-table .status-badge,
+.species-data-table .dna-badge {
+  max-width: 100%;
+  white-space: normal;
 }
 .species-data-table thead {
   background: var(--color-accent-brown);
@@ -562,6 +601,19 @@ body {
 .numeric-column .table-sort-link {
   justify-content: flex-end;
 }
+/* The phylogeny table aligns every header and value to one left edge, with
+   each sort arrow beside its label, so the number columns sit close together. */
+.species-data-table.with-phylogeny .numeric-column,
+.species-data-table.with-phylogeny .score-cell {
+  text-align: left;
+}
+.species-data-table.with-phylogeny .table-sort-link {
+  justify-content: flex-start;
+}
+.species-data-table.with-phylogeny .score-value {
+  min-width: 0;
+  justify-content: flex-start;
+}
 .table-sort-link:hover {
   color: white;
   opacity: 0.82;
@@ -585,7 +637,7 @@ body {
 .species-data-table td {
   overflow: hidden;
 }
-.species-data-table td:nth-child(2) {
+.species-data-table .family-cell {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -604,6 +656,9 @@ body {
   font-family: var(--font-mono);
   font-size: var(--font-size-xs);
   font-variant-numeric: tabular-nums;
+}
+.missing-value {
+  color: var(--color-gray-500);
 }
 .priority-value {
   padding: 0.28rem 0.5rem;
@@ -709,7 +764,7 @@ body {
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--badge-color) 24%, transparent);
 }
 .pagination {
-  width: min(80%, 1200px);
+  width: min(90%, 1180px);
   margin: var(--space-16) auto var(--space-32);
 }
 .pagination .page-info {
@@ -1309,12 +1364,6 @@ body {
   .system-filter {
     overflow-x: auto;
   }
-  .species-table-toolbar,
-  .species-table-frame,
-  .pagination,
-  .search-notice {
-    width: 95%;
-  }
   .data-flow,
   .score-table-grid {
     grid-template-columns: 1fr;
@@ -1395,6 +1444,9 @@ body {
   .species-data-table tbody {
     display: block;
   }
+  .species-data-table.with-phylogeny {
+    min-width: 0;
+  }
   .species-data-table thead {
     clip: rect(0 0 0 0);
     clip-path: inset(50%);
@@ -1419,9 +1471,10 @@ body {
   }
   .species-data-table td {
     display: grid;
-    grid-template-columns: minmax(5.75rem, 0.8fr) 1fr;
-    align-items: center;
-    gap: var(--space-8);
+    /* Label above value: half-width card cells cannot fit both side by side. */
+    grid-template-columns: minmax(0, 1fr);
+    align-content: start;
+    gap: var(--space-4);
     min-width: 0;
     padding: var(--space-12);
     text-align: left;
@@ -1434,7 +1487,7 @@ body {
     letter-spacing: 0.045em;
     text-transform: uppercase;
   }
-  .species-data-table td:nth-child(-n + 2) {
+  .species-data-table :is(.species-name, .family-cell) {
     grid-column: 1 / -1;
   }
   .species-data-table td:last-child {

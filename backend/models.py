@@ -30,10 +30,21 @@ class SpeciesRow:
     redlist_category: str
     threat_score: float
     dna_level: str
-    priority: float
+    priority: float | None
     metadata_status: str = "assessed"
     spatial_redlist_category: str | None = None
     iucn_assessment_latest: bool | None = None
+    gap_myr: float | None = None
+    # Marginal gap assuming the species is unsequenced; set for every species
+    # with a tree placement, including those withheld from `gap_myr`.
+    gap_upper_myr: float | None = None
+    edge2_myr_median: float | None = None
+    edge2_myr_p025: float | None = None
+    edge2_myr_p975: float | None = None
+    # Null when a gap is scored; otherwise why branch-length priority is absent:
+    # unavailable_tree_identity, unsafe_genomic_identity, baseline_incomplete
+    # (gap is an upper bound) or not_loaded (no phylogenetic generation row).
+    phylogenetic_status: str | None = None
 
 
 @dataclass

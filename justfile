@@ -10,7 +10,7 @@ global_preview_root := env_var_or_default("GLOBAL_PREVIEW_ROOT", global_data_roo
 global_build_root := env_var_or_default("GLOBAL_BUILD_ROOT", "data/global")
 global_adm2_root := env_var_or_default("GLOBAL_ADM2_ROOT", "data/boundaries/adm2")
 global_static_data := env_var_or_default("GLOBAL_STATIC_DATA", "app/static/data")
-global_crosswalk_path := env_var_or_default("GLOBAL_CROSSWALK_PATH", "data/exports/iucn_goat_global/iucn_goat_crosswalk.parquet")
+global_crosswalk_path := env_var_or_default("GLOBAL_CROSSWALK_PATH", global_data_root / "derived/iucn-goat-crosswalk/current/iucn_goat_crosswalk.parquet")
 global_database_url := env_var_or_default("GLOBAL_DATABASE_URL", "postgresql://ark:ark@127.0.0.1:5432/ark_iv_global")
 
 # Show available commands.
@@ -214,6 +214,26 @@ download:
 update:
     uv run python -m ark_pipeline.cli.sources_sync update --root "{{ global_data_root }}"
 
+# Check local source validity and live release metadata without changing data.
+[positional-arguments]
+[group('02 - Data workflow')]
+check-sources *args:
+    uv run python -m ark_pipeline.cli.sources_sync check --root "{{ global_data_root }}" "$@"
+
+# Acquire the explicitly pinned COL XR archive alongside the legacy GBIF backbone.
+[group('02 - Data workflow')]
+col-download:
+    uv run python -m ark_pipeline.cli.sources_acquire update --root "{{ global_data_root }}" --source col-xr
+
+# Compare a bounded matcher review queue; this does not accept crosswalk links.
+[positional-arguments]
+[group('02 - Data workflow')]
+taxonomy-review queue output *args:
+    #!/usr/bin/env sh
+    set -eu
+    shift 2
+    uv run python -m ark_pipeline.cli.taxonomy_review --root "{{ global_data_root }}" --queue "{{ queue }}" --output "{{ output }}" "$@"
+
 # Show source and stage readiness without downloading or rebuilding anything.
 [positional-arguments]
 [group('02 - Data workflow')]
@@ -231,6 +251,35 @@ data-build *args:
 [group('02 - Data workflow')]
 data-update *args:
     uv run python -m ark_pipeline.cli.serving_prepare --root "{{ global_data_root }}" --acquire update --crosswalk-mode refresh --build-pairs --tiles "$@"
+
+# Full pipeline on CoreWeave with the live monitor; asks before spending. --precise: exact coverage.
+[positional-arguments]
+[group('02 - Data workflow')]
+cloud-run *args:
+    @just _cloud launch "$@"
+
+# Reattach the live monitor to a cloud run (default: latest running).
+[group('02 - Data workflow')]
+cloud-watch id="":
+    @just _cloud watch {{ id }}
+
+# Stop a cloud run's sandbox now (default: latest running).
+[group('02 - Data workflow')]
+cloud-stop id="":
+    @just _cloud stop {{ id }}
+
+[positional-arguments]
+[private]
+_cloud *args:
+    #!/usr/bin/env zsh
+    set -euo pipefail
+    # The key stays in the ignored sandbox env file; scripts only read the environment.
+    if [[ -z "${WANDB_API_KEY:-}" && -f sandbox/coreweave/.env ]]; then
+      key="$(sed -nE 's/^[[:space:]]*(export[[:space:]]+)?WANDB_API_KEY[[:space:]]*=[[:space:]]*//p' sandbox/coreweave/.env | head -1)"
+      export WANDB_API_KEY="${${key#[\"\']}%[\"\']}"
+    fi
+    PYTHONPATH=. uv run --quiet --project sandbox/coreweave --frozen \
+      python sandbox/coreweave/scripts/cloud_run.py "$@"
 
 # After acquisition: carry the stratified polygon fixture through every build stage.
 # Point/HydroBASINS phases are exercised by production builds but not yet projected here.

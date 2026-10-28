@@ -10,6 +10,7 @@
     X
   } from 'lucide-svelte';
   import BoundaryFilter from './BoundaryFilter.svelte';
+  import ScoringControls from './ScoringControls.svelte';
   import { boundaryFilters, clearBoundaryFilters } from '$lib/stores/boundaries';
   import { tableDna, tableRedlist, tableSearch, tableSystems } from '$lib/stores/species';
 
@@ -115,6 +116,8 @@
       </div>
     </fieldset>
   </div>
+
+  <div class="scoring-row"><ScoringControls /></div>
 
   <div class="spatial-row">
     <div>
@@ -311,6 +314,9 @@
   }
   .facet-pills.is-wide button {
     min-width: 0;
+  }
+  .scoring-row {
+    padding: 0 1.2rem 1rem;
   }
   .spatial-row {
     padding: 0.2rem 1.2rem 0.9rem;

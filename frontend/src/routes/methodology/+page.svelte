@@ -70,9 +70,11 @@
                 ></strong
               >
               <p>
-                Supplies GBIF taxon IDs for species-name hotlinks to GBIF records when a unique
-                accepted-species match is available. GBIF is not used by the current IUCN-to-GoaT
-                crosswalk and does not affect identity, coverage, or priority scores.
+                Legacy GBIF identifiers supply species-name hotlinks when a unique accepted-species
+                match is available. Crosswalk screening also checks Catalogue of Life XR name
+                concepts and retains the legacy GBIF comparison separately. Their identifiers stay
+                in distinct namespaces; name agreement alone does not authorize genomic-data
+                transfer.
               </p>
             </div>
           </li>
@@ -134,7 +136,10 @@
               <strong>Preserve taxon identity</strong>
               <p>
                 Use the IUCN SIS taxon ID as the application key and attach a reviewed GoaT/NCBI
-                match where supported. A separate GBIF taxon ID may supply an outbound hotlink.
+                match where supported. A reference link is separate from permission to transfer
+                species-level traits. Retired NCBI IDs, incompatible current ranks, kingdom
+                contradictions, and conflicting direct SIS evidence block acceptance. A separate
+                GBIF taxon ID may supply an outbound hotlink.
               </p>
             </div>
           </li>
@@ -215,13 +220,18 @@
                   >A safely linked chromosome/complete-genome assembly has BUSCO completeness ≥ 90%</td
                 ><td><strong>Present</strong></td></tr
               >
-              <tr><td>4</td><td>No rule above is satisfied</td><td><strong>Missing</strong></td></tr
+              <tr
+                ><td>4</td><td>No rule above is satisfied</td><td
+                  ><strong>Not established</strong></td
+                ></tr
               >
             </tbody>
           </table>
         </div>
         <p class="about-method-note">
-          Resampling markers and sequencing status do not currently alter this predicate.
+          Resampling markers and sequencing status do not currently alter this predicate. Unresolved
+          or withheld taxonomic matches can also leave species-level evidence unestablished; this
+          does not prove biological absence of DNA or sequencing work.
         </p>
       </div>
       <div class="section-divider"><span>#</span></div>
@@ -233,7 +243,8 @@
           <h2>How the DNA gap is selected</h2>
           <p>
             Each species receives one mutually exclusive DNA-gap category. The first matching
-            condition wins, so the table and map apply exactly one DNA weight per species.
+            condition wins, so bucket scoring applies exactly one DNA weight per species. The main
+            species table also offers the branch-length measure described below.
           </p>
         </div>
         <div class="tutorial-table-wrapper about-table-wrapper">
@@ -294,17 +305,19 @@
     <section class="tutorial-section">
       <div class="tutorial-subsection layout-single-column is-visible">
         <div class="about-content">
-          <h2>How priority is calculated</h2>
+          <h2>How bucket priority is calculated</h2>
           <p class="formula-line">
             <span>Species priority</span><b>=</b><span>IUCN weight</span><b>×</b><span
               >DNA-gap weight</span
             >
           </p>
           <p>
-            A cell’s priority is the sum across its distinct included species. The normalized view
-            divides that sum by richness, producing mean included-species priority—not
-            area-normalized priority. Weights are adjustable heuristics, not extinction
-            probabilities or an empirically validated allocation model.
+            The map and its cell-detail species list use this bucket score; the main species table
+            offers it as an alternative to unsequenced history. A cell’s priority is the sum across
+            its distinct included species. The normalized view divides that sum by richness,
+            producing mean included-species priority—not area-normalized priority. Weights are
+            adjustable heuristics, not extinction probabilities or an empirically validated
+            allocation model.
           </p>
         </div>
         <div class="score-table-grid">
@@ -333,6 +346,62 @@
             </table>
           </div>
         </div>
+      </div>
+      <div class="section-divider"><span>#</span></div>
+    </section>
+
+    <section class="tutorial-section">
+      <div class="tutorial-subsection layout-single-column is-visible">
+        <div class="about-content">
+          <h2>Unsequenced history in the species table</h2>
+          <p>
+            The main species table defaults to branch length on a dated tree of life: the millions
+            of years of evolutionary history that sequencing this species would add to what is
+            already represented under the DNA-evidence rule above. That baseline includes samples
+            and work in progress, so the gap depends on the evidence rule and does not describe
+            completed reference genomes alone.
+          </p>
+          <p class="formula-line">
+            <span>Expected loss</span><b>=</b><span>Extinction probability</span><b>×</b><span
+              >Unsequenced Myr</span
+            >
+          </p>
+          <p>
+            Extinction probabilities are the EDGE2 medians per Red List category (CR 0.97, EN 0.49,
+            VU 0.24, NT 0.13, LC 0.06; Data Deficient takes the pooled 0.23). Bucket-weight controls
+            do not change these probabilities. Map colours and cell-detail priorities still use the
+            bucket score above.
+          </p>
+        </div>
+        <aside class="deficiency-note" aria-labelledby="gap-bounds">
+          <h3 id="gap-bounds">Scored gaps and upper bounds</h3>
+          <div class="definition-grid">
+            <div>
+              <span class="definition-source">Scored</span><strong>Stored gap</strong>
+              <p>
+                A usable scored gap requires a safe tree and genomic identity and a complete local
+                baseline. In the 25 October build, 41% of 115,408 mapped species lacked one. By
+                default, withheld species with a tree placement are ranked at their upper bound,
+                marked ≤; species without a placement stay unscored.
+              </p>
+            </div>
+            <div>
+              <span class="definition-source">Upper bound</span><strong>Marginal gap</strong>
+              <p>
+                Every species placed on the tree, withheld or not, assumed unsequenced unless it is
+                itself represented. It answers “what does sequencing only this species gain?” and
+                can only overstate the gap. Switch off “Include withheld species” to rank stored
+                gaps only.
+              </p>
+            </div>
+          </div>
+        </aside>
+        <p class="about-method-note">
+          Marginal gaps cannot be added up: sister species share their unsequenced stem, so a sum
+          counts it once per sister (about 4.5× the true total). A fair share, which splits each
+          shared branch among the species below it, sums correctly and is reserved for a future map
+          layer. Missing values stay unscored.
+        </p>
       </div>
       <div class="section-divider"><span>#</span></div>
     </section>
@@ -437,16 +506,20 @@
         <div>
           <dt>Taxonomy</dt>
           <dd>
-            IUCN taxon IDs stay primary. GoaT/NCBI identifiers support the genomic-data match; GBIF
-            identifiers are used only for outbound species hotlinks. Unresolved identifiers remain
-            absent.
+            IUCN taxon IDs stay primary. GoaT/NCBI identifiers support the genomic-data match. COL
+            XR concept conflicts withhold trait transfer, and old-only IUCN identities remain
+            withheld until their absence from the current catalogue is reconciled. OTT and tree
+            links have separate identity checks and never grant genomic-transfer permission.
+            Unresolved accepted identifiers remain absent.
           </dd>
         </div>
         <div>
           <dt>Taxon identity</dt>
           <dd>
             Ark-IV never deduplicates distinct IUCN taxa by a shared NCBI concept; this avoids
-            silently collapsing splits and lumps.
+            silently collapsing splits and lumps. When a screened crosswalk is registered, the
+            rebuild pipeline selects it with its source snapshots and receipts. Changed source
+            content requires re-screening; acquiring data does not immediately change the map.
           </dd>
         </div>
         <div>
@@ -474,6 +547,17 @@
           </dd>
         </div>
         <div>
+          <dt>Range edges</dt>
+          <dd>
+            A range counts in every cell it touches. Requiring the cell centre or 10–25% of the cell
+            inside the range would drop most single-cell ranges, while large ranges change by about
+            1–2% in the measured sample. Across six study windows, rank correlations ranged from
+            0.73 to 0.997, while top-1% overlap was only 0.05–0.75. Even the small 0.01° boundary
+            simplification shifts that tail. Interpret top-5–10% sets and robustness alongside
+            ranks.
+          </dd>
+        </div>
+        <div>
           <dt>Boundary filters</dt>
           <dd>
             Filters operate on cell memberships. A species range and a boundary can touch different
@@ -489,11 +573,23 @@
           </dd>
         </div>
         <div>
+          <dt>Robustness</dt>
+          <dd>
+            In the 25 October snapshot study, 73% of the default top-5% coarse cells stay in the top
+            5% under at least 95% of 144 specifications without range rarity (Data Deficient weight,
+            DNA measure, taxonomy-transfer eligibility, assessment window). These are half of a
+            288-specification study; range rarity changes the hotspots far more. Geometry and
+            independently measured crosswalk accuracy are outside this grid. See the
+            <a href="/research/hotspot-robustness">hotspot robustness study</a>.
+          </dd>
+        </div>
+        <div>
           <dt>Validation status</dt>
           <dd>
             Tests and receipts check implemented behavior, reconciliation, and provenance. They
             cannot prove biological accuracy, catch every wrong taxonomic match, or validate the
-            default weights.
+            default weights. Crosswalk coverage and transfer eligibility are not accuracy estimates;
+            independent biological adjudication remains necessary.
           </dd>
         </div>
         <div>

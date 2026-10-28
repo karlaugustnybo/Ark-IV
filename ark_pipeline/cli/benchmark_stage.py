@@ -12,7 +12,12 @@ import uuid
 from pathlib import Path
 
 from ark_pipeline.runtime.benchmark_estimates import markdown_report
-from ark_pipeline.runtime.checkpoints import artifact_inventory, pipeline_code, validate_inventory
+from ark_pipeline.runtime.checkpoints import (
+    artifact_inventory,
+    benchmark_environment,
+    pipeline_code,
+    validate_inventory,
+)
 from ark_pipeline.runtime.dashboard import Dashboard
 from ark_pipeline.runtime.provenance import atomic_json, iso_now, runtime_identity, sha256
 from ark_pipeline.spatial.coverage import load_spatial_profile
@@ -28,6 +33,7 @@ INPUT_FLAGS = {
     "coarse_db": {"--species-parquet": SPECIES, "--species-systems-parquet": SYSTEMS,
                   "--h3-res3": f"{H3}/h3_res3_species_global_merged.parquet", "--crosswalk": CROSSWALK},
     "fine_metrics": {"--parts-dir": f"{H3}/res7_merged_parts", "--species": SPECIES, "--species-systems": SYSTEMS},
+    "spatial_analytics": {"--h3-root": H3},
     "prepared_inputs": {"--h3-root": H3, "--parts-dir": "metrics", "--build-duckdb": "build.duckdb",
                         "--species": SPECIES, "--species-systems": SYSTEMS,
                         "--metadata-template": "coarse-tiles/map-metadata.json"},
@@ -39,6 +45,7 @@ PREREQUISITES = {
     "metadata": ("lists", "crosswalk"),
     "coarse_db": ("metadata", "lists", "crosswalk"),
     "coarse_cache": ("coarse_db",), "fine_metrics": ("lists", "metadata"),
+    "spatial_analytics": ("lists",),
     "prepared_inputs": ("coarse_cache", "fine_metrics"), "tiles": ("prepared_inputs",),
 }
 
@@ -74,7 +81,11 @@ def validate_replay_identities(config, selection=None):
 
 
 def replay_plan(args):
-    from ark_pipeline.cli.benchmark_pipeline import REPOSITORY_ROOT, plan
+    from ark_pipeline.cli.benchmark_pipeline import (
+        REPOSITORY_ROOT,
+        plan,
+        reviewed_evidence_identity,
+    )
 
     if not args.only_stage or args.from_run is None:
         raise ValueError("Use --only-stage STAGE together with --from-run DIRECTORY")
@@ -91,8 +102,14 @@ def replay_plan(args):
     output = args.output_root or root / "benchmarks/stages" / (iso_now().replace(":", "-") + "-" + uuid.uuid4().hex[:8])
     replay_args = argparse.Namespace(**{**vars(args), "root": root, "output_root": output,
         "sample": Path(saved["sample"]), "profile": Path(saved["profile"]),
-        "max_per_bin": saved["max_per_bin"], **{key: Path(path) for key, path in saved["boundaries"].items()}})
+        "max_per_bin": saved["max_per_bin"], "dry_run": True,
+        "spatial_omissions": Path(saved['spatial_omissions']) if saved.get('spatial_omissions') else None,
+        **{key: Path(path) for key, path in saved["boundaries"].items()}})
     config, planned, environment = plan(replay_args)
+    # Planning a replay must not discover/rebuild an unrelated polygon sample.
+    config['sample'] = saved['sample']
+    config['reviewed_evidence'] = reviewed_evidence_identity()
+    environment['GLOBAL_IUCN_REVIEWED_EVIDENCE_PATH'] = config['reviewed_evidence']['path']
     output = Path(config["output"])
     if output == source or output.is_relative_to(source) or source.is_relative_to(output):
         raise ValueError("Replay output must be separate from the input benchmark directory")
@@ -125,8 +142,10 @@ def replay_plan(args):
         required.append(source / "source.duckdb")
         environment["SOURCE_DUCKDB_PATH"] = str(source / "source.duckdb")
     boundary_inputs = {}
-    if name in {"coarse_cache", "tiles"}:
-        for path in config["boundaries"].values():
+    if name in {"coarse_cache", "tiles", "spatial_analytics"}:
+        boundary_paths = ([config["boundaries"][key] for key in ("admin0", "eez")]
+                          + ([config['spatial_omissions']] if config.get('spatial_omissions') else [])) if name == "spatial_analytics" else config["boundaries"].values()
+        for path in boundary_paths:
             boundary = Path(path).resolve()
             if boundary.is_relative_to(source):
                 required.append(boundary)
@@ -182,6 +201,7 @@ def replay_plan(args):
         report["acquisition_manifest_sha256"] = previous["acquisition_manifest_sha256"]
         report["code_sha256"] = pipeline_code(REPOSITORY_ROOT)
         report["runtime"] = runtime_identity(REPOSITORY_ROOT)
+        report['measurement_environment'] = benchmark_environment(report['runtime'])
     return report, stage, config, environment
 
 

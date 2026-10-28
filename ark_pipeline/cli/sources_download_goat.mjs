@@ -150,23 +150,24 @@ function processResult(item) {
   };
 }
 
-function requestBody(size, searchAfter) {
+function requestBody(size, searchAfter, { identityOnly = false, idSet } = {}) {
   const query = {
     index: 'taxon',
     taxa: [ROOT_TAXON_ID],
     taxon_filter_type: 'tree',
-    fields: REQUEST_FIELDS.map((name) => ({ name }))
+    ...(identityOnly ? {} : { fields: REQUEST_FIELDS.map((name) => ({ name })) })
   };
   const params = {
     size,
     include_estimates: true,
-    include_lineage: true,
+    include_lineage: !identityOnly,
     include_taxon_names: false,
     sort_by: 'taxon_id',
     sort_order: 'asc',
     taxonomy: 'ncbi'
   };
   if (searchAfter !== undefined) params.search_after = searchAfter;
+  if (idSet !== undefined) params.id_set = idSet;
   return JSON.stringify({ query_yaml: JSON.stringify(query), params_yaml: JSON.stringify(params) });
 }
 
@@ -177,7 +178,7 @@ function retryDelay(response, attempt) {
   return exponential + Math.floor(Math.random() * Math.min(1000, exponential / 4));
 }
 
-async function search(size, searchAfter) {
+async function search(size, searchAfter, options) {
   let lastError;
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
     let response;
@@ -189,7 +190,7 @@ async function search(size, searchAfter) {
           'content-type': 'application/json',
           'accept-encoding': 'gzip, br'
         },
-        body: requestBody(size, searchAfter),
+        body: requestBody(size, searchAfter, options),
         signal: AbortSignal.timeout(180_000)
       });
       if (!response.ok) {
@@ -270,12 +271,37 @@ async function saveCheckpoint(checkpoint) {
   await fs.rename(tmp, checkpointPath);
 }
 
-async function getExpectedRows() {
-  const data = await search(1);
+async function getExpectedRows(identityOnly = false) {
+  const data = await search(1, undefined, { identityOnly });
   const hits = Number(data.status.hits);
   if (!Number.isSafeInteger(hits) || hits < 1)
     throw new Error(`Invalid GOAT count: ${JSON.stringify(data.status)}`);
   return hits;
+}
+
+async function searchPage(searchAfter, expected, useIdBatches) {
+  if (!useIdBatches) return search(PAGE_SIZE, searchAfter);
+
+  // Attribute queries aggregate across their entire result set. Restricting
+  // them to one ID page keeps the same values/provenance without repeating
+  // global attribute aggregation on every page.
+  const identities = await search(PAGE_SIZE, searchAfter, { identityOnly: true });
+  if (Number(identities.status.hits) !== expected)
+    throw new Error('GOAT identity total changed during the run');
+  const ids = (identities.results ?? []).map((item) => String(item?.result?.taxon_id ?? ''));
+  if (!ids.length || ids.length > PAGE_SIZE || ids.some((id) => !id))
+    throw new Error(`Invalid identity page length or IDs (${ids.length})`);
+  if (new Set(ids).size !== ids.length) throw new Error('GOAT returned duplicate identity IDs');
+  const data = await search(PAGE_SIZE, undefined, { idSet: ids });
+  if (Number(data.status.hits) !== ids.length || data.results?.length !== ids.length)
+    throw new Error('GOAT attribute page did not reconcile with the requested IDs');
+  if (data.results.some((item, index) => String(item?.result?.taxon_id ?? '') !== ids[index]))
+    throw new Error('GOAT attribute page returned different IDs or ordering');
+  return {
+    ...data,
+    status: { ...data.status, hits: identities.status.hits },
+    search_after: identities.search_after
+  };
 }
 
 async function initialize(expected, output) {
@@ -362,6 +388,9 @@ let completed = false;
 const started = Date.now();
 try {
   const expected = await getExpectedRows();
+  // Fields can filter the universe. Only use identity pages when the unfiltered
+  // tree has the same total; otherwise preserve the original filtered traversal.
+  const useIdBatches = (await getExpectedRows(true)) === expected;
   if (restart) {
     await fs.unlink(partPath).catch(() => {});
     await fs.unlink(checkpointPath).catch(() => {});
@@ -380,8 +409,14 @@ try {
       process.stderr.write(
         `Resuming after ${checkpoint.rows.toLocaleString()} rows (${checkpoint.pages} pages).\n`
       );
+    process.stderr.write(
+      useIdBatches
+        ? 'Fetching attributes in ID-restricted batches.\n'
+        : 'Identity and attribute totals differ; using filtered traversal.\n'
+    );
+    const startingRows = checkpoint.rows;
     while (checkpoint.rows < expected) {
-      const data = await search(PAGE_SIZE, checkpoint.searchAfter);
+      const data = await searchPage(checkpoint.searchAfter, expected, useIdBatches);
       const hits = Number(data.status.hits);
       const results = data.results ?? [];
       if (hits !== expected)
@@ -412,7 +447,7 @@ try {
       checkpoint.updatedAt = new Date().toISOString();
       await saveCheckpoint(checkpoint);
       const elapsed = (Date.now() - started) / 1000;
-      const rate = checkpoint.rows / Math.max(elapsed, 0.001);
+      const rate = (checkpoint.rows - startingRows) / Math.max(elapsed, 0.001);
       const eta = (expected - checkpoint.rows) / rate;
       process.stderr.write(
         `Page ${checkpoint.pages}: ${checkpoint.rows.toLocaleString()}/${expected.toLocaleString()} rows (${rate.toFixed(0)}/s, ETA ${(eta / 60).toFixed(1)} min)\n`

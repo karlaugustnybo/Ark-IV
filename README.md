@@ -58,10 +58,14 @@ IUCN–GoaT crosswalk from verified IUCN, GoaT and NCBI snapshots before expensi
 processing. Uncertain matches remain unresolved and are recorded for review.
 `just data-status` provides a read-only source and spatial-output summary.
 After acquisition, `just data-benchmark` runs the existing stratified polygon
-fixture through all build stages and reports stage timings and a projected total.
+fixture through serving and spatial analytics and reports stage timings and a projected total.
 That benchmark does not yet project point-CSV or HydroBASINS phases; the full
 build dashboard reports their measured work without folding it into a
 polygon-only ETA.
+When saved cloud timings exist, the benchmark also reports a separate full-run
+estimate combining fresh stage timings with benchmark projections, including
+analytics and scoring. It identifies reused stages and coverage/resource
+differences; restore and retention form a separate cloud total.
 Use `--workers 4` to set parallelism, `--max-per-bin 10` for a smaller stratified
 subset, or `--dry-run` to preview it. See the [benchmark guide](docs/pipeline/08_pipeline_benchmark.md).
 Both commands show a Rich dashboard with incremental progress, benchmark-informed
@@ -162,6 +166,14 @@ cp frontend/.env.example frontend/.env
 Keep authorized databases under `data/private/` or outside the repository.
 Keep the global raw and generated datasets under `GLOBAL_DATA_ROOT` and
 `GLOBAL_PREVIEW_ROOT`. Never weaken `.gitignore` to make a build work.
+
+`just start` / `just dev` use `GLOBAL_SERVING_CONFIG` to select an existing
+validated bundle. Its paths and `GLOBAL_DATABASE_URL` must identify the same
+snapshot. Optional DNA, phylogenetic and spatial generation paths should be
+recorded in that bundle's environment; startup clears unrelated inherited
+analysis selections. Changing `.env` affects future launches, so restart an
+already-running server to change its dataset. Source receipts stay immutable;
+relocate a separate serving descriptor when restoring cloud outputs locally.
 
 The complete global source inventory and identifier contract are in
 [global source data](docs/reference/global_source_data.md). Boundary sources, licences,

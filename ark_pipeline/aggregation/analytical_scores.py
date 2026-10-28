@@ -10,11 +10,21 @@ from ark_pipeline.aggregation.membership_contract import canonical_memberships
 from ark_pipeline.aggregation.species_lists import sql_path
 from ark_pipeline.runtime.provenance import identity_digest
 
+# Red List codes summed separately so the browser can reapply threat weights.
+SHARE_CATEGORIES = ('CR', 'EN', 'VU', 'NT', 'DD', 'LC')
+
 
 def aggregate_scores(connection, membership_paths: list[Path], species_scores: Path,
                      output: Path, *, resolution: int, scenario_id: str,
                      membership_generation: str, profile: str, ecosystem: str = 'all') -> dict:
     """Sum individual opportunities, not joint branch-union benefit.
+
+    When the species scores carry `gap_share_upper_myr` and `redlist_category`,
+    each cell also gets `share_upper_<cat>_myr`: the summed fair-share upper
+    bounds of its species per Red List category. Shares split every uncovered
+    branch among its claimants, so unlike marginal gaps they add up across
+    species. `share_unavailable_species` counts members without a share (no
+    tree placement, extinct, or absent from the scores); they are not zero.
 
     Coarse input must contain distinct coarse membership. Never sum fine gaps
     to obtain coarse values. Ecosystem-specific callers must supply memberships
@@ -38,8 +48,16 @@ def aggregate_scores(connection, membership_paths: list[Path], species_scores: P
         raise ValueError('Duplicate species scores')
     if connection.execute('SELECT count(*) FROM scenario_scores WHERE priority < 0 OR NOT isfinite(priority)').fetchone()[0]:
         raise ValueError('Scores must be finite and nonnegative or null')
+    columns = {row[0] for row in connection.execute('DESCRIBE scenario_scores').fetchall()}
+    shares = {'gap_share_upper_myr', 'redlist_category'} <= columns
+    if shares and connection.execute('SELECT count(*) FROM scenario_scores WHERE gap_share_upper_myr < 0 OR NOT isfinite(gap_share_upper_myr)').fetchone()[0]:
+        raise ValueError('Fair shares must be finite and nonnegative or null')
+    share_sql = ''.join(
+        f",\n            coalesce(sum(s.gap_share_upper_myr) FILTER(WHERE s.redlist_category = '{code}'), 0)::DOUBLE AS share_upper_{code.lower()}_myr"
+        for code in SHARE_CATEGORIES) + ',\n            count(*) - count(s.gap_share_upper_myr) AS share_unavailable_species' if shares else ''
     identity = dict(scenario_id=scenario_id, memberships=membership_generation, profile=profile,
-                    ecosystem=ecosystem, resolution=resolution, aggregation='distinct-individual-opportunities-v1')
+                    ecosystem=ecosystem, resolution=resolution,
+                    aggregation='distinct-individual-opportunities-v2-fair-share' if shares else 'distinct-individual-opportunities-v1')
     spatial_id = identity_digest(identity)
     output.parent.mkdir(parents=True, exist_ok=True)
     if output.exists():
@@ -50,7 +68,7 @@ def aggregate_scores(connection, membership_paths: list[Path], species_scores: P
             sum(s.priority)::DOUBLE AS priority,
             count(s.priority)::BIGINT AS scored_species,
             count(*) - count(s.priority) AS unscored_species,
-            count(*) FILTER(WHERE s.baseline_incomplete) AS baseline_incomplete_species
+            count(*) FILTER(WHERE s.baseline_incomplete) AS baseline_incomplete_species{share_sql}
             FROM scenario_memberships m LEFT JOIN scenario_scores s USING(iucn_sis_id)
             GROUP BY m.h3_index ORDER BY m.h3_index)
             TO {sql_path(temporary)} (FORMAT PARQUET, COMPRESSION ZSTD)""")

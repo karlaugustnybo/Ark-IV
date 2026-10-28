@@ -1,6 +1,6 @@
 # Pipeline benchmark after acquisition
 
-Run the entire post-acquisition pipeline on the same stratified polygon fixture
+Run the post-acquisition serving stages on the same stratified polygon fixture
 used for the pair-generation runtime studies:
 
 ```bash
@@ -10,6 +10,7 @@ just data-benchmark --max-per-bin 10      # shorter, deterministic stratified su
 just data-benchmark --dry-run             # show stages and paths without building
 just data-benchmark --ui rich             # force the dashboard, including redirected output
 just data-benchmark --fresh               # new calibration instead of resuming an interruption
+just data-benchmark --only-stage spatial_analytics --from-run /path/to/benchmark --output-root /path/to/new-output
 ```
 
 The default is the existing 1,000-polygon fixture at
@@ -42,6 +43,10 @@ referenced v1c basins, or execute the basin/species join. Those operations run
 in `just data-build` with resumable receipts and measured dashboard progress,
 but they currently have no full-build ETA prior. Do not add the polygon estimate
 to a release schedule as if it included those phases.
+
+The report also combines the polygon projection with saved cloud-run timings
+to give a separate full-run planning estimate. This does not measure the missing
+source routes; see the limitations below.
 
 ## Fast and correct coverage
 
@@ -187,7 +192,20 @@ with a new output directory for a clean calibration.
 4. Feed **those pairs** into fine/coarse species-list aggregation.
 5. Prepare the acquired global ADM2 boundaries in the benchmark directory.
 6. Build complete species metadata, then coarse serving data and fine metrics
-   against the sample's lists, followed by input reconciliation and real PMTiles.
+   against the sample's lists.
+7. Run production spatial analytics: mapped-cell intersections with the selected
+   admin0 and EEZ catalogues, cell areas, species ranges and stewardship. These
+   are partial sample denominators, never published global scientific results.
+8. Reconcile inputs and build real PMTiles.
+
+For optimization trials, use `--only-stage spatial_analytics --from-run DIRECTORY`.
+This validates the saved memberships and boundaries and writes fresh analytical
+outputs, scratch, logs, phase wall times and resource samples in a separate output
+directory. It does not rerun pairs, lists, metadata, metrics or tiles. Repeat with
+a new output directory for each trial; unchanged source inputs remain in place.
+`--spatial-omissions` pins an optional basin-omission audit and is inherited by
+replays. Spatial intersections use the spatial worker budget, with bounded ordered
+batches; SQL reductions use the separate DuckDB thread/memory settings.
 
 Complete reference tables preserve lineage/DNA context; they are not spatially
 sampled. No previous global pair/list/metric output is substituted. All five
@@ -204,6 +222,78 @@ Each stage has a log under `logs/`; `polygon-timings.jsonl` retains individual
 kernel timings and output counts. Peak process-tree RSS is sampled when process
 inspection is available; an unavailable measurement is null. Reports are saved
 after each stage, including failure; a failed run does not present a full total.
+
+### Previous full-run timings
+
+When `sandbox/coreweave/run-baselines/` contains a saved cloud run, the benchmark
+adds `estimate.full_run` to its JSON report and a **Full-run ETA** section to its
+Markdown report. It selects the newest baseline of the same coverage mode, or
+the newest available baseline if that mode has not completed yet. The dashboard's
+full-build projection uses this combined total when available; run remaining and
+expected finish still describe the benchmark itself.
+
+Each stage names its timing source. Fresh previous-run timings replace fixture
+extrapolations, including the tile stage's expensive global validation. Stages
+explicitly reused by a continuation use a reconstruction of the original work
+when one is recorded for the same coverage mode, otherwise keep the benchmark
+projection. JSON stage entries retain the reconstruction's evidence, and the
+Markdown report identifies its source and limitations. A continuation
+without a reuse list cannot supply fresh computation timings. Across coverage
+modes, pairs, lists and coarse/fine metrics retain the selected mode's benchmark
+projections; spatial analytics is adjusted by projected versus observed fine
+relationships when the baseline includes that count. Other measured stages are
+left unchanged and the mode mismatch is reported.
+
+The combined estimate includes spatial analytics, DNA evidence, phylogenetic
+scores and opportunity aggregates from the baseline. Spatial analytics now runs
+on the benchmark sample; the other three analytical stages remain unbenchmarked.
+Missing or reused timings for these stages leave the full total
+unavailable. Restore and retention are shown in a separate cloud total only when
+both were measured. The source census and crosswalk are still included, so this
+is a cold-build planning estimate rather than a prediction for a receipt-reusing
+continuation.
+
+The seed FAST baseline reused pairs, lists and fine metrics. Its separate
+`reconstructed_stages` records recover their original 21 October work: pairs
+12,881.9 seconds from the driver start to the final archive receipt, lists
+5,330 seconds between the pair and aggregation receipts, and fine partitions
+511.5 seconds from lock creation to the last of 122 partition receipts in the
+retained TAR. The original continuation timings and reuse flags remain intact.
+The fine-metrics prior excludes finalization after the final partition receipt
+and is a lower bound. Pair timing includes point and partial HydroBASINS routes,
+including the original basin omissions; it does not measure complete basin
+coverage. These reconstructions are not transferred to precise-mode estimates.
+The seed baseline's spatial analytics and scoring times were
+inferred from process event windows, rather than complete stage records. Until a
+fresh full run completes, the combined estimate mixes historical timings,
+reconstructed windows and polygon projections. Resource differences are reported without assuming
+linear worker scaling; hardware, storage, source/profile changes and cache state
+can still invalidate the estimate. These are planning estimates, not measured
+global runtimes or accuracy guarantees.
+
+The [27 October spatial-only optimization](../performance/spatial_analytics_optimization.md)
+adds a verified 1,009.64-second full-input spatial calibration to the retained
+guide without replacing its historical stage records. It is used only when
+coverage mode and the spatial producer's code fingerprint match. Source,
+resource and hardware limits remain explicit in the report.
+
+### Remaining benchmark gaps
+
+- Point-CSV archives and HydroBASINS normalization, basin coverage and species
+  joins are not exercised. A baseline's freshly computed `pairs` stage can include
+  them; the seed's original-work reconstruction also includes those routes with
+  partial basin coverage. A reused stage without such a reconstruction cannot
+  fill this gap in the polygon projection.
+- Spatial analytics measures the polygon sample's boundary and reduction work;
+  global overlap, density, spill and storage can invalidate extrapolation. Its
+  combined full-run ETA still prefers historical global timing when available.
+- DNA evidence, phylogenetic scores and opportunities use historical timings
+  only and still need their own representative benchmark inputs.
+- Fixture tile timing understates global validation and data-copying costs;
+  previous full-run timing is the current calibration for those costs.
+- Acquisition, PostgreSQL loading and cloud setup are outside the benchmark.
+  The cloud total adds only measured restore and retention, excluding allocation
+  startup, bootstrap and the final shutdown grace period.
 
 Pair estimates weight per-band means by the current full polygon population,
 retain observed worker utilization, and separately scale pair writing. Forced

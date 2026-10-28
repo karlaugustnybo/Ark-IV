@@ -3,6 +3,8 @@ export type SpeciesSortKey =
   | 'family'
   | 'redlist_category'
   | 'dna_level'
+  | 'unsequenced_myr'
+  | 'edge2'
   | 'priority';
 
 export type SpeciesTableRow = {
@@ -19,7 +21,17 @@ export type SpeciesTableRow = {
   iucn_assessment_latest?: boolean | null;
   dnaLabel: string;
   dnaStatus: 'data-deficient' | 'family' | 'genus' | 'species' | 'sampled';
-  priority: number;
+  /** Null when the active score cannot rank this species (no safe tree placement). */
+  priority: number | null;
+  /** The shown gap is an upper bound for a withheld species (shown with ≤). */
+  bounded?: boolean;
+  /** Priority ranks a withheld species by that upper bound. */
+  priority_bounded?: boolean;
+  gap_myr?: number | null;
+  edge2_myr_median?: number | null;
+  edge2_myr_p025?: number | null;
+  edge2_myr_p975?: number | null;
+  phylogenetic_status?: string | null;
 };
 
 export function dnaStatus(value: string): SpeciesTableRow['dnaStatus'] {

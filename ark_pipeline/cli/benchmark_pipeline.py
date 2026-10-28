@@ -39,7 +39,13 @@ from ark_pipeline.cli.spatial_pairs import (
     load_acquisition_manifest,
     spatial_files,
 )
-from ark_pipeline.runtime.benchmark_estimates import estimate, markdown_report
+from ark_pipeline.runtime.benchmark_estimates import (
+    RUN_MODES,
+    estimate,
+    full_run_estimate,
+    markdown_report,
+    previous_full_run,
+)
 from ark_pipeline.runtime.checkpoints import (
     artifact_inventory,
     benchmark_environment,
@@ -114,9 +120,10 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--ui", choices=("auto", "rich", "plain"), default="auto")
     result.add_argument("--benchmark-report", type=Path, help="Passed benchmark to use as an ETA prior; defaults to the latest compatible run.")
     result.add_argument("--dry-run", action="store_true", help="Show stages, isolated paths and resources without reading sources or building.")
-    result.add_argument("--only-stage", choices=("source_scan", "crosswalk", "pairs", "lists", "boundaries", "metadata", "coarse_db", "coarse_cache", "fine_metrics", "prepared_inputs", "tiles"),
+    result.add_argument("--only-stage", choices=("source_scan", "crosswalk", "pairs", "lists", "boundaries", "metadata", "coarse_db", "coarse_cache", "fine_metrics", "spatial_analytics", "prepared_inputs", "tiles"),
                         help="Replay one stage with fresh outputs, reusing inputs from --from-run.")
     result.add_argument("--from-run", type=Path, help="Previous benchmark with completed prerequisites for --only-stage.")
+    result.add_argument("--spatial-omissions", type=Path, help="Pinned basin-omission audit for spatial analytics; inherited during stage replay.")
     result.add_argument("--stage", choices=("source_scan", "pairs", "lists", "boundaries"), help=argparse.SUPPRESS)
     result.add_argument("--config", type=Path, help=argparse.SUPPRESS)
     return result
@@ -392,6 +399,7 @@ def plan(args) -> tuple[dict, list[dict], dict]:
               "profile_sha256": profile.digest, "resources": resources.report(), "memory_limit": args.memory_limit,
               "scan_workers": args.scan_workers, "census_cache": str(args.census_cache.resolve()) if args.census_cache else None,
               "max_per_bin": args.max_per_bin, "reverse_bands": args.reverse_bands, "boundaries": boundaries}
+    config['spatial_omissions'] = str(args.spatial_omissions.expanduser().resolve()) if args.spatial_omissions else None
     h3 = output / "spatial/serving/current"
     crosswalk = output / "crosswalk/current/iucn_goat_crosswalk.parquet"
     species, systems = output / "species/species.parquet", output / "species/species_systems.parquet"
@@ -420,6 +428,15 @@ def plan(args) -> tuple[dict, list[dict], dict]:
     add("fine_metrics", [*python, "ark_pipeline.builders.fine_metrics", "aggregate", "--parts-dir", h3 / "res7_merged_parts", "--species", species,
                          "--species-systems", systems, "--output-dir", output / "metrics", "--scratch-dir", output / "scratch/metrics",
                          "--memory-limit", args.memory_limit, "--no-progress"])
+    add("spatial_analytics", [*python, "ark_pipeline.cli.spatial_analytics", "--h3-root", h3,
+                             "--profile", profile.profile_id, "--coverage-status", "partial",
+                             "--output-root", output / "analysis/spatial", "--scratch-dir", output / "scratch/spatial",
+                             "--memory-limit", args.memory_limit, "--threads", resources.report()["duckdb_threads"],
+                             "--workers", resources.report()["spatial_workers"],
+                             "--boundary-catalogue", f"admin0={boundaries['admin0']}",
+                             "--boundary-catalogue", f"eez={boundaries['eez']}"])
+    if config['spatial_omissions']:
+        stages[-1]['command'] += ['--omissions', config['spatial_omissions']]
     add("prepared_inputs", [*python, "ark_pipeline.cli.serving_tiles", "record", "--h3-root", h3, "--parts-dir", output / "metrics", "--build-duckdb", output / "build.duckdb",
                             "--species", species, "--species-systems", systems, "--crosswalk", crosswalk,
                             "--metadata-template", output / "coarse-tiles/map-metadata.json", "--output", output / "prepared-inputs.json"])
@@ -444,7 +461,33 @@ def plan(args) -> tuple[dict, list[dict], dict]:
 
 
 def run_stage(stage: dict, output: Path, environment: dict, dashboard=None) -> dict:
-    return run_command(stage, output, environment, dashboard, cwd=REPOSITORY_ROOT)
+    result = run_command(stage, output, environment, dashboard, cwd=REPOSITORY_ROOT)
+    phases = {}
+    current = None
+    events = output / 'progress.jsonl'
+    if events.is_file():
+        for line in events.read_text().splitlines():
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(event, dict) or event.get('stage') != stage['name']:
+                continue
+            moment = event.get('time')
+            if not isinstance(moment, (int, float)) or not math.isfinite(moment):
+                continue
+            kind = event.get('kind')
+            if kind == 'command_start':
+                phases, current = {}, None
+            elif kind == 'phase' and isinstance(event.get('phase'), str) and (current is None or current[0] != event['phase']):
+                if current:
+                    phases[current[0]] = phases.get(current[0], 0) + max(0, moment - current[1])
+                current = event['phase'], moment
+            elif kind == 'command_end' and current:
+                phases[current[0]] = phases.get(current[0], 0) + max(0, moment - current[1])
+                current = None
+    result['phase_seconds'] = phases
+    return result
 
 
 def run(args) -> dict:
@@ -463,7 +506,7 @@ def run(args) -> dict:
     identity = {"measurement_environment": environment_identity, "mode": "benchmark", "config": json.loads(json.dumps(config).replace(str(output), "<run>")),
                 "sources": source_identity(root), "code": pipeline_code(REPOSITORY_ROOT),
                 "external_files": {str(path): sha256(path) for path in [args.sample, args.sample.with_suffix(".json"),
-                    *[getattr(args, key) for key in BOUNDARIES]] if path and path.is_file()
+                    *[getattr(args, key) for key in BOUNDARIES], args.spatial_omissions] if path and path.is_file()
                     and not (args.rebuild_sample and path in {args.sample, args.sample.with_suffix(".json")})}}
     resume_output = None
     if not args.fresh:
@@ -510,6 +553,8 @@ def run(args) -> dict:
     prior, note = load_prior(root, config["profile_sha256"], args.benchmark_report)
     dashboard = Dashboard([s["name"] for s in stages], output, config["resources"], prior=prior, note=note, ui=args.ui, identity=identity)
     report["estimate_prior"] = str(prior["path"]) if prior else None
+    run_mode = RUN_MODES[load_spatial_profile(Path(config["profile"])).coverage_mode]
+    previous_run = previous_full_run(run_mode)
     started = time.perf_counter()
     previous_seconds = report.get("wall_seconds", 0)
 
@@ -565,8 +610,9 @@ def run(args) -> dict:
                     projection = estimate(projected_stages, json.loads((output / "population.json").read_text()),
                                           json.loads((output / "pairs-report.json").read_text()), json.loads((output / "lists-report.json").read_text()),
                                           serving_contract=config["serving_contract"])
+                    projection["full_run"] = full_run_estimate(projection, previous_run, run_mode, config["resources"])
                     if len(projected_stages) == len(stages):
-                        dashboard.global_estimate = projection["total_seconds"]
+                        dashboard.global_estimate = (projection["full_run"] or projection)["total_seconds"]
                     report["live_projection"] = projection
                 report["artifacts"] = artifact_inventory(output)
             except (Exception, KeyboardInterrupt) as error:
@@ -588,6 +634,7 @@ def run(args) -> dict:
         report["workload"] = {"raw_pairs": pairs["pair_rows"], "eligible_polygons": population["eligible_polygons"],
                               **{key: lists[key] for key in ("res3_cells", "res3_relationships", "res7_cells", "res7_relationships")}}
         report["estimate"] = estimate(report["stages"], population, pairs, lists, serving_contract=config["serving_contract"])
+        report["estimate"]["full_run"] = full_run_estimate(report["estimate"], previous_run, run_mode, config["resources"])
         report["status"] = "passed"
     except (Exception, KeyboardInterrupt) as error:
         report.update(status="interrupted" if isinstance(error, KeyboardInterrupt) else "failed", error=str(error) or "Interrupted")

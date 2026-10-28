@@ -14,14 +14,17 @@ import os
 import random
 import shutil
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 DEFAULT_BASE_URL = "https://api.iucnredlist.org/api/v4"
 TOKEN_ENV = "IUCN_REDLIST_API_KEY"
@@ -46,10 +49,26 @@ def iso_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
+@contextmanager
+def atomic_text(path: Path) -> Iterator[TextIO]:
+    """Publish a complete file without sharing a temporary path between writers."""
+    with tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.", suffix=".part",
+        delete=False,
+    ) as handle:
+        temporary = Path(handle.name)
+        try:
+            yield handle
+            handle.close()
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+
 def atomic_json(path: Path, value: Any) -> None:
-    temporary = path.with_name(f".{path.name}.part")
-    temporary.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    os.replace(temporary, path)
+    with atomic_text(path) as handle:
+        json.dump(value, handle, indent=2, sort_keys=True)
+        handle.write("\n")
 
 
 class IucnApi:
@@ -271,12 +290,10 @@ def download_catalogue(
     final_version, _ = api.get("information/red_list_version")
     if str(final_version.get("red_list_version")) != release:
         raise ValueError("IUCN release changed during catalogue download")
-    temporary = output.with_name(f".{output.name}.part")
-    with temporary.open("w", encoding="utf-8") as handle:
+    with atomic_text(output) as handle:
         for kingdom in kingdoms:
             for row in rows_by_kingdom[kingdom]:
                 handle.write(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n")
-    os.replace(temporary, output)
     metadata = {
         "schema_version": 2,
         "status": "complete",

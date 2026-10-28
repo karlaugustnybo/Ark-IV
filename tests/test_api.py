@@ -8,6 +8,7 @@ from unittest.mock import patch
 from litestar.exceptions import HTTPException
 
 from backend.app import (
+    EXTINCTION_PROBABILITY,
     MAX_SEARCH_LENGTH,
     _cell_boundary_memberships,
     _clean_search,
@@ -124,7 +125,7 @@ class SpeciesApiTests(unittest.IsolatedAsyncioTestCase):
             )
 
         result_sql = pool.calls[-1][1]
-        self.assertIn("dna_level_score DESC, dna_level_rank ASC", result_sql)
+        self.assertIn("dna_level_score DESC NULLS LAST, dna_level_rank ASC", result_sql)
         self.assertIn("WHEN goat_data_deficient = true THEN 2", result_sql)
         self.assertIn("WHEN family_has_dna = false THEN 1", result_sql)
 
@@ -137,7 +138,47 @@ class SpeciesApiTests(unittest.IsolatedAsyncioTestCase):
             )
 
         result_sql = pool.calls[-1][1]
-        self.assertIn("priority DESC, dna_level_rank ASC", result_sql)
+        self.assertIn("priority DESC NULLS LAST, dna_level_rank ASC", result_sql)
+
+    async def test_branch_length_modes_drop_bucket_weights_from_labels(self) -> None:
+        for score, labelled in (
+            ("buckets", True),
+            ("expected-loss", False),
+            ("expected-loss-upper", False),
+        ):
+            pool = RecordingPool()
+            with patch("backend.app.get_pool", return_value=pool):
+                await species_page.fn(
+                    state=object(), search="", page=1, per_page=10, score=score
+                )
+            sql, values = pool.calls[-1][1], pool.calls[-1][2]
+            self.assertEqual(values[-1], score)
+            self.assertEqual("'Missing Family (' || $7" in sql, labelled)
+            self.assertIn("WHEN gap_myr IS NULL OR phylogenetic_status IS NOT NULL THEN NULL", sql)
+            self.assertIn(
+                "WHEN $23::text = 'expected-loss-upper' THEN extinction_probability * gap_upper_myr",
+                sql,
+            )
+            # Rows loaded before the bounds existed fall back to the scored gap.
+            self.assertIn("COALESCE(phylo.gap_upper_myr, CASE WHEN phylo.phylogenetic_status IS NULL", sql)
+
+    def test_expected_loss_uses_pinned_edge2_point_probabilities(self) -> None:
+        try:
+            from dated_complete_tree.tree_fixing_utils import open_config_csv
+        except ImportError:
+            self.skipTest("dated-complete-tree is not installed")
+        import csv
+        from statistics import median
+
+        with open_config_csv(None, "p_extinction.csv") as handle:
+            rows = list(csv.reader(handle))[1:]
+        codes = {"CR": "Critically Endangered", "EN": "Endangered", "VU": "Vulnerable",
+                 "NT": "Near Threatened", "LC": "Least Concern"}
+        for code, name in codes.items():
+            expected = median(float(row[1]) for row in rows if row[0] == code)
+            self.assertAlmostEqual(EXTINCTION_PROBABILITY[name], expected, places=5)
+        pooled = median(float(row[1]) for row in rows)
+        self.assertAlmostEqual(EXTINCTION_PROBABILITY["Data Deficient"], pooled, places=5)
 
     async def test_species_cells_returns_available_compact_resolution(self) -> None:
         class CoveragePool:

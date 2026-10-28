@@ -13,6 +13,8 @@ HARNESS = r'''
 const destination = process.argv[1];
 const stop = process.env.FIXTURE_STOP === '1';
 const onePage = process.env.FIXTURE_ONE_PAGE === '1';
+const differentUniverse = process.env.FIXTURE_DIFFERENT_UNIVERSE === '1';
+const badHydration = process.env.FIXTURE_BAD_HYDRATION;
 process.argv = ['bun', 'sources_download_goat.mjs', destination];
 const item = (id) => ({ result: { taxon_id: id, taxon_rank: 'species',
   scientific_name: 'Fixture ' + id,
@@ -24,13 +26,18 @@ globalThis.fetch = async (url, options) => {
   const request = JSON.parse(options.body);
   const params = JSON.parse(request.params_yaml);
   const query = JSON.parse(request.query_yaml);
-  if (!query.fields.some((field) => field.name === 'redlist_category')) throw Error('Missing field');
-  if (!params.include_estimates || !params.include_lineage) throw Error('Missing provenance settings');
+  const identityOnly = !query.fields;
+  if (!identityOnly && !query.fields.some((field) => field.name === 'redlist_category')) throw Error('Missing field');
+  if (!params.include_estimates || (!identityOnly && !params.include_lineage)) throw Error('Missing provenance settings');
   if (params.search_after && stop) return new Response('fixture interruption', {status: 400});
-  const results = params.size === 1 ? [] :
+  let results = params.id_set ? params.id_set.map(item) : params.size === 1 ? [] :
     onePage ? [item('fixtureA'), item('fixtureB')] :
     [item(params.search_after ? 'fixtureB' : 'fixtureA')];
-  return new Response(JSON.stringify({status: {success: true, hits: 2}, results,
+  let hits = params.id_set ? params.id_set.length : identityOnly && differentUniverse ? 3 : 2;
+  if (params.id_set && badHydration === 'missing') results = [];
+  if (params.id_set && badHydration === 'wrong') results = [item('unrequested')];
+  if (params.id_set && badHydration === 'ignored') hits = 999;
+  return new Response(JSON.stringify({status: {success: true, hits}, results,
     search_after: ['fixtureA']}), {headers: {'content-type': 'application/json'}});
 };
 await import('./ark_pipeline/cli/sources_download_goat.mjs');
@@ -38,12 +45,15 @@ await import('./ark_pipeline/cli/sources_download_goat.mjs');
 
 
 class GoatDownloadTests(unittest.TestCase):
-    def run_download(self, output: Path, *, stop: bool = False, one_page: bool = False):
+    def run_download(self, output: Path, *, stop: bool = False, one_page: bool = False,
+                     different_universe: bool = False, bad_hydration: str = ''):
         return subprocess.run(
             ['bun', '-e', HARNESS, str(output)], capture_output=True, text=True,
             env={**os.environ, 'GOAT_PAGE_SIZE': '2', 'GOAT_MAX_ATTEMPTS': '1',
                  'FIXTURE_STOP': '1' if stop else '0',
-                 'FIXTURE_ONE_PAGE': '1' if one_page else '0'},
+                 'FIXTURE_ONE_PAGE': '1' if one_page else '0',
+                 'FIXTURE_DIFFERENT_UNIVERSE': '1' if different_universe else '0',
+                 'FIXTURE_BAD_HYDRATION': bad_hydration},
         )
 
     def assert_output(self, output):
@@ -65,16 +75,39 @@ class GoatDownloadTests(unittest.TestCase):
             result = self.run_download(output, one_page=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(json.loads(result.stdout)['rows'], 2)
+            self.assertIn('ID-restricted batches', result.stderr)
             self.assert_output(output)
+
+    def test_attribute_filtering_retains_original_traversal_when_totals_differ(self):
+        with tempfile.TemporaryDirectory() as folder:
+            output = Path(folder) / 'goat.tsv'
+            result = self.run_download(output, one_page=True, different_universe=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('using filtered traversal', result.stderr)
+            self.assert_output(output)
+
+    def test_attribute_batches_must_reconcile_requested_ids_before_committing(self):
+        for failure in ('missing', 'wrong', 'ignored'):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as folder:
+                output = Path(folder) / 'goat.tsv'
+                output.write_text('previous selected snapshot')
+                result = self.run_download(output, bad_hydration=failure)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('GOAT attribute page', result.stderr)
+                self.assertEqual(output.read_text(), 'previous selected snapshot')
+                checkpoint = json.loads(Path(str(output) + '.checkpoint.json').read_text())
+                self.assertEqual(checkpoint['rows'], 0)
 
     def test_cli_resumes_committed_page_and_preserves_previous_output_on_failure(self):
         with tempfile.TemporaryDirectory() as folder:
             output = Path(folder) / 'goat.tsv'
             output.write_text('previous selected snapshot')
-            first = self.run_download(output, stop=True)
+            first = self.run_download(output, stop=True, different_universe=True)
             self.assertNotEqual(first.returncode, 0)
+            self.assertIn('using filtered traversal', first.stderr)
             self.assertEqual(output.read_text(), 'previous selected snapshot')
             second = self.run_download(output)
             self.assertEqual(second.returncode, 0, second.stderr)
             self.assertIn('Resuming after 1 rows', second.stderr)
+            self.assertIn('ID-restricted batches', second.stderr)
             self.assert_output(output)

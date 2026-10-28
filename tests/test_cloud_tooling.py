@@ -212,6 +212,21 @@ class FakeSandbox:
 
 
 class LifecycleTests(unittest.TestCase):
+    def test_full_job_records_plain_progress_and_resources(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / 'logs').mkdir()
+            report = {'stages': []}
+            command = [sys.executable, '-c',
+                       "from ark_pipeline.runtime.progress import emit; emit('phase', phase='fixture'); import time; time.sleep(.1)"]
+            with patch.object(job, 'OUT', root):
+                job.run_command('fixture', command, dict(os.environ), report, time.monotonic() + 5)
+            output = root / 'runs/fixture'
+            self.assertTrue((output / 'resources.jsonl').is_file())
+            self.assertIn('fixture', (output / 'progress.jsonl').read_text())
+            self.assertEqual(json.loads((output / 'dashboard-state.json').read_text())['status'], 'passed')
+            self.assertEqual(report['stages'][0]['exit_code'], 0)
+
     def test_recording_sdk_success_failure_recovery_and_teardown(self):
         with tempfile.TemporaryDirectory() as temp:
             for fail in [False, True]:
@@ -1192,13 +1207,13 @@ class OwnedProcessTests(unittest.TestCase):
                 wait = child.wait
 
                 def short_wait(timeout=None):
-                    if timeout == 15 and mode == "poll_error":
+                    if timeout == 1 and mode == "poll_error":
                         end = time.monotonic() + 2
                         while not (root / "pids").exists():
                             self.assertLess(time.monotonic(), end)
                             time.sleep(0.01)
                         raise RuntimeError("invented polling error")
-                    return wait(timeout=0.2 if timeout == 15 else timeout)
+                    return wait(timeout=0.2 if timeout == 1 else timeout)
 
                 child.wait = short_wait
                 yield child

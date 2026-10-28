@@ -35,9 +35,8 @@ def parser() -> argparse.ArgumentParser:
     sources = result.add_mutually_exclusive_group()
     sources.add_argument("--spatial-root", type=Path, help="Override the profile's derived pair directory.")
     sources.add_argument("--h3-root", type=Path, help="Use an existing serving-list pack and skip spatial export.")
-    result.add_argument("--crosswalk", type=Path, default=Path(os.environ.get(
-        "GLOBAL_CROSSWALK_PATH", "data/exports/iucn_goat_global/iucn_goat_crosswalk.parquet"
-    )))
+    result.add_argument("--crosswalk", type=Path,
+                        default=Path(os.environ['GLOBAL_CROSSWALK_PATH']) if os.environ.get('GLOBAL_CROSSWALK_PATH') else None)
     result.add_argument("--preview-root", type=Path, default=None)
     result.add_argument("--acquire", choices=("download", "update"), help="Acquire sources before checking the crosswalk and building.")
     result.add_argument(
@@ -69,7 +68,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--phylogenetic-scope", choices=('mammals', 'global'), default='mammals')
     result.add_argument("--phylogenetic-aggregates", action='store_true', help="Build separate default coarse/fine opportunity aggregates; no base-map changes.")
     result.add_argument("--tiles", action="store_true", help="Continue through validated coarse PMTiles and dynamic H3 serving.")
-    result.add_argument("--ui", choices=("auto", "rich", "plain"), default="auto", help="Live Rich dashboard in a terminal; plain output when redirected.")
+    result.add_argument("--ui", choices=("auto", "rich", "plain"), default="auto", help="Terminal display only: auto, rich or plain; progress and resource recording are always enabled.")
     result.add_argument("--fresh", action="store_true", help="Start fresh dashboard history; production outputs still undergo normal reuse validation.")
     result.add_argument("--benchmark-report", type=Path, help="ETA prior; defaults to the latest passed benchmark with matching source/profile fingerprints.")
     result.add_argument("--workers", type=worker_count, help="Shared parallelism for all compute stages: positive integer or auto (also PIPELINE_WORKERS).")
@@ -105,7 +104,7 @@ def preparation_plan(args: argparse.Namespace) -> tuple[list[list[str]], dict[st
         commands.append([
             sys.executable, "-m", "ark_pipeline.cli.sources_sync", args.acquire, "--root", str(root),
         ])
-    crosswalk = args.crosswalk.expanduser().resolve()
+    crosswalk = (args.crosswalk or root / 'derived/iucn-goat-crosswalk/current/iucn_goat_crosswalk.parquet').expanduser().resolve()
     if args.crosswalk_mode == "refresh":
         crosswalk_root = root / "derived/iucn-goat-crosswalk"
         crosswalk = crosswalk_root / "current/iucn_goat_crosswalk.parquet"
@@ -142,7 +141,8 @@ def preparation_plan(args: argparse.Namespace) -> tuple[list[list[str]], dict[st
             *[v for name, path in (args.spatial_boundary_catalogue or []) for v in ('--boundary-catalogue', f'{name}={path.expanduser().resolve()}')],
             *(['--weights', str(args.spatial_weights.expanduser().resolve())] if args.spatial_weights else []),
             "--memory-limit", os.environ.get('DUCKDB_MEMORY_LIMIT') or default_duckdb_memory_limit(),
-            "--scratch-dir", str(analysis_root / 'scratch/analysis'), "--threads", str(resources.duckdb_threads)])
+            "--scratch-dir", str(analysis_root / 'scratch/analysis'), "--threads", str(resources.duckdb_threads),
+            "--workers", str(resources.spatial_workers)])
     if args.dna_evidence:
         commands.append([sys.executable, '-m', 'ark_pipeline.cli.dna_prepare', '--root', str(root),
             '--crosswalk', str(crosswalk), '--output-root', str(analysis_root / 'analysis/dna')])
@@ -207,32 +207,35 @@ def main(argv: list[str] | None = None) -> int:
         report_path = Path(overrides["GLOBAL_PREVIEW_ROOT"]) / "prepare-report.json"
         report["status"] = "running"
         console = Console()
-        if args.ui == "rich" or (args.ui == "auto" and console.is_terminal):
-            mapping = {"ark_pipeline.cli.sources_sync": ["acquisition"], "ark_pipeline.cli.crosswalk_refresh": ["crosswalk"],
-                       "ark_pipeline.cli.spatial_pairs": ["pairs"], "ark_pipeline.cli.spatial_aggregate": ["lists"],
-                       "ark_pipeline.cli.spatial_analytics": ["spatial_analytics"],
-                       "ark_pipeline.cli.phylogenetic_prepare": ["phylogenetic"],
-                       "ark_pipeline.cli.dna_prepare": ["dna_evidence"]}
-            mapping['ark_pipeline.cli.analytical_prepare'] = ['opportunities']
-            names = []
-            for command in commands:
-                names.extend(["boundaries", "metadata", "coarse_db", "coarse_cache", "fine_metrics", "prepared_inputs"]
-                             if command == ["just", "global-prepare"] else ["tiles"] if command == ["just", "data-tiles"] else mapping[command[2]])
-            run_output = report_path.parent / "runs" / (iso_now().replace(":", "-") + "-" + uuid.uuid4().hex[:8])
-            from ark_pipeline.builders.iucn_metadata import evidence_identity
+        # Recording is unconditional; --ui controls terminal rendering only.
+        mapping = {"ark_pipeline.cli.sources_sync": ["acquisition"], "ark_pipeline.cli.crosswalk_refresh": ["crosswalk"],
+                   "ark_pipeline.cli.spatial_pairs": ["pairs"], "ark_pipeline.cli.spatial_aggregate": ["lists"],
+                   "ark_pipeline.cli.spatial_analytics": ["spatial_analytics"],
+                   "ark_pipeline.cli.phylogenetic_prepare": ["phylogenetic"],
+                   "ark_pipeline.cli.dna_prepare": ["dna_evidence"]}
+        mapping['ark_pipeline.cli.analytical_prepare'] = ['opportunities']
+        names = []
+        for command in commands:
+            names.extend(["boundaries", "metadata", "coarse_db", "coarse_cache", "fine_metrics", "prepared_inputs"]
+                         if command == ["just", "global-prepare"] else ["tiles"] if command == ["just", "data-tiles"] else mapping[command[2]])
+        run_output = report_path.parent / "runs" / (iso_now().replace(":", "-") + "-" + uuid.uuid4().hex[:8])
+        from ark_pipeline.builders.iucn_metadata import evidence_identity
 
-            identity = {"mode": "full", "commands": commands, "environment": overrides,
-                        "profile": load_spatial_profile(args.profile).digest, "code": pipeline_code(REPOSITORY_ROOT),
-                        "sources": source_identity(args.root.expanduser().resolve()),
-                        "reviewed_evidence": evidence_identity(args.reviewed_evidence_path)}
-            if not args.fresh:
-                run_output = find_checkpoint(report_path.parent / "runs", identity) or run_output
-            run_output.mkdir(parents=True, exist_ok=True)
-            prior, note = load_prior(args.root.expanduser().resolve(), load_spatial_profile(args.profile).digest, args.benchmark_report)
-            dashboard = Dashboard(names, run_output, report["resources"], prior=prior, note=note, mode="full", ui=args.ui, console=console, identity=identity)
-            report["progress_directory"] = str(run_output)
-            report["estimate_prior"] = str(prior["path"]) if prior else None
-            dashboard.__enter__()
+        identity = {"mode": "full", "commands": commands, "environment": overrides,
+                    "profile": load_spatial_profile(args.profile).digest, "code": pipeline_code(REPOSITORY_ROOT),
+                    "sources": source_identity(args.root.expanduser().resolve()),
+                    "reviewed_evidence": evidence_identity(args.reviewed_evidence_path)}
+        if not args.fresh:
+            run_output = find_checkpoint(report_path.parent / "runs", identity) or run_output
+        run_output.mkdir(parents=True, exist_ok=True)
+        prior, note = load_prior(args.root.expanduser().resolve(), load_spatial_profile(args.profile).digest, args.benchmark_report)
+        dashboard = Dashboard(names, run_output, report["resources"], prior=prior, note=note, mode="full", ui=args.ui, console=console, identity=identity)
+        report["progress_directory"] = str(run_output)
+        report["estimate_prior"] = str(prior["path"]) if prior else None
+        dashboard.__enter__()
+        # Publish the progress directory before the first command so external
+        # monitors never follow a previous attempt's report.
+        atomic_json(report_path, report)
         crosswalk_checked = False
         for command in commands:
             source_preparation = command[1:3] in (["-m", "ark_pipeline.cli.sources_sync"], ["-m", "ark_pipeline.cli.crosswalk_refresh"])
@@ -266,6 +269,7 @@ def main(argv: list[str] | None = None) -> int:
             if dashboard:
                 name = "serving" if command == ["just", "global-prepare"] else "tiles" if command == ["just", "data-tiles"] else mapping[command[2]][0]
                 measured = run_command({"name": name, "command": command}, dashboard.output, environment, dashboard, cwd=REPOSITORY_ROOT)
+                report.setdefault("stage_measurements", []).append(measured)
                 if measured["exit_code"]:
                     raise subprocess.CalledProcessError(measured["exit_code"], command)
                 # Acquisition may select a new source snapshot. An old baseline

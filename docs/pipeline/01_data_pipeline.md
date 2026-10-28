@@ -144,8 +144,13 @@ The full `data-build` and `data-update` commands already include these steps.
 profile's `serving/current`, then runs the existing `global-prepare` builders.
 It pins the published generation for the complete preparation run. It checks
 crosswalk provenance before aggregation and does not rerun polygon filling.
-`GLOBAL_CROSSWALK_PATH` selects the crosswalk in the default `require-current`
-mode; `refresh` automatically selects a managed crosswalk. `SPATIAL_PROFILE`
+The default crosswalk is `GLOBAL_DATA_ROOT/derived/iucn-goat-crosswalk/current/`
+`iucn_goat_crosswalk.parquet`; `GLOBAL_CROSSWALK_PATH` can override it in
+`require-current` mode. `refresh` automatically installs/reuses a registered
+screened crosswalk when present. Its complete source bindings and receipt must
+remain current; changed contributing snapshots stop preparation for re-screening.
+An unscreened explicit path cannot bypass a registered screened selection.
+`SPATIAL_PROFILE`
 remains configurable. An existing
 list pack can be selected with `just data-prepare --h3-root /path/to/pack`, which
 skips pair aggregation. Otherwise this command uses the selected spatial profile,

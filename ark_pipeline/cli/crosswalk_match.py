@@ -2,7 +2,7 @@
 """Build an auditable global IUCN SIS taxon -> GoaT/NCBI species crosswalk.
 
 The matcher intentionally separates deterministic taxonomy links from the
-AI-reviewed typo/near-name stage.  It never treats a shared GBIF accepted key
+rule-based typo/near-name stage. It never treats a shared GBIF accepted key
 as proof that two species concepts are identical.
 """
 
@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import duckdb
+import pyarrow as pa
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
@@ -23,7 +24,7 @@ if str(ROOT) not in sys.path:
 from ark_pipeline.runtime.progress import emit, monitor_query
 from ark_pipeline.runtime.resources import configured_count, positive_int
 
-REVIEWER = "AI-review (GPT-5.6 Sol)"
+REVIEWER = "deterministic-taxonomy-v2"
 TAXONOMIC_NAME_CLASSES = (
     "scientific name",
     "synonym",
@@ -70,6 +71,8 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         help="Optional output from fetch_goat_lineages.mjs",
     )
+    parser.add_argument('--goat-provenance-json', type=Path,
+                        help='Versioned raw-record supplement from sources_fetch_goat_provenance')
     return parser.parse_args()
 
 
@@ -305,8 +308,62 @@ def main() -> None:
                 'column1':'VARCHAR'
             }}
         );
+
+        CREATE MACRO normalized_kingdom(value) AS
+            CASE lower(nullif(trim(value), ''))
+                WHEN 'animalia' THEN 'metazoa'
+                WHEN 'plantae' THEN 'viridiplantae'
+                ELSE lower(nullif(trim(value), ''))
+            END;
         """
     )
+
+    supplement_identity = None
+    supplement_reconciliation = None
+    if args.goat_provenance_json:
+        supplement = json.loads(args.goat_provenance_json.read_text())
+        if (supplement.get('schema_version') != 1
+                or supplement.get('api') != 'https://goat.genomehubs.org/api/v3/record/batch'
+                or not isinstance(supplement.get('goat_snapshot_sha256'), str)):
+            raise ValueError('Unsupported GoaT raw provenance supplement')
+        supplement_identity = supplement['goat_snapshot_sha256']
+        schema = pa.schema([(key, pa.string()) for key in (
+            'ncbi_taxid', 'goat_scientific_name', 'goat_taxon_rank',
+            'redlist_category', 'field_provenance_json',
+        )])
+        con.register('_raw_goat_rows', pa.Table.from_pylist(supplement['rows'], schema=schema))
+        con.execute('CREATE TABLE raw_provenance_supplement AS SELECT * FROM _raw_goat_rows')
+        con.unregister('_raw_goat_rows')
+        del supplement
+        count, unique_ids = con.execute(
+            'SELECT count(*), count(DISTINCT ncbi_taxid) FROM raw_provenance_supplement'
+        ).fetchone()
+        if count != unique_ids:
+            raise ValueError('Duplicate GoaT raw provenance identifiers')
+        supplement_reconciliation = dict(con.execute("""
+            SELECT CASE
+                WHEN g.ncbi_taxid IS NULL THEN 'ABSENT_FROM_SNAPSHOT'
+                WHEN g.name_norm <> lower(trim(s.goat_scientific_name)) THEN 'NAME_CONFLICT'
+                WHEN lower(s.goat_taxon_rank) <> 'species' THEN 'RANK_CONFLICT'
+                WHEN list_sort(string_split(g.redlist_category, ';')) IS DISTINCT FROM
+                     list_sort(string_split(s.redlist_category, ';')) THEN 'SUMMARY_CONFLICT'
+                ELSE 'CONCORDANT'
+            END AS status, count(*)
+            FROM raw_provenance_supplement s LEFT JOIN goat g USING(ncbi_taxid)
+            GROUP BY 1
+        """).fetchall())
+        # Live raw IDs supplement only records agreeing with the pinned name,
+        # rank and summary; they cannot silently replace snapshot taxonomy.
+        con.execute("""
+            UPDATE goat g SET field_provenance_json =
+                json_merge_patch(g.field_provenance_json, s.field_provenance_json)::VARCHAR
+            FROM raw_provenance_supplement s
+            WHERE g.ncbi_taxid = s.ncbi_taxid
+              AND g.name_norm = lower(trim(s.goat_scientific_name))
+              AND lower(s.goat_taxon_rank) = 'species'
+              AND list_sort(string_split(g.redlist_category, ';')) =
+                  list_sort(string_split(s.redlist_category, ';'));
+        """)
 
     stage("Generating exact current-name and NCBI synonym candidates")
     name_classes_sql = ",".join(f"'{value}'" for value in TAXONOMIC_NAME_CLASSES)
@@ -829,6 +886,28 @@ def main() -> None:
                 g.goat_scientific_name,
                 l.* EXCLUDE(ncbi_taxid),
                 sr.ncbi_taxid IS NOT NULL AS sis_confirmed,
+                n.taxon_rank AS current_ncbi_rank,
+                CASE
+                    WHEN nd.deleted_taxid IS NOT NULL THEN 'DELETED'
+                    WHEN nm.old_taxid IS NOT NULL THEN 'MERGED'
+                    WHEN n.ncbi_taxid IS NOT NULL THEN 'CURRENT'
+                    ELSE 'ABSENT_FROM_SNAPSHOT'
+                END AS ncbi_identifier_status,
+                nm.current_taxid AS ncbi_merge_target,
+                CASE
+                    WHEN nd.deleted_taxid IS NOT NULL THEN 'NCBI_DELETED_ID'
+                    WHEN nm.old_taxid IS NOT NULL THEN 'NCBI_MERGED_ID_REQUIRES_RECONCILIATION'
+                    WHEN n.taxon_rank IS NOT NULL AND lower(n.taxon_rank) <> 'species'
+                        THEN 'NCBI_SPECIES_RANK_CONFLICT'
+                    WHEN normalized_kingdom(i.iucn_kingdom) IS NOT NULL
+                      AND normalized_kingdom(l.ncbi_kingdom) IS NOT NULL
+                      AND normalized_kingdom(i.iucn_kingdom) <> normalized_kingdom(l.ncbi_kingdom)
+                        THEN 'KINGDOM_CONFLICT'
+                    WHEN direct_sis.goat_redlist_status_source = 'direct'
+                      AND coalesce(len(direct_sis.goat_iucn_sis_ids), 0) > 0
+                      AND NOT list_contains(direct_sis.goat_iucn_sis_ids, i.iucn_sis_id)
+                        THEN 'DIRECT_SIS_CONFLICT'
+                END AS identity_block_reason,
                 (
                     (i.iucn_genus IS NOT NULL AND l.ncbi_genus IS NOT NULL
                         AND lower(i.iucn_genus) = lower(l.ncbi_genus))::INTEGER
@@ -857,6 +936,10 @@ def main() -> None:
             JOIN iucn i USING (iucn_sis_id)
             JOIN goat g USING (ncbi_taxid)
             LEFT JOIN candidate_lineage l USING (ncbi_taxid)
+            LEFT JOIN ncbi_nodes n ON n.ncbi_taxid = u.ncbi_taxid
+            LEFT JOIN ncbi_merged nm ON nm.old_taxid = u.ncbi_taxid
+            LEFT JOIN ncbi_deleted nd ON nd.deleted_taxid = u.ncbi_taxid
+            LEFT JOIN goat_redlist direct_sis ON direct_sis.ncbi_taxid = u.ncbi_taxid
             LEFT JOIN goat_redlist sr
               ON sr.ncbi_taxid = u.ncbi_taxid
              AND sr.goat_iucn_sis_id = u.iucn_sis_id
@@ -891,6 +974,7 @@ def main() -> None:
             row_number() OVER (
                 PARTITION BY iucn_sis_id
                 ORDER BY
+                    identity_block_reason IS NOT NULL,
                     method_priority,
                     lineage_agreements DESC,
                     lineage_conflicts,
@@ -898,10 +982,13 @@ def main() -> None:
                     name_similarity DESC,
                     ncbi_taxid
             ) AS candidate_rank,
-            count(*) OVER (PARTITION BY iucn_sis_id) AS candidate_count,
+            count(*) FILTER (WHERE identity_block_reason IS NULL)
+                OVER (PARTITION BY iucn_sis_id) AS candidate_count,
+            count(*) OVER (PARTITION BY iucn_sis_id) AS total_candidate_count,
             lead(method_priority) OVER (
                 PARTITION BY iucn_sis_id
                 ORDER BY
+                    identity_block_reason IS NOT NULL,
                     method_priority,
                     lineage_agreements DESC,
                     lineage_conflicts,
@@ -912,6 +999,7 @@ def main() -> None:
             lead(lineage_agreements) OVER (
                 PARTITION BY iucn_sis_id
                 ORDER BY
+                    identity_block_reason IS NOT NULL,
                     method_priority,
                     lineage_agreements DESC,
                     lineage_conflicts,
@@ -922,6 +1010,7 @@ def main() -> None:
             lead(name_similarity) OVER (
                 PARTITION BY iucn_sis_id
                 ORDER BY
+                    identity_block_reason IS NOT NULL,
                     method_priority,
                     lineage_agreements DESC,
                     lineage_conflicts,
@@ -993,6 +1082,7 @@ def main() -> None:
                 AS gbif_iucn_source_id_confirmed,
             CASE
                 WHEN c.candidate_rank <> 1 THEN false
+                WHEN c.identity_block_reason IS NOT NULL THEN false
                 WHEN c.method_priority <= 3
                   AND c.candidate_count = 1
                   AND c.lineage_agreements >= 2
@@ -1040,7 +1130,7 @@ def main() -> None:
                     THEN 'deterministic'
                 WHEN c.method_priority = 6 AND c.candidate_count = 1
                     THEN 'deterministic'
-                ELSE 'AI-review (GPT-5.6 Sol)'
+                ELSE 'deterministic-taxonomy-v2'
             END AS reviewer
         FROM all_candidates c
         LEFT JOIN gbif_validation v
@@ -1088,6 +1178,10 @@ def main() -> None:
             c.ncbi_phylum,
             c.ncbi_kingdom,
             c.lineage_source,
+            coalesce(c.ncbi_identifier_status, u.ncbi_identifier_status) AS ncbi_identifier_status,
+            coalesce(c.current_ncbi_rank, u.current_ncbi_rank) AS current_ncbi_rank,
+            coalesce(c.ncbi_merge_target, u.ncbi_merge_target) AS ncbi_merge_target,
+            u.identity_block_reason,
             c.evidence_method AS match_method,
             c.confidence_tier,
             c.reviewer,
@@ -1133,6 +1227,7 @@ def main() -> None:
             CASE
                 WHEN c.ncbi_taxid IS NOT NULL
                     THEN 'Accepted under documented tier rules'
+                WHEN u.identity_block_reason IS NOT NULL THEN u.identity_block_reason
                 WHEN u.iucn_sis_id IS NOT NULL
                     THEN 'Candidate evidence was insufficient for a high-accuracy link'
                 ELSE 'No exact synonym or conservative near-name candidate exists in the GoaT species export'
@@ -1180,6 +1275,10 @@ def main() -> None:
                 b.match_status = 'MATCHED'
                 AND cardinality.iucn_taxon_count = 1
                 AND coalesce(len(gr.goat_iucn_sis_ids), 0) <= 1
+                AND b.ncbi_identifier_status = 'CURRENT'
+                AND lower(b.current_ncbi_rank) = 'species'
+                AND (coalesce(len(gr.goat_iucn_sis_ids), 0) = 0
+                     OR list_contains(gr.goat_iucn_sis_ids, b.iucn_sis_id))
             ) AS safe_for_automatic_species_trait_transfer,
             gr.goat_redlist_category,
             gr.goat_redlist_population_trend,
@@ -1333,7 +1432,7 @@ def main() -> None:
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
         "reviewer": REVIEWER,
         "policy": (
-            "Deterministic exact current/synonym links first; AI review only "
+            "Deterministic exact current/synonym links first; rule-based review only "
             "accepts a uniquely best near-name candidate with compatible lineage; "
             "Unambiguous GoaT redlist SIS provenance corroborates unique candidates and "
             "bridges otherwise unlinked IUCN species."
@@ -1401,10 +1500,15 @@ def main() -> None:
             "work_database": str(work_db),
         },
     }
+    if supplement_identity is not None:
+        if supplement_identity != manifest['sources']['goat_species']['sha256']:
+            raise ValueError('GoaT provenance supplement belongs to a different snapshot')
+        manifest['goat_raw_provenance_reconciliation'] = supplement_reconciliation
     for source_name, source_path in (
         ("gbif_candidate_validation", args.gbif_validation_json),
         ("gbif_iucn_bridge", args.gbif_bridge_json),
         ("goat_supplemental_lineages", args.goat_lineages_json),
+        ('goat_raw_provenance', args.goat_provenance_json),
     ):
         if source_path:
             manifest["sources"][source_name] = {
@@ -1419,9 +1523,9 @@ def main() -> None:
         json.dumps(manifest, indent=2) + "\n",
         encoding="utf-8",
     )
-    ai_review_markdown = f"""# Global IUCN–GoaT crosswalk: AI review
+    ai_review_markdown = f"""# Global IUCN–GoaT crosswalk: deterministic evidence review
 
-Reviewer label: **{REVIEWER}**
+Rule policy: **{REVIEWER}**. No individual expert adjudication is implied.
 
 Generated: {manifest["generated_at_utc"]}
 
@@ -1443,7 +1547,7 @@ Generated: {manifest["generated_at_utc"]}
 
 Deterministic exact current-name and authoritative NCBI synonym links were
 considered first, but still required compatible lineage. Ambiguous and
-near-name candidates were reviewed under the `{REVIEWER}` policy and accepted
+near-name candidates were evaluated under the `{REVIEWER}` rules and accepted
 only with compatible GoaT/NCBI lineage and corroboration by an exact
 GBIF/Catalogue of Life species concept or a unique direct native SIS identity.
 Every native raw identity is inspected;

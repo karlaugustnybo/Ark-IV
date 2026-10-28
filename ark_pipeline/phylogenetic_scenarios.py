@@ -55,8 +55,8 @@ class CompactTree:
                    np.array([node.dist for node in nodes]),
                    np.array([indexes[node] for node in tips]), tuple(node.name for node in tips))
 
-    def gaps(self, represented: set[str]) -> np.ndarray:
-        """O(nodes + edges), no Pandas, distances or per-candidate traversal."""
+    def _covered(self, represented: set[str]) -> np.ndarray:
+        """Nodes with a represented descendant tip."""
         if not represented.issubset(self.tip_labels):
             raise ValueError('Represented baseline contains a tip outside tree')
         covered = np.zeros(len(self.parent), dtype=np.bool_)
@@ -64,6 +64,11 @@ class CompactTree:
             covered[node] = label in represented
         for node in range(len(covered) - 1, 0, -1):
             covered[self.parent[node]] |= covered[node]
+        return covered
+
+    def gaps(self, represented: set[str]) -> np.ndarray:
+        """O(nodes + edges), no Pandas, distances or per-candidate traversal."""
+        covered = self._covered(represented)
         gap = np.zeros(len(covered), dtype=np.float64)
         for node in range(1, len(gap)):
             if not covered[node]:
@@ -71,6 +76,26 @@ class CompactTree:
         if not np.isfinite(gap).all():
             raise ValueError('Tree path lengths overflow')
         return gap[self.tip_nodes]
+
+    def gap_shares(self, represented: set[str], claimants: Mapping[str, int]) -> np.ndarray:
+        """Per-claimant fair share of the uncovered branches above each tip.
+
+        Every uncovered branch is split equally among the claimants below it
+        (`claimants` counts species per tip label). Shares therefore sum to the
+        uncovered branch union the claimants reach, where marginal gaps credit a
+        shared branch to every species below it. Tips without claimants get zero.
+        """
+        covered = self._covered(represented)
+        count = np.zeros(len(self.parent), dtype=np.int64)
+        for label, node in zip(self.tip_labels, self.tip_nodes):
+            count[node] = claimants.get(label, 0)
+        for node in range(len(count) - 1, 0, -1):
+            count[self.parent[node]] += count[node]
+        share = np.zeros(len(count), dtype=np.float64)
+        for node in range(1, len(share)):
+            if not covered[node] and count[node]:
+                share[node] = share[self.parent[node]] + self.length[node] / count[node]
+        return share[self.tip_nodes]
 
     def nearest(self, represented: set[str]) -> list[tuple[float, str] | None]:
         """Optional linear two-pass distance diagnostic; lexical labels break ties."""
@@ -144,7 +169,7 @@ class ScenarioEngine:
         self._lock = threading.Lock()
 
     def calculate(self, rule: DnaRule, *, nearest: bool = False) -> dict:
-        identity = {**self.generation, 'rule': rule.identity(), 'kernel': 'rooted-gap-v1',
+        identity = {**self.generation, 'rule': rule.identity(), 'kernel': 'rooted-gap-bounds-v2',
                     'review_policy': 'withhold-unresolved-positive-genus-v1'}
         key = identity_digest(identity)
         cache_key = key + (":nearest" if nearest else ":gap")
@@ -178,11 +203,24 @@ class ScenarioEngine:
             gaps = self.tree.gaps(represented)
             distances = self.tree.nearest(represented) if nearest else [None] * len(tips)
             values = dict(zip(self.tree.tip_labels, zip(gaps, distances)))
+            # Upper bounds assume every placed species is unsequenced unless its
+            # tip is represented, including unsafe identities and incomplete
+            # baselines; they never replace the withheld `gap_myr`. Extinct
+            # species claim no share of the remaining branches.
+            placed = [s.get('tree_identity_verified') is True and s.get('tree_tip') in values
+                      for s in self.species]
+            claims = [is_placed and s.get('redlist_category') != 'EX'
+                      for s, is_placed in zip(self.species, placed)]
+            claimants: dict[str, int] = {}
+            for species, claims_share in zip(self.species, claims):
+                if claims_share:
+                    claimants[species['tree_tip']] = claimants.get(species['tree_tip'], 0) + 1
+            shares = dict(zip(self.tree.tip_labels, self.tree.gap_shares(represented, claimants)))
             rows = []
-            for species in self.species:
+            for species, is_placed, claims_share in zip(self.species, placed, claims):
                 tip = species.get('tree_tip')
                 reason = None
-                if species.get('tree_identity_verified') is not True or tip not in values:
+                if not is_placed:
                     reason = 'unavailable_tree_identity'
                 elif species.get('genomic_transfer_safe') is not True:
                     reason = 'unsafe_genomic_identity'
@@ -191,6 +229,8 @@ class ScenarioEngine:
                 focal = states_by_tip.get(tip) if reason is None else None
                 rows.append({'iucn_sis_id': str(species['iucn_sis_id']), 'tree_tip': tip,
                     'gap_myr': float(gap) if gap is not None else None,
+                    'gap_upper_myr': float(values[tip][0]) if is_placed else None,
+                    'gap_share_upper_myr': float(shares[tip]) if claims_share else None,
                     'represented': tip in represented if reason is None else None,
                     'evidence_state': focal.state if focal else 'unavailable_focal_evidence' if reason is None else 'unsafe_identity',
                     'qualifying_evidence': focal.qualifies if focal else None,
@@ -223,8 +263,8 @@ class ScenarioEngine:
             priority = row['gap_myr'] * weight if reason is None else None
             if priority is not None and not math.isfinite(priority):
                 raise ValueError('Weighted priority overflows')
-            rows.append({**row, 'priority': priority,
-                         'availability_reason': reason})
+            rows.append({**row, 'redlist_category': categories[row['iucn_sis_id']],
+                         'priority': priority, 'availability_reason': reason})
         rows.sort(key=lambda row: (row['priority'] is None, -(row['priority'] or 0), row['iucn_sis_id']))
         return {**scenario, 'weighted_scenario_id': identity_digest({'scenario': scenario['scenario_id'], 'weights': dict(weights)}),
                 'rows': rows}

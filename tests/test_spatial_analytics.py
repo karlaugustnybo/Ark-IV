@@ -20,6 +20,8 @@ from ark_pipeline.aggregation.species_lists import PAIR_SCHEMA, export_serving_l
 from ark_pipeline.builders.spatial_analytics import (
     build_jurisdictions,
     build_spatial_analytics,
+    execute_cell_reduction,
+    mapped_cell_geometries,
     support_summary,
 )
 from ark_pipeline.cli.spatial_analytics import build as publish_spatial_analytics
@@ -33,6 +35,25 @@ from backend.spatial_analysis import (
 
 
 class SpatialAnalyticsTests(unittest.TestCase):
+    def test_reduction_restores_query_optimizer_settings_after_failure(self):
+        with duckdb.connect() as connection:
+            connection.execute("SET disabled_optimizers='filter_pushdown'")
+            with self.assertRaises(duckdb.Error):
+                execute_cell_reduction(connection, 'SELECT * FROM missing_table', True)
+            self.assertEqual(connection.execute("SELECT current_setting('disabled_optimizers')").fetchone()[0], 'filter_pushdown')
+
+    def test_batch_cell_geometries_preserve_exact_tile_boundaries(self):
+        from ark_pipeline.tiles import geometries_for_cells
+
+        cells = sorted({h3.latlng_to_cell(latitude, longitude, 7)
+                        for latitude in (-90, -89.99, -55, 0, 55, 89.99, 90)
+                        for longitude in (-180, -179.999, 0, 12, 179.999, 180)}
+                       | set(h3.get_pentagons(7)))
+        _, expected = geometries_for_cells(cells)
+        actual = mapped_cell_geometries([int(cell, 16) for cell in cells])
+        for cell, left, right in zip(cells, actual, expected, strict=True):
+            self.assertTrue(left.equals_exact(right, 0), cell)
+
     def test_boundary_producer_preserves_overlaps_dateline_and_unique_cells(self):
         from shapely.geometry import box, mapping
 
@@ -59,6 +80,10 @@ class SpatialAnalyticsTests(unittest.TestCase):
             self.assertEqual(result['cells'], 2)
             self.assertEqual(result['jurisdiction_memberships'], len(expected))
             self.assertEqual({r[2] for r in actual}, {'east', 'west', 'overlap', 'inside'})
+            parallel = root / 'parallel-jurisdictions.parquet'
+            parallel_result = build_jurisdictions(c, [path], {'country': boundary}, parallel, batch_cells=1, workers=2)
+            self.assertEqual(parallel_result, result)
+            self.assertEqual(pq.read_table(parallel).to_pylist(), pq.read_table(output).to_pylist())
             memberships = root / 'lists'
             part = memberships / 'res7_merged_parts/part.parquet'
             part.parent.mkdir(parents=True)
@@ -77,7 +102,7 @@ class SpatialAnalyticsTests(unittest.TestCase):
             boundary.write_text('{}')
             with self.assertRaises(ValueError):
                 publish_spatial_analytics(args)
-            self.assertEqual((args.output_root / 'current').resolve(), Path(published['generation']))
+            self.assertEqual((args.output_root / 'current').resolve(), Path(published['generation']).resolve())
 
     def test_canonical_proof_and_generic_overlap_have_equal_results(self):
         with tempfile.TemporaryDirectory() as tmp, duckdb.connect() as c:
@@ -96,9 +121,13 @@ class SpatialAnalyticsTests(unittest.TestCase):
             scores = root / 'scores.parquet'
             pq.write_table(pa.table({'iucn_sis_id': ['1', '2', '3'], 'priority': [1., 2., None],
                                     'baseline_incomplete': [False, False, True]}), scores)
+            jurisdictions = root / 'jurisdictions.parquet'
+            pq.write_table(pa.table({'h3_index': pa.array(cells + [cells[0], cells[0]], type=pa.uint64()),
+                                    'framework': ['admin0'] * len(cells) + ['admin0', 'eez'],
+                                    'code': ['a'] * len(cells) + ['a', 'b']}), jurisdictions)
             for label, paths in [('canonical', [canonical]), ('generic', [arbitrary])]:
                 build_spatial_analytics(c, paths, root / label, profile='fast-fixture',
-                    membership_generation='m', coverage_status='partial')
+                    membership_generation='m', coverage_status='partial', jurisdictions=jurisdictions)
                 aggregate_scores(c, paths, scores, root / f'{label}.parquet', resolution=7,
                     scenario_id='s', membership_generation='m', profile='fast-fixture')
             actual = pq.read_table(root / 'canonical/species_ranges.parquet').to_pylist()
@@ -109,6 +138,10 @@ class SpatialAnalyticsTests(unittest.TestCase):
                 self.assertEqual(left, right)
             self.assertEqual(pq.read_table(root / 'canonical.parquet').to_pylist(),
                              pq.read_table(root / 'generic.parquet').to_pylist())
+            for left, right in zip(pq.read_table(root / 'canonical/stewardship.parquet').to_pylist(),
+                                   pq.read_table(root / 'generic/stewardship.parquet').to_pylist(), strict=True):
+                self.assertAlmostEqual(left.pop('mapped_area_fraction'), right.pop('mapped_area_fraction'), places=12)
+                self.assertEqual(left, right)
             for species in ([2, 1], [1, 1], [1, None]):
                 pq.write_table(pa.table({'h3_cell': pa.array(cells[:1], type=pa.uint64()),
                                         'species_ids': [species]}), canonical)
@@ -214,7 +247,7 @@ class SpatialAnalyticsTests(unittest.TestCase):
             self.assertEqual(first['status'], 'built')
             self.assertEqual(publish_spatial_analytics(args)['status'], 'reused')
             published = (args.output_root / 'current').resolve()
-            self.assertEqual(published, Path(first['generation']))
+            self.assertEqual(published, Path(first['generation']).resolve())
             boundary.write_bytes(b'broken source')
             with self.assertRaises(duckdb.Error):
                 publish_spatial_analytics(args)
@@ -240,6 +273,27 @@ class SpatialAnalyticsTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'resolution-7'):
                 build_spatial_analytics(c, [memberships], root / 'invalid', profile='fast-fixture',
                     membership_generation='m', coverage_status='unknown', jurisdictions=boundaries)
+
+    def test_fair_shares_sum_per_category_and_keep_unavailable_species(self):
+        with tempfile.TemporaryDirectory() as tmp, duckdb.connect() as c:
+            root = Path(tmp)
+            cells = sorted(int(v, 16) for v in h3.grid_disk(h3.latlng_to_cell(55, 12, 7), 1))[:2]
+            memberships = root / 'lists.parquet'
+            pq.write_table(pa.table({'h3_cell': pa.array(cells, type=pa.uint64()),
+                                     'species_ids': [[1, 2, 3, 4], [2, 5]]}), memberships)
+            scores = root / 'scores.parquet'
+            # '3' has no tree placement; '5' is absent from the scores.
+            pq.write_table(pa.table({'iucn_sis_id': ['1', '2', '3', '4'],
+                'priority': [1., None, None, 2.], 'baseline_incomplete': [False, True, False, False],
+                'gap_share_upper_myr': [1.5, 2.25, None, 4.],
+                'redlist_category': ['CR', 'CR', 'EN', 'LC']}), scores)
+            result = aggregate_scores(c, [memberships], scores, root / 'shares7.parquet', resolution=7,
+                scenario_id='s', membership_generation='m', profile='fast-fixture')
+            self.assertEqual(result['identity']['aggregation'], 'distinct-individual-opportunities-v2-fair-share')
+            first, second = pq.read_table(root / 'shares7.parquet').to_pylist()
+            self.assertEqual((first['share_upper_cr_myr'], first['share_upper_en_myr'],
+                              first['share_upper_lc_myr'], first['share_unavailable_species']), (3.75, 0, 4., 1))
+            self.assertEqual((second['share_upper_cr_myr'], second['share_unavailable_species']), (2.25, 1))
 
 
 if __name__ == '__main__':

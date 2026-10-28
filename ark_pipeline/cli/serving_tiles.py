@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import faulthandler
 import fcntl
 import gc
 import json
@@ -87,6 +88,7 @@ def record_prepared(args: argparse.Namespace) -> dict:
     if set(sources) != set(input_parts(args.parts_dir)):
         raise ValueError("Prepared metrics must cover exactly the source base cells")
     coarse_source = h3_root / "h3_res3_species_global_merged.parquet"
+    _validation_phase("coarse source counts")
     with duckdb.connect(str(args.build_duckdb), read_only=True) as connection:
         configure_duckdb(connection)
         mismatch = connection.execute("""
@@ -101,6 +103,7 @@ def record_prepared(args: argparse.Namespace) -> dict:
         """, [str(coarse_source)]).fetchone()[0]
         if mismatch:
             raise ValueError("Coarse metrics do not match this source generation; rerun just data-prepare")
+    _validation_phase("fine partition receipts and input identities")
     metric_args = SimpleNamespace(species=args.species, species_systems=args.species_systems)
     identities = {base: aggregate_input_identity(metric_args, source) for base, source in sources.items()}
     metadata_identity = next(iter(identities.values()))["metadata"]
@@ -149,6 +152,7 @@ def record_prepared(args: argparse.Namespace) -> dict:
     report["exports"] = {path.name: file_record(path) for path in sorted(exports.glob("*.parquet"))
                          if not path.name.startswith(".")}
     validate_exports(report)
+    _validation_phase("final input and output checksums")
     for base, source in sources.items():
         if aggregate_input_identity(metric_args, source) != identities[base]:
             raise ValueError("Metric input changed while recording prepared inputs")
@@ -162,8 +166,14 @@ def record_prepared(args: argparse.Namespace) -> dict:
     return report
 
 
+def _validation_phase(phase: str) -> None:
+    """Keep the last native validation boundary visible in redirected logs."""
+    print(f"Prepared-input validation: {phase}", file=sys.stderr, flush=True)
+
+
 def validate_exports(report: dict) -> None:
     """Reconcile consumed metadata and optional SQL exports with the coarse build."""
+    _validation_phase("coarse source-to-serving membership")
     validate_coarse_membership(report)
     exports = report.get("exports", {})
     if "species_passage_cells_res3.parquet" in exports and "species_passage" not in report["files"]:
@@ -173,6 +183,7 @@ def validate_exports(report: dict) -> None:
         raise ValueError("Incomplete PostgreSQL export set")
     with duckdb.connect(report["files"]["build_duckdb"]["path"], read_only=True) as connection:
         configure_duckdb(connection)
+        _validation_phase("fine-to-coarse source membership")
         validate_fine_membership(connection, report)
         # Source/build producers copy the supplied species dimension verbatim.
         # Compare all supplied fields, including optional identity/evidence fields;
@@ -191,6 +202,7 @@ def validate_exports(report: dict) -> None:
             ),
         }
         for name, (expected, actual) in metadata_queries.items():
+            _validation_phase(f"consumed {name} metadata")
             mismatch = connection.execute(f"""
                 WITH expected AS ({expected}), actual AS ({actual})
                 SELECT count(*) FROM ((SELECT * FROM expected EXCEPT ALL SELECT * FROM actual)
@@ -198,7 +210,9 @@ def validate_exports(report: dict) -> None:
             """, [report["files"][name]["path"]]).fetchone()[0]
             if mismatch:
                 raise ValueError(f"Consumed {name} metadata does not match prepared build")
+        _validation_phase("coarse metrics")
         validate_coarse_metrics(connection)
+        _validation_phase("coarse Arrow snapshot")
         validate_coarse_snapshot(connection, report)
         if not exports:
             return  # Maps without SQL still require matching coarse/fine metadata.
@@ -223,6 +237,7 @@ def validate_exports(report: dict) -> None:
                 FROM H3Res3Species hs, UNNEST(hs.gbif_ids) AS ids(gbif_id)
             """
         for name, query in queries.items():
+            _validation_phase(f"SQL export {name}")
             path = exports[name]["path"]
             names = pq.ParquetFile(path).schema_arrow.names
             columns = ", ".join('"' + column.replace('"', '""') + '"' for column in names)
@@ -932,6 +947,8 @@ def parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
+    # Native faults bypass Python exception handlers; preserve their Python stack.
+    faulthandler.enable()
     args = parser().parse_args()
     try:
         report = args.run(args)

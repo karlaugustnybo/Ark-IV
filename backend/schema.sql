@@ -172,3 +172,5 @@ ALTER TABLE species_phylogenetic_scores ADD COLUMN IF NOT EXISTS project_reporte
 ALTER TABLE species_phylogenetic_scores ADD COLUMN IF NOT EXISTS criteria_reported BOOLEAN;
 ALTER TABLE species_phylogenetic_scores ADD COLUMN IF NOT EXISTS assembly_reported BOOLEAN;
 ALTER TABLE species_phylogenetic_scores ADD COLUMN IF NOT EXISTS resampling_reported BOOLEAN;
+-- Marginal gap if the species is unsequenced, also for withheld species.
+ALTER TABLE species_phylogenetic_scores ADD COLUMN IF NOT EXISTS gap_upper_myr DOUBLE PRECISION;

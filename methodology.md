@@ -1,6 +1,6 @@
 # Ark-IV data-pipeline methodology
 
-**Review date: 4 September 2026. Status: implementation description and scientific assumption review.**
+**Review date: 28 October 2026. Status: implementation description and scientific assumption review.**
 
 This document describes the supported pipeline in `ark_pipeline/`, its scientific
 interpretation, and the implementation choices that can affect results. It
@@ -19,6 +19,13 @@ and GoaT checksums and audited the complete metadata tables against the saved
 September benchmark crosswalk. Dated results appear in the assumption audit.
 This review did not rebuild global spatial outputs or estimate taxonomic match
 accuracy. Earlier performance/geometry results remain separate recorded evidence.
+
+The October crosswalk investigation used refreshed GoaT/NCBI inputs, the current
+IUCN catalogue, COL XR, legacy GBIF, OTT and the dated tree. It added explicit
+contradiction and transfer gates, traced per-rank lineage sources and checked
+species-level evidence consequences. Greater coverage and stronger structural
+screening support the selected crosswalk; independently
+measured biological precision remains an outstanding acceptance criterion.
 
 ## Contents
 
@@ -102,6 +109,13 @@ flowchart TD
 The arrows show dependencies, not a promise that all branches run concurrently.
 `just data-build` coordinates acquisition, crosswalk refresh, pairs, lists,
 metadata, metrics and tiles. `just data-update` first updates due sources.
+When a `screened-crosswalk` source is registered, crosswalk refresh selects that
+immutable screened generation instead of rerunning the older matching-only
+workflow. Every contributing source must retain the recorded release and content
+hashes. A changed input stops the build for re-screening; it never silently
+falls back to a less thoroughly screened join. The generation is adopted by
+metadata, DNA analysis and subsequent serving builders during the rebuild.
+Registration alone does not change existing map tiles or the live database.
 `just data-prepare` continues from generated pairs; `just data-tiles` continues
 from recorded prepared inputs. PostgreSQL setup/loading and starting the app
 remain separate. See [the operational workflow](docs/pipeline/01_data_pipeline.md)
@@ -132,14 +146,16 @@ with release-specific inventories alongside it. “Required for acquisition” a
 
 | Source | Current role | Important limit |
 | --- | --- | --- |
-| IUCN taxonomy and assessments | Species identities, names, category, assessment identity, systems | Assessment date/scope and spatial release must remain compatible; a latest-assessment selection is not automatically inferred |
+| IUCN taxonomy, assessments and catalogue | Species identities, names, current global assessment identity/category, systems | Exact SIS/assessment reconciliation is required; new or renamed taxa may lack current lineage, and systems are not copied across changed assessments |
 | IUCN polygon archives | Production spatial membership | Configured 2026-1 inventory has 30 archives; mapped coverage is not all described life |
 | IUCN point archives | Production spatial membership at the containing resolution-7 cell | Configured 2026-1 inventory has 17 archives; points are unbuffered and uneven sampling effort is not corrected |
 | IUCN HydroBASINS relation tables | Production species-to-basin membership | Configured 2026-1 inventory has 14 archives; relations depend on an exact v1c `HYBAS_ID` join |
 | HydroBASINS v1c | Production geometry for referenced basin relationships | Basin polygons are distribution units, not direct observations or hydrological habitat-suitability models |
 | GoaT | Taxonomy-linked sequencing/project/assembly attributes | Missing evidence, inferred values, and project progress require distinct interpretation |
 | NCBI Taxonomy | Scientific names, synonyms, lineage, merged/deleted IDs | Taxonomic concepts can differ from IUCN concepts |
-| GBIF Backbone | Optional serving identifier enrichment; configured acquisition dependency | Pinned legacy backbone is not the same as the independently cached GBIF/CoL review service used in historical enrichment |
+| GBIF Backbone | Serving hotlinks and a separate legacy name-concept comparison | Legacy GBIF IDs remain distinct from COL XR IDs |
+| COL XR | Name-concept screening for the selected crosswalk | Conflict withholds transfer; agreement does not prove identifier identity |
+| OTT and dated tree | Separate taxonomy/tree identity evidence | Unique tip lookup does not grant genomic-transfer permission |
 | Optional EDGE table | Group label joined through IUCN ID | Neither an EDGE score nor a required pipeline input |
 | Natural Earth, Marine Regions EEZ, geoBoundaries, RESOLVE | Boundary context and filtering | Provider versions, territorial conventions, simplification, and missing countries affect scope |
 | Bird-provider and protected-area data | Not complete production integrations | Availability, authorization, schema and analytical semantics remain open |
@@ -154,8 +170,9 @@ clearance.
 
 Updates use configured releases, intervals, HTTP validators where useful, and
 checksums. A configured release is not an automatic guarantee that the latest
-provider release has been discovered. Without the optional authenticated IUCN
-catalogue, the operator must check release changes. Pinning an input hash proves
+provider release has been discovered. Authenticated IUCN release checks use the
+version endpoint independently of the optional full catalogue; without a token,
+the upstream release remains explicitly unchecked. Pinning an input hash proves
 which bytes were used, not that different providers describe the same date.
 
 ### GoaT extraction choices
@@ -198,6 +215,15 @@ technical debt against the [pipeline requirements](docs/reference/data_pipeline_
 
 ### Matching procedure
 
+COL XR is registered separately from the legacy GBIF backbone. The optional
+`taxonomy_review` comparison uses exact canonical names, documented synonyms,
+accepted species targets and supplied kingdom/family lineage. It retains separate
+COL/GBIF concept IDs, ambiguity and source hashes. Even a shared accepted name
+concept remains name evidence: it does not confirm IUCN/NCBI identifier identity,
+set `gbif_confirmed`, authorize trait transfer, or change the matcher below.
+The reviewed OTT pin remains tied to the dated-tree inputs; newer published OTT
+archives require retired-ID and tree-tip compatibility review before adoption.
+
 The matcher normalizes case and whitespace, restricts GoaT candidates to species
 rank, generates current-name and authoritative synonym matches, reconstructs
 lineage, combines evidence per distinct candidate TaxID, ranks candidates, and writes accepted and unresolved decisions
@@ -210,6 +236,16 @@ competing TaxIDs retain the ambiguity guards. Class/phylum rank shifts reduce
 conflicts only when the supplied label is an actual scientific-name ancestor in
 the registered NCBI lineage. Exported GoaT lineage can fill gaps for taxa absent
 from the pinned NCBI dump, with its source recorded separately.
+
+Before acceptance, explicit NCBI deletion/merge records, a current non-species
+rank, a normalized kingdom contradiction, or direct SIS evidence excluding the
+IUCN identity block the candidate. Animalia/Metazoa and Plantae/Viridiplantae are
+normalized aliases. Blocked candidates remain in the audit but do not hide a
+viable current candidate or count as viable ambiguity. Missing NCBI nodes are
+distinct from explicit retirement: exported lineage may support a reference
+link, but automatic species-trait transfer requires a current species node.
+Merged IDs retain their target and a reconciliation reason; they are not silently
+rewritten because downstream GoaT traits still reference the source identifier.
 
 The executable acceptance branches in `crosswalk_match.py` are:
 
@@ -230,18 +266,27 @@ precision, which still requires independent review.
 
 `safe_for_automatic_species_trait_transfer` means an accepted match maps to only
 one IUCN species within the supplied crosswalk and has accepted equivalence
-evidence rather than a partial-name relationship alone. It protects against detected
+evidence rather than a partial-name relationship alone. It also requires a current
+NCBI species node and no conflicting or multiple native SIS identities. It protects against detected
 split/lump relationships; it does not prove that the match is correct or that
-an assembly belongs to the same biological concept. The label `AI-review
-(GPT-5.6 Sol)` records the implemented review-policy label, not independent
-human expert sign-off on each automatically generated row.
+an assembly belongs to the same biological concept. New outputs use the policy
+label `deterministic-taxonomy-v2`; historical outputs used `AI-review (GPT-5.6 Sol)`.
+Neither label represents independent expert sign-off on individual rows.
 
-Automatic refresh uses registered IUCN, GoaT and NCBI snapshots. It does not
+The matching-only fallback uses registered IUCN, GoaT and NCBI snapshots when no
+screened product is registered. It does not
 silently reuse old optional GBIF/lineage review files. Historical enriched
 coverage of 126,285/171,604 species (73.59%) is therefore not the expected
 coverage of a fresh deterministic run, and neither percentage estimates match
 precision. A stratified independently reviewed reference set is still needed.
 See the [crosswalk history and workflow](docs/pipeline/06_iucn_goat_global_crosswalk.md).
+
+The selected screened product retains source/code lineage, the original matching
+and catalogue-preparation summaries, external audit and final transfer counts.
+Rebuilds validate its own checksum, receipt and all IUCN, GoaT, NCBI, COL XR,
+legacy GBIF, OTT and tree bindings before reusing it. The source pack remains
+private and is staged through the existing acquisition manifest, including for
+cloud rebuilds. Screening establishes policy consistency, not expert adjudication.
 
 GoaT native `redlist_category`, `redlist_population_trend`, and `redlist_scopes`
 are retained alongside their per-field origin and recorded SIS/assessment IDs.
@@ -250,8 +295,33 @@ ancestry-derived values are not species identity evidence. Category agreement
 is an audit signal, not independent identity evidence or a replacement for the
 IUCN assessment. Legacy exports remain supported with empty native fields.
 
-The audited September benchmark crosswalk, whose IUCN/GoaT hashes match the
-registered sources, contains 122,392 accepted links among 171,604 IUCN IDs
+GoaT v3 search currently omits raw source records. The optional versioned
+`sources_fetch_goat_provenance` supplement retrieves them through the batch-record
+API, checks document identities, and retains hashed batch receipts. The matcher
+uses raw IDs only when snapshot identity, scientific name, species rank and Red
+List summary agree. Live enrichment cannot silently replace snapshot taxonomy.
+
+The isolated `crosswalk_catalogue` investigation preserves the union of tabular
+and current-catalogue SIS identities, marks old-only identities explicitly, and
+updates assessment fields by SIS. It withholds old lineage for new or renamed
+catalogue taxa and carries systems only for unchanged assessment IDs. These
+prepared inputs are investigational, not a replacement registered IUCN export.
+Its optional `--taxon-evidence` accepts retrieved IUCN details only when the
+release, exact SIS ID, current scientific name, species rank, population flags
+and latest global assessment identity agree with the catalogue. Recovered
+classification and authority retain per-record checksums and an explicit API basis.
+`crosswalk_evidence` checks pinned COL XR and legacy GBIF name concepts plus
+explicit OTT identifiers and dated-tree tips. Its separate screened candidate
+withholds trait transfer on explicit COL concept conflict. Agreement creates no
+new matches; OTT/tree coverage never grants genomic-transfer permission.
+Supplying its matching catalogue `--scope` receipt also withholds transfer for
+tabular-only SIS identities pending reconciliation, while retaining their
+historical assessment and reference link. Absence from the catalogue is not
+treated as proof of taxonomic deletion. Scope/output hashes and complete SIS
+membership must reconcile before that screen is applied.
+
+The historical September benchmark crosswalk, whose IUCN/GoaT hashes matched the
+sources registered at that audit, contains 122,392 accepted links among 171,604 IUCN IDs
 (71.3223%), with 122,004 safe-transfer flags. It has 16,233 accepted rows with
 two or three recorded lineage conflicts. These conflicts can include different
 rank names/conventions between taxonomies and are not themselves a measured
@@ -287,8 +357,12 @@ is unchanged; polygon and HydroBASINS coverage use the selected mode.
 The profile ID and content hash distinguish saved results and receipts. Changing
 only the mode also changes the hash, so results must be rebuilt in a separate
 output directory rather than mixed across modes. Correct mode does not remove
-source-range uncertainty or v3 simplification error. No speedup or real-data
-coverage-difference percentage has been established for these two modes.
+source-range uncertainty or v3 simplification error. On IUCN 2026-1 polygons the
+two modes produced identical cell sets for all 683 stratified sample polygons and
+all 21,692 polygons in six regional windows; see
+[membership-rule sensitivity](#membership-rule-and-simplification-sensitivity).
+That is a measured sample, not proof that FAST never omits a contact. No speedup
+has been established for the two modes.
 
 | Attribute | Admitted values |
 | --- | --- |
@@ -528,16 +602,86 @@ geometry for affected rows, so it is approximate relative to the original map.
 Earlier calibration reported 113,377 omissions and 38,446 additions across
 57,410,051 reference cells for 50 tail geometries. Those aggregate percentages
 can hide large relative errors for individual species. They are historical
-measurements, not universal error guarantees. The current profiles have a
-displacement budget but no explicit per-species false-negative/false-positive
-acceptance limits. Following the transform correction, the calibration should
-be repeated with the same v3 row selection and simplification disabled for the
-reference. See [the detailed experiments](docs/performance/spatial_hierarchy_and_simplification_benchmark.md).
+measurements, not universal error guarantees. See
+[the detailed experiments](docs/performance/spatial_hierarchy_and_simplification_benchmark.md).
+The same-policy calibration after the transform correction is reported below.
+The current profiles still have a displacement budget but no explicit
+per-species false-negative/false-positive acceptance limits.
 
 Simplifying components independently and retaining rejected components is a
 possible future optimization. It is not implemented or scientifically approved
 by this review. Any new policy must also check interactions after reassembly.
 A valid nonempty geometry producing zero cells causes a build failure.
+
+### Membership-rule and simplification sensitivity
+
+A study run on 28 October 2026 compared any-touch with three more restrictive
+rules on IUCN 2026-1 polygons: cell centroid inside the range, and at least 10%
+or 25% of the cell's planar area overlapping the range. It used the same v3 row
+policy. The reference is exact any-touch on the unsimplified geometry. The study
+also measured the production v3 kernel (0.01° simplification) in correct and
+FAST modes against that reference. Overlap shares are planar in degrees within
+each cell. The restrictive rules have no fallback cell, so a range can vanish.
+
+Inputs and denominators:
+
+- The census found 130,108 polygon rows, of which 112,218 are eligible under v3.
+  They cover 76,284 species, and 35,583 polygons route to simplification
+  (bounding box ≥ 100 deg²).
+- The sample has 683 polygons, stratified by bounding-box size bin (the lowest
+  hash in each bin) and reweighted to the census.
+- Windows include every eligible polygon touching six 4° × 4° areas (21,692
+  polygons): eastern Madagascar, the Ecuadorian Andes, Sabah, the Sulawesi Sea,
+  Lake Malawi and Denmark. Between 768 and 4,393 species per window have cells
+  inside the window.
+- Cell scores use the default bucket score (threat weight × DNA-gap weight) and
+  species richness, not the branch-length table mode.
+- All 22,375 tasks completed. On the 623 sampled polygons that are not
+  simplified, the study's reference kernel matched the production kernel exactly.
+
+Mean share of an average species' any-touch cells omitted, reweighted to the
+census. No rule added cells, by construction.
+
+| Rule | Mean omitted | One-cell ranges lost | 2–10-cell ranges lost | > 100k-cell ranges, mean omitted |
+| --- | ---: | ---: | ---: | ---: |
+| Centroid inside | 16.7% | 113 of 121 | 78 of 153 | 2.1% |
+| ≥ 10% overlap | 7.3% | 109 of 121 | 36 of 153 | 0.7% |
+| ≥ 25% overlap | 11.8% | 116 of 121 | 68 of 153 | 1.3% |
+| v3 simplified, correct or FAST | 0.19% (+0.07% added) | 0 | 0 | 0.26% |
+
+Across the six windows, rank correlation between rule and reference cell
+priority was 0.73–0.99 for centroid, 0.92–0.997 for ≥ 10% and 0.85–0.99 for
+≥ 25%. Top-1% hotspot Jaccard against any-touch was 0.05–0.50, 0.47–0.75 and
+0.28–0.60 respectively. The restrictive rules removed up to 111 species from a
+window, almost all small ranges. Coastal Denmark changed most.
+
+Simplification affected 60 of the sampled polygons. On those, the mean cell-set
+Jaccard was 0.993 (minimum 0.951). Mean omission was 0.54% (maximum 3.0%) and
+mean addition 0.20% (maximum 2.2%). No sampled species lost all its cells; one
+low-weight species lost its two cells inside one window. Window rank correlation
+stayed at 0.977–0.9997. Top-1% Jaccard was nevertheless only 0.79–0.93: the top
+1% depends on edge cells even when per-species membership barely changes.
+
+Interpretation:
+
+- Any-touch remains the rule. Area and centroid rules would remove narrow-range
+  species and need a best-cell fallback before they could be compared fairly.
+- At a 0.2% average cell error, the 0.01° simplification is small next to
+  membership-rule choice. Acceptance limits still need reviewer agreement.
+- On this sample FAST and correct mode are interchangeable.
+- Report hotspots as top 5–10% sets or robustness shares, not as a single
+  top-1% boundary.
+
+Limitations:
+
+- Coastal ranges were not classified separately, because there is no coastline
+  layer. Window choice is purposive.
+- Points and HydroBASINS rows were not tested.
+- In the Madagascar window, 107 species each have seven any-touch cells but
+  exactly one cell with 10–25% overlap. This apparent common geometry pattern
+  has not yet been inspected.
+- Run with `python -m ark_pipeline.cli.spatial_rule_sensitivity`. Per-polygon
+  outputs are IUCN-derived and remain private.
 
 ## 8. Pair reduction and coarse aggregation
 
@@ -711,9 +855,12 @@ of those reduces sampling priority is a biological/project-management choice.
 
 ## 11. Priority scores and their interpretation
 
-The default species score is the product of a Red List category weight and a
-DNA-representation weight. The cell score is the sum over distinct species in
-the selected system:
+The map and its selected-cell species list use the product of a Red List
+category weight and a DNA-representation weight. The main species table defaults
+to expected unsequenced history lost, including withheld species at their upper
+bounds, and offers the original DNA buckets as an alternative (described below).
+The API retains `score=buckets` as its default when no score mode is requested.
+The bucket cell score is the sum over distinct species in the selected system:
 
 ```text
 species_priority(s) = threat_weight(s) * dna_weight(s)
@@ -770,9 +917,75 @@ counts those unscored rows explicitly. The inspected snapshot contains 455,
 The sum rewards richness as well as average species priority. Dividing by
 richness produces the mean included-species priority, not area-normalized
 priority, rarity-weighted richness, or a correction for incomplete sampling.
-Scores do not incorporate population trends, abundance, survey effort,
+Cell scores do not incorporate population trends, abundance, survey effort,
 accessibility, costs, legal feasibility, evolutionary branch lengths, or
 complementarity between candidate sampling locations.
+
+The main species table defaults to unsequenced history in place of the DNA
+bucket: the marginal-gap branch length in Myr from the phylogenetic generation (see
+"Optional headless analytical generations").
+It then scores species by expected history lost:
+
+```text
+expected_loss(s) = extinction_probability(s) * gap_myr(s)
+```
+
+`extinction_probability` is the median GE of the pinned dated-complete-tree
+`p_extinction.csv`, the point values used for EDGE2: CR 0.969488, EN 0.487548,
+VU 0.237338, NT 0.126919, LC 0.05631. DD has no category row and takes the pooled
+median, 0.232426, as the EDGE2 engine does for missing categories. The score
+reads as Myr of unsequenced history expected to be lost; it does not multiply by
+EDGE2, which would count threat twice. Species without a safe tree or genomic
+identity, and gaps flagged as baseline-incomplete upper bounds, remain unscored
+in stored-gap-only mode (`score=expected-loss`) and sort after scored species
+rather than being treated as zero. These fixed extinction probabilities are
+independent of the adjustable bucket weights. Map colours and selected-cell
+species priorities still use the bucket score, because cells serve only bucket
+joint counts.
+
+Withholding is conservative: in the 25 October generation 41% of the 115,408
+mapped species had no usable scored gap (30,395 unsafe genomic identity, 12,416
+without a tree identity, 2,464 baseline-incomplete, 1,894 outside the generation).
+The phylogenetic builder therefore records two upper bounds for every species with a
+verified tree placement, withheld or not:
+
+```text
+gap_upper_myr(s)       = PD(R ∪ {s}) − PD(R)
+gap_share_upper_myr(s) = Σ over uncovered branches b above s of length(b) / n_b
+```
+
+`R` is the represented set under the website DNA rule, which includes sample
+and project evidence and does not require a completed reference genome. Thus
+"unsequenced history" is conditional on that evidence rule, not a verified
+inventory of completed genomes. `n_b` counts the placed, non-extinct assessed
+species below branch `b` (extinct species claim no share). Both assume a withheld
+species is unsequenced unless it is itself represented, so they can only
+overstate its gap. The table
+mode `expected-loss-upper` ranks by `extinction_probability × gap_upper_myr`
+and answers "what does sequencing only this species gain?". It is the table
+default ("Include withheld species"); bounded values are shown with ≤, and
+switching it off restores stored gaps only. Species without a tree placement
+still have no bound and stay unscored.
+
+Marginal gaps are not additive. Sister species share their uncovered stem, so
+summing them counts that stem once per sister: on the local generation the
+marginal upper bounds summed to 7.55 million Myr against an uncovered branch
+union of 1.69 million Myr (×4.5). Fair shares split each uncovered branch equally
+among its claimants and sum exactly to the union, so they suit aggregation, such
+as a cell or country total ("how much of the remaining gap is this species
+responsible for?"). They are an attribution, not a sequencing gain: sequencing
+one sister of three recovers the whole shared stem, not a third of it. Joint gain
+for a set of species requires the branch union itself (see the roadmap's
+portfolio mode). The optional opportunity aggregation sums fair shares per cell
+and Red List category at resolutions 3 and 7, with a count of member species
+that have no share; these sums are not yet served on the map.
+
+The serving description assumes the `rooted-gap-bounds-v2` phylogenetic rebuild
+and PostgreSQL reload are complete, including the new `gap_upper_myr` values.
+The loader and optional analytical backend reject stale generation receipts.
+Existing scored rows can fall back to their stored gap in upper-bound mode;
+unavailable bounds remain null. A fair-share map layer additionally needs bundle
+delivery, controls and validation of the new per-cell category sums.
 
 Before recommending real sampling locations, compare rankings across defensible
 weight sets and DNA definitions, assess taxonomic coverage effects, and evaluate
@@ -821,6 +1034,15 @@ coverage, boundary memberships, and app statistics. Fine metrics and selected-
 cell species lists remain separate partitioned Parquet products. The legacy
 expanded `cell_species` relation supports small/compatibility builds; global
 builds avoid expanding tens of billions of relationships into PostgreSQL.
+
+`GLOBAL_SERVING_CONFIG` selects a validated bundle for `just start` / `just dev`
+and database loading. Its database, map artifacts and optional DNA, phylogenetic,
+spatial and membership generations must describe the same snapshot. Startup
+clears inherited analysis selections before applying the bundle's explicit
+environment; changing configuration requires restarting an existing server.
+Relocation uses a separate runtime descriptor and preserves scientific receipts.
+The 25 October FAST measurements quoted here describe that historical
+frozen-input build; they are not measurements of the rebuilt serving generation.
 
 Fine metrics evaluate predicates once per species, gather those flags by numeric
 ID, and reduce within Arrow lists with NumPy. This avoids a full expanded SQL
@@ -1007,13 +1229,23 @@ uncertainty. An assumed 80% worker efficiency is a planning assumption.
 
 The benchmark harness measures polygon source I/O/census, full reference
 matching, sample polygon pairs, lists, boundaries, metadata, coarse/fine metrics,
-reconciliation and actual tile compilation. It does not yet sample point CSV
+spatial range/stewardship analytics, reconciliation and actual tile compilation.
+It does not yet sample point CSV
 conversion, HydroBASINS relationship normalization, basin coverage, or the
 basin/species join. Production dashboards therefore show measured work for
 those phases but do not claim that the polygon-only ETA prior predicts them. A
 small polygon sample can cover nearly all global fine cells, so later stages are
 not necessarily small. The interrupted September run's tile stage cannot
 establish a completed total or a full tile speedup.
+
+When saved full-run timings are available, a separate full-build estimate
+combines them with fresh benchmark measurements and projections, including
+analytical stages. It identifies reused outputs, reconstructed timings and
+coverage/resource differences; restore and retention are separate cloud
+overheads. This mixed estimate is not a measured fresh end-to-end runtime.
+Preparation records command outcomes, progress, logs and five-second resource
+samples in every terminal mode; `--ui plain` changes presentation only. Historical
+25 October progress events do not supply a continuous resource series.
 
 The dashboard distinguishes whole-stage work from a query, polygon, partition
 or compiler phase. Run remaining/finish time requires estimates for every
@@ -1074,6 +1306,9 @@ cannot detect every wrong-but-present taxonomic match or misplaced range.
    holes, disconnected pieces, poles/date lines and large global geometries.
    Report per-geometry omitted/added cells, relative rates, local displacement,
    zero-coverage failures and repair effects, as well as global totals.
+   A first stratified per-geometry calibration and a membership-rule comparison
+   are reported in [§7](#membership-rule-and-simplification-sensitivity).
+   Local displacement, repair effects and named edge cases remain open.
 6. **Set acceptance limits in advance.** No new numerical omission/addition
    thresholds are invented here. A conservation/GIS reviewer must agree limits
    appropriate to the intended scale, including treatment of small populations.
@@ -1209,7 +1444,7 @@ Historical research artifacts remain local; rebuilt outputs carry their own sour
 
 ## Exploratory serving notebooks
 
-The three [serving notebooks](notebooks/README.md) are descriptive investigations,
+The three original [serving notebooks](notebooks/README.md) are descriptive investigations,
 not production replacements. They preserve the default threat/DNA ladder and
 check executable SQL against production predicates, including NULL and
 contradictory evidence states. A configured input identity hashes consumed
@@ -1236,6 +1471,46 @@ are undefined. Parent aggregation repeats child budgets rather than rebuilding
 deduplicated parent-species membership. Fixtures validate these code contracts,
 not global coverage, biological accuracy, causal inference or data-release rights.
 
+### Hotspot robustness, first pass
+
+`hotspot_robustness.py` scores every resolution-3 cell under a factorial grid of
+288 specifications: Data-Deficient weight (0, 1, 2, 4), six DNA measures (default
+ladder, exact-species, flat, and the three gap levels: stored only, marginal upper
+bound, fair-share upper bound), range rarity on/off, taxonomy transfer (all, safe
+transfer only, matched only) and assessment window (all or since 2015). Gap measures replace
+`dna_weight` with Myr and keep the threat weight, so they are comparisons of
+ranking shape, not a new default. `robustness(c)` is the share of the 144
+rarity-off specifications under which a cell stays in the top 5%.
+
+Measured on the 25 October snapshot:
+
+- Of 2,020 baseline top-5% cells, 1,477 (73%) are core (≥ 95% of specifications)
+  and 153 (8%) are fragile (< 50%). 139 cells outside the baseline top 5% enter
+  it under at least half the specifications; 2,769 cells are top-5% at least once.
+- Without rarity, rank order is stable (mean Spearman 0.93–0.95 against baseline
+  for every DNA measure). The extreme tail is less stable: mean top-1% Jaccard
+  is 0.84 for the default ladder, 0.78 for the gap upper bound, 0.67 for fair
+  share and 0.58 for stored gaps only.
+- Range rarity is the largest lever: switched on, mean top-5% overlap with the
+  baseline falls to 0.22. It answers a different question and should be shown
+  as a separate surface rather than a sensitivity of the default.
+- Stored-only gaps make the top 1% depend on which species happen to have a
+  safe identity; the upper bound recovers most of the baseline tail (top-1%
+  overlap 0.82 versus 0.61). Missing evidence behaves like zero evidence when
+  withheld species are dropped, which is why the bounds exist.
+- Fair share moves hotspots away from species-rich clades with shared stems
+  and toward isolated lineages: top-5% cell contacts fall for Colombia (29 → 8),
+  Mexico (22 → 4), Ecuador, Peru and Brazil and rise for Australia (209 → 266),
+  India, China, Indonesia and Senegal (0 → 12).
+- Summed EDGE2 per cell agrees with the baseline about as well as plain
+  threatened-species counts do (top-5% Jaccard 0.80 versus 0.78). Both cell
+  surfaces are dominated by richness.
+
+These describe the consumed snapshot and listed specifications. Geometry rules,
+crosswalk match quality and per-class scoring are not yet in the grid. A cell
+that is core here is robust to these choices, not validated against an
+independent conservation objective.
+
 
 ### Optional headless analytical generations
 
@@ -1245,7 +1520,7 @@ released global tree in compact parent/length/tip arrays. A postorder coverage p
 length pass calculate rooted marginal PD without a distance matrix. Nearest-tip
 distances are optional independent diagnostics. Original EDGE/EDGE2 components
 remain distinct from threat-weighted DNA gaps; EDGE risk summaries do not
-represent full tree/date uncertainty or adopt a new default ARK priority.
+represent full tree/date uncertainty or replace the bucket-based map priority.
 
 `dna_evidence.py` versions the exact website predicate separately from any
 recorded assembly and a taxon-level assembly/BUSCO proxy. Unknown observations,
@@ -1283,6 +1558,13 @@ Canonical serving-list parts are validated for disjoint base cells, strictly
 ordered cells and unique ordered species before analytics skip redundant SQL
 `DISTINCT`. Arbitrary or overlapping list inputs retain deduplication. Reordered
 floating-point area sums can differ at machine precision.
+Ordinary cell polygons use the same H3 boundary coordinates in bounded native
+geometry batches; dateline/polar cells retain the shared clipping path. Parallel
+jurisdiction batches are written in input order under the spatial worker budget.
+For canonical memberships, cell areas and jurisdiction tags are joined before
+species-list expansion, and global range metadata is joined after local
+species/jurisdiction reduction. This changes the execution plan, not the range
+denominator, overlap policy or area-fraction formula.
 
 Historical mammal baseline review retains its original flag calculation and
 review guard. Additional nonqualifying identity bridges are applied only after
@@ -1309,5 +1591,6 @@ reliability, biological completeness or scientific acceptance.
 Repair sensitivity is independent of simplification. A valid `buffer(0)`
 alternative is a sensitivity comparison, not an authoritative unrepaired
 reference or a new repair policy. Production zero-area and excessive area-change
-rejections stay in force. FAST simplified/unsimplified comparisons do not
-establish exact-contact error; correct coverage remains separately gated.
+rejections stay in force. FAST simplified/unsimplified comparisons alone do not
+establish exact-contact error. The §7 sensitivity study measured FAST against
+exact unsimplified any-touch directly. FAST matched correct mode on that sample.

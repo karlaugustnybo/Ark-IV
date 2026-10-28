@@ -29,6 +29,15 @@ BOUNDARY_SETTINGS = {
     "eez": "EEZ_BOUNDARIES_PATH",
     "conservation_framework": "CONSERVATION_BOUNDARIES_PATH",
 }
+ENRICHMENT_SETTINGS = (
+    'PHYLOGENETIC_GENERATION_PATH', 'DNA_GENERATION_PATH',
+    'SPATIAL_ANALYSIS_GENERATION_PATH', 'MEMBERSHIP_GENERATION_PATH',
+)
+
+
+def serving_environment(config: dict) -> dict[str, str]:
+    """Select enrichment with the bundle instead of inheriting another dataset."""
+    return {**os.environ, **dict.fromkeys(ENRICHMENT_SETTINGS, ''), **config['environment']}
 
 
 def pin(source: Path, target: Path) -> None:
@@ -405,10 +414,10 @@ def main():
             parser.error("This serving bundle has no PostgreSQL exports")
         return subprocess.call(
             [sys.executable, "-m", "backend.load_postgres"],
-            env={**os.environ, **config["environment"]},
+            env=serving_environment(config),
         )
     if args.command == "start":
-        return subprocess.call(["just", "serve"], env={**os.environ, **config["environment"]})
+        return subprocess.call(["just", "serve"], env=serving_environment(config))
     print(json.dumps({"status": "passed", "coverage": config["coverage"]}))
     return 0
 

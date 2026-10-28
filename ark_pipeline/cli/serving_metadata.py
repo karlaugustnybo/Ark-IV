@@ -66,6 +66,13 @@ def validate_crosswalk_sources(crosswalk: Path, manifest: dict) -> None:
             "crosswalk provenance is missing: match_summary.json; rebuild/review the crosswalk for the registered snapshots"
         )
     summary = json.loads(summary_path.read_text())
+    if 'screening_policy' in summary:
+        from ark_pipeline.cli.screened_crosswalk import validate
+
+        validate(crosswalk, summary, manifest)
+        return
+    if 'screened-crosswalk' in manifest.get('sources', {}):
+        raise ValueError('A screened crosswalk is registered; use derived/iucn-goat-crosswalk/current or re-screen before rebuilding')
     stale = [
         name
         for name, digest in expected.items()

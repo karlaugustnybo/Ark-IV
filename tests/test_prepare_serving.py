@@ -17,11 +17,19 @@ from ark_pipeline.runtime.dashboard import Dashboard
 from tests.test_pipeline_dashboard import prior
 
 
+def monitored_runner(callback):
+    """Adapt harmless stage stand-ins to the monitored runner boundary."""
+    def run(stage, output, environment, dashboard, cwd):
+        callback(stage['command'], cwd=cwd, env=environment, check=True)
+        return {'exit_code': 0}
+    return run
+
+
 class PrepareServingTests(unittest.TestCase):
     @unittest.skipUnless(shutil.which('just'), 'Recipe rendering requires just')
     def test_actual_recipes_keep_outputs_isolated_and_do_not_refresh_frozen_sources(self):
         with tempfile.TemporaryDirectory(prefix='ark isolated ') as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve()
             _, environment = preparation_plan(parser().parse_args([
                 '--root', str(root / 'inputs'), '--h3-root', str(root / 'memberships'),
                 '--preview-root', str(root / 'output'), '--workers', '4']))
@@ -52,41 +60,43 @@ class PrepareServingTests(unittest.TestCase):
             self.assertEqual(arguments[arguments.index('--memory-limit') + 1], '2GB')
 
     def test_registered_tree_and_stewardship_inputs_reach_optional_stages(self):
-        args = parser().parse_args(['--root', '/tmp/source', '--h3-root', '/tmp/lists',
-            '--spatial-analytics', '--spatial-jurisdictions', '/tmp/boundaries.parquet',
-            '--spatial-weights', '/tmp/weights.parquet', '--phylogenetic',
-            '--phylogenetic-links-dir', '/tmp/links', '--phylogenetic-ott-index', '/tmp/index.parquet',
-            '--phylogenetic-tree-tips', '/tmp/tips.parquet', '--phylogenetic-aggregates',
+        args = parser().parse_args(['--root', str(Path('/tmp/source').resolve()), '--h3-root', str(Path('/tmp/lists').resolve()),
+            '--spatial-analytics', '--spatial-jurisdictions', str(Path('/tmp/boundaries.parquet').resolve()),
+            '--spatial-weights', str(Path('/tmp/weights.parquet').resolve()), '--phylogenetic',
+            '--phylogenetic-links-dir', str(Path('/tmp/links').resolve()), '--phylogenetic-ott-index', str(Path('/tmp/index.parquet').resolve()),
+            '--phylogenetic-tree-tips', str(Path('/tmp/tips.parquet').resolve()), '--phylogenetic-aggregates',
             '--phylogenetic-scope', 'global'])
         with patch.dict('os.environ', {'DUCKDB_MEMORY_LIMIT': '256MB'}):
             commands, _ = preparation_plan(args)
         spatial, tree, aggregates = commands[1:]
-        self.assertEqual(spatial[spatial.index('--jurisdictions') + 1], '/tmp/boundaries.parquet')
-        self.assertEqual(spatial[spatial.index('--weights') + 1], '/tmp/weights.parquet')
+        self.assertEqual(spatial[spatial.index('--jurisdictions') + 1], str(Path('/tmp/boundaries.parquet').resolve()))
+        self.assertEqual(spatial[spatial.index('--weights') + 1], str(Path('/tmp/weights.parquet').resolve()))
         self.assertEqual(spatial[spatial.index('--memory-limit') + 1], '256MB')
         self.assertNotIn('--input-dir', tree)
-        self.assertEqual(tree[tree.index('--ott-index') + 1], '/tmp/index.parquet')
-        self.assertEqual(tree[tree.index('--tree-tips') + 1], '/tmp/tips.parquet')
+        self.assertEqual(tree[tree.index('--ott-index') + 1], str(Path('/tmp/index.parquet').resolve()))
+        self.assertEqual(tree[tree.index('--tree-tips') + 1], str(Path('/tmp/tips.parquet').resolve()))
         self.assertEqual(tree[tree.index('--scope') + 1], 'global')
         self.assertEqual(aggregates[2], 'ark_pipeline.cli.analytical_prepare')
         for flags in (['--phylogenetic'], ['--phylogenetic-aggregates'], ['--phylogenetic-scope', 'global'],
-                      ['--spatial-weights', '/tmp/weights.parquet']):
+                      ['--spatial-weights', str(Path('/tmp/weights.parquet').resolve())]):
             with self.subTest(flags=flags), self.assertRaises(ValueError):
                 preparation_plan(parser().parse_args(flags))
 
     def test_boundary_catalogues_are_forwarded_and_ambiguous_options_fail_early(self):
-        flags = ['--spatial-analytics', '--spatial-boundary-catalogue', 'admin0=/tmp/country.geojson']
+        flags = ['--spatial-analytics', '--workers', '4', '--spatial-workers', '2',
+                 '--spatial-boundary-catalogue', f"admin0={Path('/tmp/country.geojson').resolve()}"]
         commands, _ = preparation_plan(parser().parse_args(flags))
         spatial = commands[-1]
-        self.assertEqual(spatial[spatial.index('--boundary-catalogue') + 1], 'admin0=/tmp/country.geojson')
-        for extra in (['--spatial-jurisdictions', '/tmp/prepared.parquet'],
+        self.assertEqual(spatial[spatial.index('--boundary-catalogue') + 1], f"admin0={Path('/tmp/country.geojson').resolve()}")
+        self.assertEqual(spatial[spatial.index('--workers') + 1], '2')
+        for extra in (['--spatial-jurisdictions', str(Path('/tmp/prepared.parquet').resolve())],
                       ['--spatial-boundary-catalogue', 'admin0=/tmp/other.geojson']):
             with self.assertRaises(ValueError):
                 preparation_plan(parser().parse_args(flags + extra))
 
     def test_optional_analyses_keep_pinned_crosswalk_and_membership_generations(self):
         with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()):
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             for name in ('first', 'second'):
                 (root / name).mkdir()
                 (root / name / 'crosswalk.parquet').touch()
@@ -99,7 +109,7 @@ class PrepareServingTests(unittest.TestCase):
                     current.unlink()
                     current.symlink_to('second')
             with patch('ark_pipeline.cli.serving_prepare.load_manifest', return_value={}), \
-                 patch('ark_pipeline.cli.serving_prepare.subprocess.run', side_effect=run):
+                 patch('ark_pipeline.cli.serving_prepare.run_command', side_effect=monitored_runner(run)):
                 self.assertEqual(main(['--root', str(root), '--h3-root', str(current),
                     '--crosswalk', str(current / 'crosswalk.parquet'), '--preview-root', str(root / 'out'),
                     '--dna-evidence', '--spatial-analytics', '--ui', 'plain']), 0)
@@ -109,7 +119,7 @@ class PrepareServingTests(unittest.TestCase):
 
     def test_rich_build_tracks_nested_stages_and_drops_stale_prior_after_acquisition(self):
         with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):
-            root = Path(temporary)
+            root = Path(temporary).resolve()
             h3_root = root / "lists"
             h3_root.mkdir()
             crosswalk = root / "crosswalk.parquet"
@@ -146,7 +156,7 @@ class PrepareServingTests(unittest.TestCase):
 
     def test_automatic_refresh_precedes_pairs_and_pins_matches_through_tiles(self) -> None:
         with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):
-            root = Path(temporary)
+            root = Path(temporary).resolve()
             crosswalk_root = root / "derived/iucn-goat-crosswalk"
             first, second = crosswalk_root / "generations/first", crosswalk_root / "generations/second"
             spatial = root / "spatial"
@@ -169,7 +179,7 @@ class PrepareServingTests(unittest.TestCase):
             args = ["--root", str(root), "--preview-root", str(root / "preview"),
                     "--spatial-root", str(spatial), "--crosswalk", str(root / "old-missing.parquet"),
                     "--acquire", "download", "--crosswalk-mode", "refresh", "--build-pairs", "--tiles"]
-            with patch("ark_pipeline.cli.serving_prepare.subprocess.run", side_effect=run), \
+            with patch("ark_pipeline.cli.serving_prepare.run_command", side_effect=monitored_runner(run)), \
                  patch("ark_pipeline.cli.serving_prepare.load_manifest", return_value={}):
                 self.assertEqual(main(args), 0)
             self.assertEqual([command[2] for command, _ in received[:4]],
@@ -184,13 +194,13 @@ class PrepareServingTests(unittest.TestCase):
                 if command[1:3] == ["-m", "ark_pipeline.cli.crosswalk_refresh"]:
                     raise subprocess.CalledProcessError(1, command)
 
-            with patch("ark_pipeline.cli.serving_prepare.subprocess.run", side_effect=fail_refresh):
+            with patch("ark_pipeline.cli.serving_prepare.run_command", side_effect=monitored_runner(fail_refresh)):
                 self.assertEqual(main(args), 1)
             self.assertEqual(len(received), 2)
 
     def test_complete_build_checks_updated_crosswalk_before_pairs_and_can_resume(self) -> None:
         with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):
-            root = Path(temporary)
+            root = Path(temporary).resolve()
             crosswalk = root / "crosswalk.parquet"
             crosswalk.touch()
             summary = root / "match_summary.json"
@@ -216,7 +226,7 @@ class PrepareServingTests(unittest.TestCase):
             args = ["--root", str(root), "--spatial-root", str(spatial),
                     "--crosswalk", str(crosswalk), "--preview-root", str(root / "preview"),
                     "--acquire", "update", "--build-pairs", "--tiles"]
-            with patch("ark_pipeline.cli.serving_prepare.subprocess.run", side_effect=run):
+            with patch("ark_pipeline.cli.serving_prepare.run_command", side_effect=monitored_runner(run)):
                 self.assertEqual(main(args), 1)
                 self.assertEqual(len(received), 1)
                 report = json.loads((root / "preview/prepare-report.json").read_text())
@@ -235,11 +245,11 @@ class PrepareServingTests(unittest.TestCase):
 
     def test_complete_build_preserves_acquisition_action_required_and_dry_run_is_read_only(self) -> None:
         with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):
-            root = Path(temporary)
+            root = Path(temporary).resolve()
             preview = root / "preview"
             args = ["--root", str(root), "--preview-root", str(preview),
                     "--acquire", "download", "--crosswalk-mode", "refresh", "--build-pairs", "--tiles"]
-            with patch("ark_pipeline.cli.serving_prepare.subprocess.run") as run:
+            with patch("ark_pipeline.cli.serving_prepare.run_command") as run:
                 self.assertEqual(main([*args, "--dry-run"]), 0)
                 run.assert_not_called()
                 self.assertFalse(preview.exists())
@@ -252,24 +262,24 @@ class PrepareServingTests(unittest.TestCase):
 
     def test_new_profile_is_selected_even_when_environment_still_points_at_legacy_pack(self) -> None:
         with patch.dict("os.environ", {"GLOBAL_H3_ROOT": "/previous/pack"}):
-            args = parser().parse_args(["--root", "/tmp/new release", "--profile", str(DEFAULT_PROFILE)])
+            args = parser().parse_args(["--root", str(Path('/tmp/new release').resolve()), "--profile", str(DEFAULT_PROFILE)])
             commands, environment = preparation_plan(args)
         self.assertEqual(commands[0][1:4], ["-m", "ark_pipeline.cli.spatial_aggregate", "run"])
         self.assertEqual(commands[-1], ["just", "global-prepare"])
         self.assertEqual(environment["GLOBAL_H3_ROOT"], str(
-            Path("/tmp/new release/derived/iucn-richness-any-touch-v3/serving/current").resolve()
+            Path(str(Path('/tmp/new release/derived/iucn-richness-any-touch-v3/serving/current').resolve())).resolve()
         ))
-        self.assertEqual(commands[0][5], str(Path("/tmp/new release").resolve()))
+        self.assertEqual(commands[0][5], str(Path(str(Path('/tmp/new release').resolve())).resolve()))
 
     def test_explicit_legacy_pack_skips_export(self) -> None:
-        args = parser().parse_args(["--h3-root", "/tmp/old lists"])
+        args = parser().parse_args(["--h3-root", str(Path('/tmp/old lists').resolve())])
         commands, environment = preparation_plan(args)
         self.assertEqual(commands, [["just", "global-prepare"]])
-        self.assertEqual(environment["GLOBAL_H3_ROOT"], str(Path("/tmp/old lists").resolve()))
+        self.assertEqual(environment["GLOBAL_H3_ROOT"], str(Path(str(Path('/tmp/old lists').resolve())).resolve()))
 
     def test_preparation_pins_the_generation_created_by_export(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve()
             crosswalk = root / "crosswalk.parquet"
             crosswalk.touch()
             spatial = root / "spatial"
@@ -282,7 +292,7 @@ class PrepareServingTests(unittest.TestCase):
                 if len(received) == 1:
                     (spatial / "serving/current").symlink_to("generations/new")
 
-            with patch("ark_pipeline.cli.serving_prepare.subprocess.run", side_effect=run), \
+            with patch("ark_pipeline.cli.serving_prepare.run_command", side_effect=monitored_runner(run)), \
                  patch("ark_pipeline.cli.serving_prepare.load_manifest", return_value={}), \
                  contextlib.redirect_stdout(io.StringIO()):
                 status = main([
@@ -293,10 +303,14 @@ class PrepareServingTests(unittest.TestCase):
             self.assertEqual(len(received), 2)
             self.assertEqual(received[-1][1], str(generation.resolve()))
             self.assertTrue((root / "preview/prepare-report.json").is_file())
+            report = json.loads((root / 'preview/prepare-report.json').read_text())
+            recording = Path(report['progress_directory'])
+            self.assertTrue((recording / 'dashboard-state.json').is_file())
+            self.assertEqual(len(report['stage_measurements']), len(received))
 
     def test_missing_crosswalk_stops_before_export_and_dry_run_does_not_build(self) -> None:
         with tempfile.TemporaryDirectory() as temporary, \
-             patch("ark_pipeline.cli.serving_prepare.subprocess.run") as run, \
+             patch("ark_pipeline.cli.serving_prepare.run_command") as run, \
              contextlib.redirect_stdout(io.StringIO()):
             args = ["--root", temporary, "--crosswalk", str(Path(temporary) / "absent"),
                     "--preview-root", str(Path(temporary) / "preview")]
@@ -306,7 +320,7 @@ class PrepareServingTests(unittest.TestCase):
 
     def test_tiles_continue_with_the_same_pinned_generation(self) -> None:
         with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):
-            root = Path(temporary)
+            root = Path(temporary).resolve()
             first, second = root / "first", root / "second"
             first.mkdir()
             second.mkdir()
@@ -322,7 +336,7 @@ class PrepareServingTests(unittest.TestCase):
                     current.unlink()
                     current.symlink_to(second)
 
-            with patch("ark_pipeline.cli.serving_prepare.subprocess.run", side_effect=run), \
+            with patch("ark_pipeline.cli.serving_prepare.run_command", side_effect=monitored_runner(run)), \
                  patch("ark_pipeline.cli.serving_prepare.load_manifest", return_value={}):
                 status = main(["--root", str(root), "--h3-root", str(current),
                                "--crosswalk", str(crosswalk), "--preview-root", str(root / "preview"), "--tiles"])

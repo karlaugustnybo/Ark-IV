@@ -1,5 +1,4 @@
 <script lang="ts">
-  import Sliders from '$lib/components/Sliders.svelte';
   import SpeciesTable from '$lib/components/SpeciesTable.svelte';
   import TableFilters from '$lib/components/TableFilters.svelte';
 </script>
@@ -11,7 +10,6 @@
     Explore sequencing status by species or family with typo-tolerant text search, sorting, spatial
     filters, and custom scoring.
   </p>
-  <Sliders showSystems={false} />
   <TableFilters />
   <SpeciesTable />
 </main>

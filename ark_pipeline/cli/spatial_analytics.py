@@ -12,6 +12,7 @@ import pyarrow.parquet as pq
 
 from ark_pipeline.aggregation.species_lists import _publish_current, signature, write_receipt
 from ark_pipeline.builders.spatial_analytics import build_jurisdictions, build_spatial_analytics
+from ark_pipeline.runtime.progress import emit, tracked_stage
 from ark_pipeline.runtime.provenance import (
     code_fingerprint,
     dependency_identity,
@@ -19,6 +20,7 @@ from ark_pipeline.runtime.provenance import (
     receipt_is_current,
     sha256,
 )
+from ark_pipeline.runtime.resources import positive_int
 
 
 def checked_memberships(path: Path, profile: str | None = None) -> tuple[Path, str, list[Path]]:
@@ -51,7 +53,9 @@ def checked_memberships(path: Path, profile: str | None = None) -> tuple[Path, s
     return source, receipt_hash, fine
 
 
+@tracked_stage('spatial_analytics')
 def build(args):
+    emit('phase', phase='Verify membership publication', force=True)
     source, membership_hash, fine = checked_memberships(args.h3_root, args.profile)
     catalogues = getattr(args, 'boundary_catalogue', None) or []
     boundaries = dict(catalogues)
@@ -97,13 +101,17 @@ def build(args):
         jurisdictions = args.jurisdictions
         boundary_result = {}
         if boundaries:
+            emit('phase', phase='Mapped-cell jurisdiction intersections', force=True)
             jurisdictions = target / 'jurisdictions.parquet'
-            boundary_result = build_jurisdictions(connection, fine, boundaries, jurisdictions)
+            boundary_result = build_jurisdictions(connection, fine, boundaries, jurisdictions,
+                                                  workers=getattr(args, 'workers', 1))
+        emit('phase', phase='Global range and stewardship aggregation', force=True)
         result = build_spatial_analytics(connection, fine,
             target / 'work', profile=args.profile, membership_generation=identity['memberships'],
             coverage_status=args.coverage_status, jurisdictions=jurisdictions, weights=args.weights,
             omissions=getattr(args, 'omissions', None))
     result.update(boundary_result)
+    emit('phase', phase='Validate and publish spatial analytics', force=True)
     outputs = {p.stem: p for p in (target / 'work').glob('*.parquet')}
     if boundaries:
         outputs['jurisdictions'] = jurisdictions
@@ -137,6 +145,8 @@ def main(argv=None):
     p.add_argument('--omissions', type=Path, help='Pinned missing_basin_relationships.parquet audit')
     p.add_argument('--memory-limit', default='1GB')
     p.add_argument('--threads', type=int, default=1)
+    p.add_argument('--workers', type=positive_int, default=1,
+                   help='Bounded jurisdiction-intersection workers; SQL uses --threads separately.')
     p.add_argument('--scratch-dir', type=Path, required=True)
     print(json.dumps(build(p.parse_args(argv)), indent=2))
     return 0

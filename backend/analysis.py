@@ -30,6 +30,10 @@ class PhylogeneticSpeciesRow:
     represented: bool | None
     baseline_incomplete: bool
     availability_reason: str | None
+    # Bounds over every placed species, withheld ones included; see methodology.
+    gap_upper_myr: float | None = None
+    gap_share_upper_myr: float | None = None
+    redlist_category: str | None = None
     evidence_state: str = 'unknown'
     qualifying_evidence: bool | None = None
     sample_reported: bool | None = None

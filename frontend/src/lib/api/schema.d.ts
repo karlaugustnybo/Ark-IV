@@ -350,6 +350,9 @@ export interface components {
             represented: boolean | null;
             baseline_incomplete: boolean;
             availability_reason: string | null;
+            gap_upper_myr?: number | null;
+            gap_share_upper_myr?: number | null;
+            redlist_category?: string | null;
             /** @default unknown */
             evidence_state: string;
             qualifying_evidence?: boolean | null;
@@ -450,11 +453,17 @@ export interface components {
             redlist_category: string;
             threat_score: number;
             dna_level: string;
-            priority: number;
+            priority: number | null;
             /** @default assessed */
             metadata_status: string;
             spatial_redlist_category?: string | null;
             iucn_assessment_latest?: boolean | null;
+            gap_myr?: number | null;
+            gap_upper_myr?: number | null;
+            edge2_myr_median?: number | null;
+            edge2_myr_p025?: number | null;
+            edge2_myr_p975?: number | null;
+            phylogenetic_status?: string | null;
         };
         /** SpeciesSuggestion */
         SpeciesSuggestion: {
@@ -845,6 +854,7 @@ export interface operations {
                 municipality?: string;
                 eez?: string;
                 conservation_framework?: string;
+                score?: "buckets" | "expected-loss" | "expected-loss-upper";
                 coverage_profile?: "resident" | "with-passage";
             };
             header?: never;

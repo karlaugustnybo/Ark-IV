@@ -128,7 +128,100 @@ def register(root: Path) -> None:
 
 
 class RefreshCrosswalkTests(unittest.TestCase):
-    def run_matcher(self, root, bridge=None, validation=None):
+    def test_managed_raw_provenance_receipt_and_stale_input_rejection(self):
+        from ark_pipeline.cli.sources_fetch_goat_provenance import API, normalize_batch
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            fixture(root)
+            raw = root / 'raw.json'
+            supplement = {'schema_version': 1, 'api': API,
+                          'goat_snapshot_sha256': sha256(root / 'sources/tol_species_all_ranks.tsv'),
+                          'rows': normalize_batch({'status': {'success': True}, 'records': [{'record': {
+                              'taxon_id': '10', 'scientific_name': 'Panthera leo', 'taxon_rank': 'species',
+                              'attributes': [],
+                          }}]}, ['10'])}
+            raw.write_text(json.dumps(supplement))
+            output = root / 'managed'
+            refresh(root, output, memory_limit='256MB', threads=1, goat_provenance=raw)
+            current = (output / 'current').resolve()
+            receipt = json.loads((current / 'receipt.json').read_text())
+            self.assertEqual(receipt['identity']['inputs']['goat_raw_provenance']['sha256'], sha256(raw))
+            supplement['goat_snapshot_sha256'] = '0' * 64
+            raw.write_text(json.dumps(supplement))
+            with self.assertRaisesRegex(ValueError, 'different registered snapshot'):
+                refresh(root, output, memory_limit='256MB', threads=1, goat_provenance=raw)
+            self.assertEqual((output / 'current').resolve(), current)
+
+    def test_deleted_competitor_does_not_hide_a_valid_current_candidate(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            fixture(root)
+            goat = root / 'sources/tol_species_all_ranks.tsv'
+            with goat.open() as handle:
+                reader = csv.DictReader(handle, delimiter='\t')
+                fields, rows = reader.fieldnames, list(reader)
+            duplicate = {**rows[0], 'taxon_id': '17'}
+            with goat.open('a') as handle:
+                csv.DictWriter(handle, fieldnames=fields, delimiter='\t').writerow(duplicate)
+            with (root / 'sources/nodes.dmp').open('a') as handle:
+                handle.write('\t|\t'.join(['17', '7', 'species'] + [''] * 10) + '\t|\n')
+            with (root / 'sources/names.dmp').open('a') as handle:
+                handle.write('17\t|\tPanthera leo\t|\t\t|\tscientific name\t|\n')
+            with (root / 'sources/delnodes.dmp').open('a') as handle:
+                handle.write('10\t|\n')
+            crosswalk = self.run_matcher(root)
+            with duckdb.connect() as con:
+                row = con.execute('SELECT matched_ncbi_species_taxid,safe_for_automatic_species_trait_transfer FROM read_parquet(?) WHERE iucn_sis_id=101', [str(crosswalk)]).fetchone()
+            self.assertEqual(row, ('17', True))
+
+    def test_identity_contradictions_withhold_acceptance_and_transfer(self):
+        for case, reason in (
+            ('deleted', 'NCBI_DELETED_ID'),
+            ('merged', 'NCBI_MERGED_ID_REQUIRES_RECONCILIATION'),
+            ('rank', 'NCBI_SPECIES_RANK_CONFLICT'),
+            ('kingdom', 'KINGDOM_CONFLICT'),
+            ('sis', 'DIRECT_SIS_CONFLICT'),
+            ('kingdom_alias', None),
+        ):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                fixture(root)
+                if case in {'kingdom', 'kingdom_alias'}:
+                    p = root / 'sources/taxonomy.csv'
+                    p.write_text(p.read_text().replace('Animalia', 'Plantae' if case == 'kingdom' else 'Metazoa'))
+                if case == 'rank':
+                    p = root / 'sources/nodes.dmp'
+                    p.write_text(p.read_text().replace('10\t|\t7\t|\tspecies', '10\t|\t7\t|\tsubspecies'))
+                if case in {'deleted', 'merged'}:
+                    name = 'delnodes.dmp' if case == 'deleted' else 'merged.dmp'
+                    with (root / 'sources' / name).open('a') as handle:
+                        handle.write('10\t|\n' if case == 'deleted' else '10\t|\t11\t|\n')
+                if case == 'sis':
+                    p = root / 'sources/tol_species_all_ranks.tsv'
+                    with p.open() as handle:
+                        reader = csv.DictReader(handle, delimiter='\t')
+                        fields, rows = reader.fieldnames, list(reader)
+                    rows[0]['redlist_category'] = 'VU'
+                    rows[0]['field_provenance_json'] = json.dumps({'redlist_category': {
+                        'aggregation_source': 'direct', 'rawValues': [
+                            {'metadata': {'source': {'slug': '999/1999'}}}
+                        ]}})
+                    with p.open('w') as handle:
+                        writer = csv.DictWriter(handle, fieldnames=fields, delimiter='\t')
+                        writer.writeheader()
+                        writer.writerows(rows)
+                crosswalk = self.run_matcher(root)
+                with duckdb.connect() as con:
+                    status, safe, block = con.execute(
+                        'SELECT match_status,safe_for_automatic_species_trait_transfer,identity_block_reason '
+                        'FROM read_parquet(?) WHERE iucn_sis_id=101', [str(crosswalk)]
+                    ).fetchone()
+                self.assertEqual(status, 'MATCHED' if reason is None else 'REVIEW_UNRESOLVED')
+                self.assertEqual(safe, reason is None)
+                self.assertEqual(block, reason)
+
+    def run_matcher(self, root, bridge=None, validation=None, provenance=None):
         output = root / "matched"
         command = [sys.executable, "-m", "ark_pipeline.cli.crosswalk_match",
                    "--iucn-taxonomy", str(root / "sources/taxonomy.csv"),
@@ -144,8 +237,51 @@ class RefreshCrosswalkTests(unittest.TestCase):
             path = root / "validation.json"
             path.write_text(json.dumps({"rows": validation}))
             command += ["--gbif-validation-json", str(path)]
+        if provenance is not None:
+            path = root / 'raw-provenance.json'
+            path.write_text(json.dumps(provenance))
+            command += ['--goat-provenance-json', str(path)]
         subprocess.run(command, check=True, capture_output=True, text=True)
         return output / "iucn_goat_crosswalk.parquet"
+
+    def test_raw_provenance_requires_snapshot_summary_and_identity_agreement(self):
+        from ark_pipeline.cli.sources_fetch_goat_provenance import API, normalize_batch
+
+        for case in ('conflicting_sis', 'changed_name', 'changed_summary', 'reordered_summary', 'wrong_snapshot'):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                fixture(root)
+                # Make the frozen summary agree with the live record by default.
+                goat = root / 'sources/tol_species_all_ranks.tsv'
+                with goat.open() as handle:
+                    reader = csv.DictReader(handle, delimiter='\t')
+                    fields, rows = reader.fieldnames, list(reader)
+                rows[0]['redlist_category'] = 'VU;EN' if case == 'reordered_summary' else 'VU'
+                with goat.open('w') as handle:
+                    writer = csv.DictWriter(handle, fieldnames=fields, delimiter='\t')
+                    writer.writeheader()
+                    writer.writerows(rows)
+                body = {'status': {'success': True}, 'records': [{'record': {
+                    'taxon_id': '10', 'scientific_name': 'Changed name' if case == 'changed_name' else 'Panthera leo',
+                    'taxon_rank': 'species', 'attributes': [{
+                        'key': 'redlist_category', 'aggregation_source': 'direct',
+                        'keyword_value': ['EN', 'VU'] if case == 'reordered_summary' else ['EN' if case == 'changed_summary' else 'VU'],
+                        'values': [{'metadata': {'source': {'slug': '999/1999'}}}],
+                    }],
+                }}]}
+                provenance = {'schema_version': 1, 'api': API,
+                              'goat_snapshot_sha256': '0' * 64 if case == 'wrong_snapshot' else sha256(goat),
+                              'rows': normalize_batch(body, ['10'])}
+                if case == 'wrong_snapshot':
+                    with self.assertRaises(subprocess.CalledProcessError):
+                        self.run_matcher(root, provenance=provenance)
+                    continue
+                path = self.run_matcher(root, provenance=provenance)
+                with duckdb.connect() as con:
+                    status, reason = con.execute('SELECT match_status,identity_block_reason FROM read_parquet(?) WHERE iucn_sis_id=101', [str(path)]).fetchone()
+                conflict = case in {'conflicting_sis', 'reordered_summary'}
+                self.assertEqual(status, 'REVIEW_UNRESOLVED' if conflict else 'MATCHED')
+                self.assertEqual(reason, 'DIRECT_SIS_CONFLICT' if conflict else None)
 
     def test_independent_gbif_near_name_keeps_its_relation(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -391,7 +527,7 @@ class RefreshCrosswalkTests(unittest.TestCase):
             self.assertTrue(bridge[8])
             self.assertFalse(bridge[9])
             self.assertEqual(confirmed[0], "AI_NEAR_NAME_REVIEW")
-            self.assertEqual(confirmed[1], "AI-review (GPT-5.6 Sol)")
+            self.assertEqual(confirmed[1], "deterministic-taxonomy-v2")
             self.assertTrue(confirmed[2])
             self.assertIn("GOAT_REDLIST_SIS_SLUG", confirmed[3])
             self.assertEqual(confirmed[4], "VU")

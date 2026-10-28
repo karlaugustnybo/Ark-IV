@@ -1,5 +1,48 @@
 # Pipeline acceptance and the full-run gate
 
+Run outcome and monitoring limitations: [25 October FAST run report](14_fast_run_report_2026_10_25.md).
+
+**Full FAST completion, 25 October:** all eight preparation commands passed
+on the reviewed frozen inputs. The continuation build took 13,729.2 seconds
+(3 h 49 m), excluding restoration and retention. Final private catalogue
+`scoring-full-candidate-final:v0` is independently confirmed `COMMITTED`; its
+inventory matches the recovered retention receipt for 21,718,538,240 bytes.
+All four full-run/diagnostic workers are confirmed stopped and monitoring is
+disabled. Lifetime compute reservations total $35.7504, not an invoice.
+
+The spatial output covers 96,631,588 fine cells and 115,408 mapped species,
+with 92,966,356 jurisdiction memberships. DNA retains 171,604 assessed records;
+the complete phylogeny retains 2,294,776 tips and scores 150,270 assessed tips.
+DNA, spatial, phylogenetic and opportunity receipts passed; tiles passed.
+This supersedes the earlier incomplete execution status. Known basin omissions
+remain explicit. The latest-data request remains unmet; correct-path coverage,
+scientific adoption and website controls remain separate work. Local database
+loading and serving selection were subsequently completed and checked. The earlier native crash did not recur and its root
+cause remains unresolved. The final pack was subsequently downloaded, checksum-verified and restored
+for local serving; see the run report for the checks and remaining limits.
+The three superseded local serving bundles were archived to ERDA with full
+checksum readback before removal. The [event analysis](../performance/2026-10-25_fast_run_events.md)
+identifies spatial analytics as the dominant continuation interval and records
+the limits of historical monitoring.
+
+**Full FAST execution, 22 October: incomplete.** The first eight-hour worker
+completed spatial pairs, aggregation and all 122 fine partitions, then reached
+its build deadline during spatial analytics. Its interrupted checkpoint was
+committed privately. The authorized four-hour continuation restored all packs
+with SHA-256 verification and reused the completed geometry and fine partitions,
+but `serving_tiles record` crashed with exit code 139 inside `global-prepare`.
+The exact native cause is not established; the cgroup reported no OOM kills.
+The continuation retained `scoring-full-candidate-interrupted:v1` (20,089,487,360
+bytes) in the existing private storage project. Local private diagnostics include
+`fullrun/continuation-status.json`, `continuation-retention.json` and
+`continuation-build.log`. Both owned workers are confirmed stopped and the
+monitor schedule is disabled. Maximum lifetime compute reservations total
+$20.4288; this is not an invoice. No additional allocation or duplicate build was
+started after this failure. DNA/phylogenetic/opportunity/tile completion is not
+established for this candidate. Inputs remain the reviewed frozen snapshots;
+the latest-data request is still unmet after the GoaT provider refresh failed.
+Correct-path validation, database loading and activation were not run.
+
 This is the execution companion to [the plan](10_phylogenetic_scoring_plan.md)
 and [implementation guide](11_scoring_implementation.md). It separates completed
 code/fixture work from unperformed full-data execution. Passing fixtures does

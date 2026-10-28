@@ -7,7 +7,18 @@ family-clustered conditional logistic models, and reports cohort and dark-set
 cuts. `score_surfaces_investigation.py` compares the unchanged default ladder
 with exploratory rarity, weight, date, class and boundary specifications, checks
 range conservation and spatial dependence, and explores stewardship and score
-components. These investigations do not alter serving artifacts or production
+components. `hotspot_robustness.py` scores the full factorial grid of those
+alternatives (Data-Deficient weight, DNA measure, rarity, taxonomic transfer,
+assessment window; 288 specifications) and computes the roadmap's
+`robustness(c)` top-5% share. The DNA measures include three phylogenetic gap
+levels: stored `gap_myr` only, the marginal upper bound for every placed species,
+and the fair-share upper bound that splits each uncovered branch among the
+unsequenced species below it. The bounds are recomputed from the generation's
+`tree.parquet` and `evidence.parquet` under the website DNA rule and must match
+the stored gaps exactly. It has no local default: set
+`ARK_NOTEBOOK_EXPORTS` and `ARK_NOTEBOOK_PHYLOGENETIC` (an
+`analysis/phylogenetic/generations/<id>` directory from the same run). It reads
+transfer safety from that generation rather than the crosswalk. These investigations do not alter serving artifacts or production
 scores. Numerical outputs describe only the consumed snapshot and selected
 cohorts, not all described life.
 

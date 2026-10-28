@@ -40,6 +40,8 @@ stage-based CLI names and artifact-based builders.
 - [Serving metrics](performance/serving_metrics_performance.md)
 - [Tile export](performance/tile_export_performance.md)
 - [Spatial hierarchy and simplification](performance/spatial_hierarchy_and_simplification_benchmark.md)
+- [25 October FAST continuation event analysis](performance/2026-10-25_fast_run_events.md)
+- [Spatial analytics optimization and stage-only cloud benchmarks](performance/spatial_analytics_optimization.md)
 
 Historical profiling harnesses and raw reports mentioned in these documents are
 kept under local-only `archive/research/`, not in the GitHub code release. Current
@@ -49,6 +51,8 @@ Optional research: [dated-tree, EDGE and phylogenetic gaps](pipeline/09_edge_pro
 Optional headless enrichment: [scoring/evidence implementation](pipeline/11_scoring_implementation.md)
 and [progress/acceptance gates](pipeline/10_implementation_progress.md).
 Measured cloud sizing: [resource evidence](pipeline/13_resource_evidence.md).
+Completed FAST execution, monitoring and local serving selection:
+[25 October run report](pipeline/14_fast_run_report_2026_10_25.md).
 
 ## Exploratory notebooks
 

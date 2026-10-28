@@ -2,4 +2,4 @@
 name = "ark-coreweave-sandbox-probe"
 version = "0.1.0"
 requires-python = ">=3.13"
-dependencies = ["cwsandbox[wandb]", "duckdb>=1.5.2", "pyarrow>=24.0.0", "h3>=4.4.2", "shapely>=2.0", "h3ronpy>=0.22,<0.23", "psutil>=7.0"]
+dependencies = ["cwsandbox[wandb]", "duckdb>=1.5.2", "pyarrow>=24.0.0", "h3>=4.4.2", "shapely>=2.0", "h3ronpy>=0.22,<0.23", "psutil>=7.0", "rich>=14"]

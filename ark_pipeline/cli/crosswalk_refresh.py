@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -43,7 +44,7 @@ OUTPUTS = ("iucn_goat_crosswalk.parquet", "iucn_goat_crosswalk.csv", "match_summ
            "unresolved_candidates.parquet", "gbif_review_input.json", "AI_REVIEW.md")
 
 
-def verified_inputs(root: Path) -> tuple[dict[str, Path], dict]:
+def verified_inputs(root: Path, goat_provenance: Path | None = None) -> tuple[dict[str, Path], dict]:
     manifest = load_manifest(root)
     paths, records = {}, {}
     for source_id, logical_name, name in INPUTS:
@@ -55,6 +56,15 @@ def verified_inputs(root: Path) -> tuple[dict[str, Path], dict]:
         records[name] = {"sha256": record["sha256"], "bytes": record["bytes"], "release": source.get("release")}
     if len({paths[name].parent for name in paths if name.startswith("ncbi_")}) != 1:
         raise ValueError("registered NCBI taxdump files must share a directory")
+    if goat_provenance is not None:
+        supplement = json.loads(goat_provenance.read_text())
+        if supplement.get('goat_snapshot_sha256') != records['goat_species']['sha256']:
+            raise ValueError('GoaT raw provenance belongs to a different registered snapshot')
+        paths['goat_raw_provenance'] = goat_provenance
+        records['goat_raw_provenance'] = {
+            'sha256': sha256(goat_provenance), 'bytes': goat_provenance.stat().st_size,
+            'release': 'versioned-api-v3-record-supplement',
+        }
     return paths, {
         "schema_version": 1,
         "policy": "existing deterministic taxonomy rules; uncertain matches remain unresolved; no stale API evidence",
@@ -64,12 +74,12 @@ def verified_inputs(root: Path) -> tuple[dict[str, Path], dict]:
     }
 
 
-def reusable(generation: Path, identity: dict) -> bool:
+def reusable(generation: Path, identity: dict, outputs: tuple[str, ...] = OUTPUTS) -> bool:
     try:
         receipt = json.loads((generation / "receipt.json").read_text())
         return (
             receipt["status"] == "passed" and receipt["identity"] == identity
-            and set(receipt["outputs"]) == set(OUTPUTS)
+            and set(receipt["outputs"]) == set(outputs)
             and all((generation / name).stat().st_size == record["bytes"]
                     and sha256(generation / name) == record["sha256"]
                     for name, record in receipt["outputs"].items())
@@ -120,8 +130,61 @@ def publish(output: Path, generation: Path) -> None:
     os.replace(link, output / "current")
 
 
-def refresh(root: Path, output: Path, *, memory_limit: str, threads: int) -> dict:
-    paths, identity = verified_inputs(root)
+def selected_screened(root: Path, output: Path, goat_provenance: Path | None = None) -> dict | None:
+    """Prefer the registered screened product; never fall back if it is stale."""
+    from ark_pipeline.cli.screened_crosswalk import BINDINGS, FILES, SOURCE, counts, validate
+
+    manifest = load_manifest(root)
+    selection = manifest.get('sources', {}).get(SOURCE)
+    if selection is None:
+        return None
+    if goat_provenance is not None:
+        raise ValueError('A screened crosswalk is selected; register a newly screened generation to change its evidence')
+    paths = {name: source_file(root, manifest, SOURCE, name, root / 'unused') for name in FILES}
+    summary = json.loads(paths['match_summary.json'].read_text())
+    validate(paths['iucn_goat_crosswalk.parquet'], summary, manifest)
+    for source_id, names in BINDINGS.items():
+        for name in names:
+            source_file(root, manifest, source_id, name, root / 'unused')
+    identity = {'screening_policy': summary['screening_policy'],
+                'selected_files': {name: sha256(path) for name, path in paths.items()},
+                'registered_sources': summary['registered_sources']}
+    generations = output / 'generations'
+    generations.mkdir(parents=True, exist_ok=True)
+    generation = generations / f'screened-{identity_digest(identity)}'
+    for candidate in sorted(generations.glob(f'{generation.name}*')):
+        if reusable(candidate, identity, FILES):
+            publish(output, candidate)
+            return {'status': 'reused-screened', 'crosswalk': str(candidate / FILES[0]), 'counts': summary['counts']}
+    with tempfile.TemporaryDirectory(prefix='.screened-', dir=generations) as temporary:
+        build = Path(temporary)
+        for name, path in paths.items():
+            shutil.copy2(path, build / name)
+        actual_counts = counts(build / FILES[0])
+        if actual_counts != summary['counts']:
+            raise ValueError('Screened crosswalk counts do not reconcile')
+        latest = load_manifest(root)
+        if latest['sources'].get(SOURCE) != selection:
+            raise ValueError('Screened selection changed during preparation; retry')
+        validate(build / FILES[0], summary, latest)
+        atomic_json(build / 'receipt.json', {
+            'status': 'passed', 'completed_at': iso_now(), 'identity': identity, 'counts': actual_counts,
+            'outputs': {name: {'bytes': (build / name).stat().st_size, 'sha256': sha256(build / name)} for name in FILES},
+        })
+        # A damaged existing generation must not erase the prior selection.
+        if generation.exists():
+            generation = generations / f'{generation.name}-{build.name.removeprefix(".screened-")}'
+        build.rename(generation)
+    publish(output, generation)
+    return {'status': 'selected-screened', 'crosswalk': str(generation / FILES[0]), 'counts': actual_counts}
+
+
+def refresh(root: Path, output: Path, *, memory_limit: str, threads: int,
+            goat_provenance: Path | None = None) -> dict:
+    screened = selected_screened(root, output, goat_provenance)
+    if screened is not None:
+        return screened
+    paths, identity = verified_inputs(root, goat_provenance)
     generations = output / "generations"
     generations.mkdir(parents=True, exist_ok=True)
     digest = identity_digest(identity)
@@ -142,11 +205,13 @@ def refresh(root: Path, output: Path, *, memory_limit: str, threads: int) -> dic
             "--ncbi-taxdump-dir", str(paths["ncbi_names"].parent),
             "--output-dir", str(build), "--memory-limit", memory_limit, "--threads", str(threads),
         ]
+        if goat_provenance is not None:
+            command += ['--goat-provenance-json', str(goat_provenance)]
         subprocess.run(command, cwd=REPOSITORY_ROOT, check=True)
         counts = validate_generation(build, identity, threads=threads)
         # Matcher checksums are taken at the end; confirm the active registration
         # still selects the same source content before publishing the generation.
-        _, final_identity = verified_inputs(root)
+        _, final_identity = verified_inputs(root, goat_provenance)
         if final_identity != identity:
             raise ValueError("registered crosswalk inputs changed during matching; rerun the same command")
         generation = generations / f"{digest}-{build.name.removeprefix('.building-')}"
@@ -174,11 +239,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output-root", type=Path)
     parser.add_argument("--memory-limit", default=os.environ.get("DUCKDB_MEMORY_LIMIT") or default_duckdb_memory_limit())
     parser.add_argument("--threads", type=int, default=os.environ.get("DUCKDB_THREADS") or default_duckdb_threads())
+    parser.add_argument('--goat-provenance-json', type=Path)
     args = parser.parse_args(argv)
     try:
         root = args.root.expanduser().resolve()
         output = (args.output_root or root / "derived/iucn-goat-crosswalk").expanduser().resolve()
-        result = refresh(root, output, memory_limit=args.memory_limit, threads=args.threads)
+        result = refresh(root, output, memory_limit=args.memory_limit, threads=args.threads,
+                         goat_provenance=args.goat_provenance_json)
         print(json.dumps(result, indent=2))
         return 0
     except (OSError, ValueError, duckdb.Error, subprocess.CalledProcessError) as error:
